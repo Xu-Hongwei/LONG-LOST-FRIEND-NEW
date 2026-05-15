@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .schemas import CharacterCard, ContextSlot, MemoryItem
@@ -76,9 +77,17 @@ class ContextComposer:
             content=text,
             role=role,
             priority=priority,
-            token_budget=max(1, len(text) // 2),
+            token_budget=self._estimate_budget(text),
             included=bool(text),
         )
+
+    def _estimate_budget(self, text: str) -> int:
+        if not text:
+            return 1
+        cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+        ascii_words = len(re.findall(r"[A-Za-z0-9_]+", text))
+        other_chars = len(re.sub(r"[\u4e00-\u9fffA-Za-z0-9_\s]", "", text))
+        return max(1, int(cjk_chars * 1.1 + ascii_words * 1.3 + other_chars * 0.5))
 
     def _persona_identity(self, card: CharacterCard) -> str:
         backstory = card.backstory or {}

@@ -74,6 +74,168 @@ class SendMessageRequest(BaseModel):
     message: str
 
 
+NovelPerspective = Literal["third_person", "user_view", "character_view", "dual_view"]
+NovelForm = Literal["daily_short", "campus_romance", "vignette", "chapter_one", "side_story"]
+NovelFidelity = Literal["faithful", "polished", "literary"]
+NovelMaterialSource = Literal["message", "memory", "story", "manual"]
+NovelMaterialCategory = Literal["fact", "foreshadowing", "open_thread", "relationship", "boundary", "inspiration"]
+NovelChapterStatus = Literal["planned", "drafting", "draft", "revised", "locked"]
+
+
+class NovelGenerateRequest(BaseModel):
+    message_limit: int = Field(default=40, ge=4, le=120)
+    perspective: NovelPerspective = "third_person"
+    form: NovelForm = "daily_short"
+    fidelity: NovelFidelity = "polished"
+    atmosphere: str = Field(default="温柔、克制、日常", max_length=80)
+    target_length: int = Field(default=1200, ge=400, le=4000)
+
+
+class NovelGenerateResponse(BaseModel):
+    title: str
+    synopsis: str
+    body: str
+    used_memories: list[str] = Field(default_factory=list)
+    source_message_count: int = 0
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+class NovelMaterial(BaseModel):
+    id: str
+    source_type: NovelMaterialSource
+    source_id: str = ""
+    category: NovelMaterialCategory
+    label: str
+    content: str
+    evidence_level: Literal["explicit", "inferred", "weak"] = "inferred"
+    created_at: str
+
+
+class NovelVersion(BaseModel):
+    id: str
+    chapter_id: str
+    version_type: str
+    title: str
+    body: str
+    summary: str = ""
+    source: str = ""
+    created_at: str
+
+
+class NovelChapter(BaseModel):
+    id: str
+    project_id: str
+    chapter_order: int
+    title: str
+    goal: str = ""
+    summary: str = ""
+    body: str = ""
+    status: NovelChapterStatus = "planned"
+    scene_card: dict[str, Any] = Field(default_factory=dict)
+    source_material_ids: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+    versions: list[NovelVersion] = Field(default_factory=list)
+
+
+class NovelProjectCreateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    genre: str = Field(default="校园日常长篇", max_length=80)
+    tone: str = Field(default="温柔、克制、日常", max_length=120)
+    protagonist: str = Field(default="", max_length=120)
+    worldview: str = Field(default="", max_length=2000)
+    relationship_setup: str = Field(default="", max_length=2000)
+    outline: str = Field(default="", max_length=4000)
+    story_canvas: dict[str, Any] | None = None
+
+
+class NovelProjectUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    genre: str | None = Field(default=None, max_length=80)
+    tone: str | None = Field(default=None, max_length=120)
+    protagonist: str | None = Field(default=None, max_length=120)
+    worldview: str | None = Field(default=None, max_length=2000)
+    relationship_setup: str | None = Field(default=None, max_length=2000)
+    outline: str | None = Field(default=None, max_length=4000)
+    story_bible: dict[str, Any] | None = None
+    story_canvas: dict[str, Any] | None = None
+
+
+class NovelChapterUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    goal: str | None = Field(default=None, max_length=1000)
+    summary: str | None = Field(default=None, max_length=1200)
+    body: str | None = Field(default=None, max_length=20000)
+    status: NovelChapterStatus | None = None
+    scene_card: dict[str, Any] | None = None
+    source_material_ids: list[str] | None = None
+
+
+class NovelChapterGenerateRequest(BaseModel):
+    chapter_id: str | None = None
+    instruction: str = Field(default="生成下一章正文", max_length=1000)
+    target_length: int = Field(default=1800, ge=400, le=6000)
+
+
+class NovelContinuityIssue(BaseModel):
+    severity: Literal["ok", "warning", "error"] = "ok"
+    label: str
+    detail: str
+
+
+class NovelContinuityReport(BaseModel):
+    project_id: str
+    chapter_id: str | None = None
+    issues: list[NovelContinuityIssue] = Field(default_factory=list)
+    summary: str
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+class NovelProjectResponse(BaseModel):
+    id: str
+    session_id: str
+    visitor_id: str
+    character_id: str
+    title: str
+    genre: str
+    tone: str
+    protagonist: str
+    worldview: str
+    relationship_setup: str
+    outline: str
+    story_bible: dict[str, Any] = Field(default_factory=dict)
+    story_canvas: dict[str, Any] = Field(default_factory=dict)
+    status: str = "active"
+    created_at: str
+    updated_at: str
+    materials: list[NovelMaterial] = Field(default_factory=list)
+    chapters: list[NovelChapter] = Field(default_factory=list)
+
+
+StoryKind = Literal["motif", "story_beat", "open_thread", "relationship_texture", "boundary"]
+StoryEvidenceLevel = Literal["explicit", "inferred", "weak"]
+StoryStatus = Literal["active", "seed", "developed", "archived"]
+
+
+class StoryItem(BaseModel):
+    id: str
+    kind: StoryKind
+    label: str
+    content: str
+    evidence: str = ""
+    evidence_level: StoryEvidenceLevel = "inferred"
+    status: StoryStatus = "active"
+    source_message_ids: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class StoryPaneResponse(BaseModel):
+    session_id: str
+    items: list[StoryItem] = Field(default_factory=list)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
 class ContextSlot(BaseModel):
     key: str
     content: str
@@ -113,6 +275,7 @@ class ChatResponse(BaseModel):
     memory_pane: dict[str, Any]
     prompt_slots: list[ContextSlot]
     timings: dict[str, int]
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class MemoryPatchRequest(BaseModel):

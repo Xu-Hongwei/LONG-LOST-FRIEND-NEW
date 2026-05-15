@@ -125,18 +125,123 @@ class Storage:
                     UNIQUE(owner_type, owner_id, provider)
                 );
 
+                CREATE TABLE IF NOT EXISTS story_items (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    evidence TEXT NOT NULL DEFAULT '',
+                    evidence_level TEXT NOT NULL DEFAULT 'inferred',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(session_id, kind, label)
+                );
+
+                CREATE TABLE IF NOT EXISTS novel_projects (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    visitor_id TEXT NOT NULL REFERENCES visitors(id),
+                    character_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    genre TEXT NOT NULL DEFAULT '',
+                    tone TEXT NOT NULL DEFAULT '',
+                    protagonist TEXT NOT NULL DEFAULT '',
+                    worldview TEXT NOT NULL DEFAULT '',
+                    relationship_setup TEXT NOT NULL DEFAULT '',
+                    outline TEXT NOT NULL DEFAULT '',
+                    story_bible_json TEXT NOT NULL DEFAULT '{}',
+                    story_canvas_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS novel_materials (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES novel_projects(id) ON DELETE CASCADE,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL DEFAULT '',
+                    category TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    evidence_level TEXT NOT NULL DEFAULT 'inferred',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(project_id, source_type, source_id, label)
+                );
+
+                CREATE TABLE IF NOT EXISTS novel_chapters (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES novel_projects(id) ON DELETE CASCADE,
+                    chapter_order INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    goal TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    body TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    scene_card_json TEXT NOT NULL DEFAULT '{}',
+                    source_material_ids_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(project_id, chapter_order)
+                );
+
+                CREATE TABLE IF NOT EXISTS novel_versions (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES novel_projects(id) ON DELETE CASCADE,
+                    chapter_id TEXT NOT NULL REFERENCES novel_chapters(id) ON DELETE CASCADE,
+                    version_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
                 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                     content,
                     memory_id UNINDEXED,
                     session_id UNINDEXED,
                     visitor_id UNINDEXED
                 );
+
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                """
+            )
+            conn.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sessions_visitor_character_updated
+                    ON sessions(visitor_id, character_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_messages_session_created
+                    ON messages(session_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_memories_visible
+                    ON memories(visitor_id, memory_scope, character_id, session_id, memory_type, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_embeddings_owner_provider
+                    ON embeddings(owner_type, owner_id, provider);
+                CREATE INDEX IF NOT EXISTS idx_story_items_session_status
+                    ON story_items(session_id, status, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_novel_projects_session_updated
+                    ON novel_projects(session_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_novel_chapters_project_order
+                    ON novel_chapters(project_id, chapter_order);
+                CREATE INDEX IF NOT EXISTS idx_novel_versions_chapter_created
+                    ON novel_versions(chapter_id, created_at);
+                INSERT OR IGNORE INTO schema_migrations (version, name)
+                    VALUES (1, 'initial_indexes');
                 """
             )
             self._ensure_column(conn, "memories", "memory_scope", "TEXT NOT NULL DEFAULT 'session'")
             self._ensure_column(conn, "memories", "importance", "REAL NOT NULL DEFAULT 0.5")
             self._ensure_column(conn, "memories", "normalized_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "sessions", "character_state_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "novel_projects", "story_canvas_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "novel_chapters", "scene_card_json", "TEXT NOT NULL DEFAULT '{}'")
             conn.execute(
                 """
                 UPDATE memories
@@ -246,6 +351,20 @@ class Storage:
             conn.execute("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", (session_id,))
         return message_id
 
+    def get_message(self, message_id: str) -> dict[str, str] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, role, content, created_at FROM messages
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (message_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {"id": row["id"], "role": row["role"], "content": row["content"], "created_at": row["created_at"]}
+
     def recent_messages(self, session_id: str, limit: int = 12) -> list[dict[str, str]]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -288,6 +407,413 @@ class Storage:
             {"id": row["id"], "role": row["role"], "content": row["content"], "created_at": row["created_at"]}
             for row in rows
         ]
+
+    def upsert_story_item(
+        self,
+        session_id: str,
+        kind: str,
+        label: str,
+        content: str,
+        evidence: str = "",
+        evidence_level: str = "inferred",
+        status: str = "active",
+        source_message_ids: list[str] | None = None,
+    ) -> str | None:
+        clean_label = label.strip()[:80]
+        clean_content = content.strip()[:500]
+        if not clean_label or not clean_content:
+            return None
+        story_id = f"story_{uuid.uuid4().hex[:12]}"
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO story_items (
+                    id, session_id, kind, label, content, evidence,
+                    evidence_level, status, source_message_ids_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, kind, label) DO UPDATE SET
+                    content = excluded.content,
+                    evidence = excluded.evidence,
+                    evidence_level = excluded.evidence_level,
+                    status = excluded.status,
+                    source_message_ids_json = excluded.source_message_ids_json,
+                    updated_at = datetime('now')
+                """,
+                (
+                    story_id,
+                    session_id,
+                    kind,
+                    clean_label,
+                    clean_content,
+                    evidence.strip()[:500],
+                    evidence_level,
+                    status,
+                    json.dumps(source_message_ids or [], ensure_ascii=False),
+                ),
+            )
+            row = conn.execute(
+                "SELECT id FROM story_items WHERE session_id = ? AND kind = ? AND label = ?",
+                (session_id, kind, clean_label),
+            ).fetchone()
+        return str(row["id"]) if row else None
+
+    def list_story_items(self, session_id: str, include_archived: bool = False) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            where = "session_id = ?" if include_archived else "session_id = ? AND status != 'archived'"
+            return conn.execute(
+                f"""
+                SELECT * FROM story_items
+                WHERE {where}
+                ORDER BY
+                    CASE kind
+                        WHEN 'story_beat' THEN 0
+                        WHEN 'open_thread' THEN 1
+                        WHEN 'motif' THEN 2
+                        WHEN 'relationship_texture' THEN 3
+                        WHEN 'boundary' THEN 4
+                        ELSE 5
+                    END,
+                    updated_at DESC
+                """,
+                (session_id,),
+            ).fetchall()
+
+    def create_novel_project(
+        self,
+        session_id: str,
+        visitor_id: str,
+        character_id: str,
+        title: str,
+        genre: str,
+        tone: str,
+        protagonist: str,
+        worldview: str,
+        relationship_setup: str,
+        outline: str,
+        story_bible: dict[str, Any],
+        story_canvas: dict[str, Any] | None = None,
+    ) -> str:
+        project_id = f"novel_{uuid.uuid4().hex[:12]}"
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO novel_projects (
+                    id, session_id, visitor_id, character_id, title, genre, tone,
+                    protagonist, worldview, relationship_setup, outline, story_bible_json,
+                    story_canvas_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    session_id,
+                    visitor_id,
+                    character_id,
+                    title.strip()[:120],
+                    genre.strip()[:80],
+                    tone.strip()[:120],
+                    protagonist.strip()[:120],
+                    worldview.strip()[:2000],
+                    relationship_setup.strip()[:2000],
+                    outline.strip()[:4000],
+                    json.dumps(story_bible, ensure_ascii=False),
+                    json.dumps(story_canvas or {}, ensure_ascii=False),
+                ),
+            )
+        return project_id
+
+    def get_novel_project(self, project_id: str) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM novel_projects WHERE id = ?", (project_id,)).fetchone()
+
+    def list_novel_projects(self, session_id: str) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM novel_projects
+                WHERE session_id = ? AND status != 'archived'
+                ORDER BY updated_at DESC
+                """,
+                (session_id,),
+            ).fetchall()
+
+    def update_novel_project(self, project_id: str, updates: dict[str, Any]) -> bool:
+        allowed = {
+            "title": 120,
+            "genre": 80,
+            "tone": 120,
+            "protagonist": 120,
+            "worldview": 2000,
+            "relationship_setup": 2000,
+            "outline": 4000,
+            "status": 40,
+        }
+        fields: list[str] = []
+        values: list[Any] = []
+        for key, limit in allowed.items():
+            if key in updates and updates[key] is not None:
+                fields.append(f"{key} = ?")
+                values.append(str(updates[key]).strip()[:limit])
+        if "story_bible" in updates and updates["story_bible"] is not None:
+            fields.append("story_bible_json = ?")
+            values.append(json.dumps(updates["story_bible"], ensure_ascii=False))
+        if "story_canvas" in updates and updates["story_canvas"] is not None:
+            fields.append("story_canvas_json = ?")
+            values.append(json.dumps(updates["story_canvas"], ensure_ascii=False)[:20000])
+        if not fields:
+            return bool(self.get_novel_project(project_id))
+        fields.append("updated_at = datetime('now')")
+        values.append(project_id)
+        with self.connect() as conn:
+            cur = conn.execute(
+                f"UPDATE novel_projects SET {', '.join(fields)} WHERE id = ?",
+                values,
+            )
+            return cur.rowcount > 0
+
+    def upsert_novel_material(
+        self,
+        project_id: str,
+        source_type: str,
+        source_id: str,
+        category: str,
+        label: str,
+        content: str,
+        evidence_level: str = "inferred",
+    ) -> str | None:
+        clean_label = label.strip()[:100]
+        clean_content = content.strip()[:1000]
+        if not clean_label or not clean_content:
+            return None
+        material_id = f"mat_{uuid.uuid4().hex[:12]}"
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO novel_materials (
+                    id, project_id, source_type, source_id, category,
+                    label, content, evidence_level
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, source_type, source_id, label) DO UPDATE SET
+                    category = excluded.category,
+                    content = excluded.content,
+                    evidence_level = excluded.evidence_level
+                """,
+                (
+                    material_id,
+                    project_id,
+                    source_type,
+                    source_id.strip()[:120],
+                    category,
+                    clean_label,
+                    clean_content,
+                    evidence_level,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT id FROM novel_materials
+                WHERE project_id = ? AND source_type = ? AND source_id = ? AND label = ?
+                """,
+                (project_id, source_type, source_id.strip()[:120], clean_label),
+            ).fetchone()
+        return str(row["id"]) if row else None
+
+    def list_novel_materials(self, project_id: str) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM novel_materials
+                WHERE project_id = ?
+                ORDER BY
+                    CASE category
+                        WHEN 'fact' THEN 0
+                        WHEN 'boundary' THEN 1
+                        WHEN 'relationship' THEN 2
+                        WHEN 'foreshadowing' THEN 3
+                        WHEN 'open_thread' THEN 4
+                        ELSE 5
+                    END,
+                    created_at ASC
+                """,
+                (project_id,),
+            ).fetchall()
+
+    def create_novel_chapter(
+        self,
+        project_id: str,
+        title: str,
+        goal: str = "",
+        summary: str = "",
+        body: str = "",
+        status: str = "planned",
+        scene_card: dict[str, Any] | None = None,
+        source_material_ids: list[str] | None = None,
+    ) -> str:
+        chapter_id = f"chapter_{uuid.uuid4().hex[:12]}"
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT coalesce(max(chapter_order), 0) + 1 AS next_order FROM novel_chapters WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            chapter_order = int(row["next_order"] if row else 1)
+            conn.execute(
+                """
+                INSERT INTO novel_chapters (
+                    id, project_id, chapter_order, title, goal, summary, body,
+                    status, scene_card_json, source_material_ids_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chapter_id,
+                    project_id,
+                    chapter_order,
+                    title.strip()[:120] or f"第 {chapter_order} 章",
+                    goal.strip()[:1000],
+                    summary.strip()[:1200],
+                    body.strip()[:20000],
+                    status,
+                    json.dumps(scene_card or {}, ensure_ascii=False),
+                    json.dumps(source_material_ids or [], ensure_ascii=False),
+                ),
+            )
+            conn.execute("UPDATE novel_projects SET updated_at = datetime('now') WHERE id = ?", (project_id,))
+        if body:
+            self.add_novel_version(project_id, chapter_id, "draft", title, body, summary, "create")
+        return chapter_id
+
+    def get_novel_chapter(self, chapter_id: str) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM novel_chapters WHERE id = ?", (chapter_id,)).fetchone()
+
+    def list_novel_chapters(self, project_id: str) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM novel_chapters
+                WHERE project_id = ?
+                ORDER BY chapter_order ASC
+                """,
+                (project_id,),
+            ).fetchall()
+
+    def update_novel_chapter(self, chapter_id: str, updates: dict[str, Any], version_source: str = "manual") -> bool:
+        existing = self.get_novel_chapter(chapter_id)
+        if not existing:
+            return False
+        allowed = {
+            "title": 120,
+            "goal": 1000,
+            "summary": 1200,
+            "body": 20000,
+            "status": 40,
+        }
+        fields: list[str] = []
+        values: list[Any] = []
+        for key, limit in allowed.items():
+            if key in updates and updates[key] is not None:
+                fields.append(f"{key} = ?")
+                values.append(str(updates[key]).strip()[:limit])
+        if "source_material_ids" in updates and updates["source_material_ids"] is not None:
+            fields.append("source_material_ids_json = ?")
+            values.append(json.dumps(updates["source_material_ids"][:24], ensure_ascii=False))
+        if "scene_card" in updates and updates["scene_card"] is not None:
+            fields.append("scene_card_json = ?")
+            values.append(json.dumps(updates["scene_card"], ensure_ascii=False)[:8000])
+        if not fields:
+            return True
+        fields.append("updated_at = datetime('now')")
+        values.append(chapter_id)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE novel_chapters SET {', '.join(fields)} WHERE id = ?", values)
+            conn.execute("UPDATE novel_projects SET updated_at = datetime('now') WHERE id = ?", (existing["project_id"],))
+        if "body" in updates and updates["body"] is not None and str(updates["body"]).strip():
+            next_title = str(updates.get("title") if updates.get("title") is not None else existing["title"])
+            next_summary = str(updates.get("summary") if updates.get("summary") is not None else existing["summary"])
+            self.add_novel_version(existing["project_id"], chapter_id, "draft", next_title, str(updates["body"]), next_summary, version_source)
+        return True
+
+    def add_novel_version(
+        self,
+        project_id: str,
+        chapter_id: str,
+        version_type: str,
+        title: str,
+        body: str,
+        summary: str = "",
+        source: str = "",
+    ) -> str:
+        next_title = title.strip()[:120]
+        next_body = body.strip()[:20000]
+        next_summary = summary.strip()[:1200]
+        next_source = source.strip()[:120]
+        version_id = f"ver_{uuid.uuid4().hex[:12]}"
+        with self.connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT id FROM novel_versions
+                WHERE chapter_id = ?
+                  AND title = ?
+                  AND body = ?
+                  AND summary = ?
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (chapter_id, next_title, next_body, next_summary),
+            ).fetchone()
+            if existing:
+                return str(existing["id"])
+            conn.execute(
+                """
+                INSERT INTO novel_versions (
+                    id, project_id, chapter_id, version_type, title, body, summary, source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version_id,
+                    project_id,
+                    chapter_id,
+                    version_type,
+                    next_title,
+                    next_body,
+                    next_summary,
+                    next_source,
+                ),
+            )
+        return version_id
+
+    def list_novel_versions(self, chapter_id: str) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM novel_versions
+                WHERE chapter_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                """,
+                (chapter_id,),
+            ).fetchall()
+
+    def get_novel_version(self, version_id: str) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM novel_versions WHERE id = ?", (version_id,)).fetchone()
+
+    def restore_novel_version(self, version_id: str) -> bool:
+        version = self.get_novel_version(version_id)
+        if not version:
+            return False
+        return self.update_novel_chapter(
+            version["chapter_id"],
+            {
+                "title": version["title"],
+                "body": version["body"],
+                "summary": version["summary"],
+                "status": "revised",
+            },
+            "restore",
+        )
 
     def add_memory(
         self,

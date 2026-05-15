@@ -67,6 +67,12 @@ npm run dev
 
 The backend defaults to `http://127.0.0.1:8766`.
 
+Backend tests from the project root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-backend.ps1
+```
+
 Concat the above for a one-shot local dev startup:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start-dev.ps1
 
@@ -134,6 +140,13 @@ The LLM scores both with explicit rubrics. Local code only validates JSON, clamp
 - `persona.live_state` for current pacing and initiative.
 - `persona.relationship_memory` for long-term relationship context.
 
-Per chat turn, the backend now uses one main reply call plus one combined post-turn analysis call. The combined analysis returns `state`, `bond`, and `memories` in a single JSON payload, so state scoring, bond scoring, and memory extraction do not require three separate chat-completion calls.
+Per chat turn, the backend now returns after the main reply call and queues one combined post-turn analysis task. The combined analysis returns `state`, `bond`, and `memories` in a single JSON payload, so state scoring, bond scoring, and memory extraction do not require three separate chat-completion calls or block the user-facing reply.
 
 When a visitor reopens a character, `POST /api/sessions` restores the latest messages for that existing `visitor_id + character_id` session. The fixed character opening line is only used to initialize a truly empty session, so refreshes do not reset the visible chat back to the opening message.
+
+## Novel Studio
+
+The frontend includes a Novel Studio page with two tracks:
+
+- Quick Draft keeps the original short-story flow for a short story, side story, vignette, or first chapter. It uses the selected message range plus the character card, memory pane, live state, and bond profile, and it can fall back to a local sample draft when no remote LLM is configured.
+- Project Mode creates a lightweight long-form novel project from the active session. A project stores its title, genre, tone, worldview, relationship setup, editable outline, Story Bible, material library, chapters, and chapter versions. Chapters can be edited manually, generated or continued through the backend, restored from prior versions, exported as Markdown, and checked with a local continuity guard for internal wording, empty chapters, boundary risk, and seed/open-thread misuse.

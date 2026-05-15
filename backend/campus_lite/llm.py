@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -10,10 +11,16 @@ import httpx
 from .schemas import CharacterCard, MemoryItem, MemoryType
 
 
+logger = logging.getLogger(__name__)
+
+
 class LlmClient:
     def __init__(self) -> None:
         self.provider = self._select_provider()
         self.embedding_provider = self._select_embedding_provider()
+        self.last_chat_error: str | None = None
+        self.last_analysis_error: str | None = None
+        self.last_embedding_error: str | None = None
 
     def configured(self) -> bool:
         return self.provider is not None
@@ -143,7 +150,12 @@ class LlmClient:
             "\n\n共同原则：宁可少写，也不要制造关系进展、记忆或状态证据。不要把任何分数写给主回复模型；分数只服务结构化存储。"
         )
 
-    async def chat_complete(self, messages: list[dict[str, str]]) -> str:
+    async def chat_complete(
+        self,
+        messages: list[dict[str, str]],
+        timeout_ms: int | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
         if not self.provider:
             raise RuntimeError("No remote LLM provider configured")
         body = {
@@ -151,15 +163,18 @@ class LlmClient:
             "temperature": 0.82,
             "messages": messages,
         }
+        if response_format:
+            body["response_format"] = response_format
         headers = {
             "Authorization": f"Bearer {self.provider['api_key']}",
             "Content-Type": "application/json",
         }
-        timeout = self.provider["timeout_ms"] / 1000
+        timeout = (timeout_ms or self.provider["timeout_ms"]) / 1000
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{self.provider['base_url'].rstrip('/')}/chat/completions", headers=headers, json=body)
             response.raise_for_status()
             payload = response.json()
+        self.last_chat_error = None
         return payload["choices"][0]["message"]["content"].strip()
 
     async def extract_memories(self, user_message: str, assistant_reply: str) -> list[dict[str, Any]]:
@@ -173,7 +188,9 @@ class LlmClient:
                 {"role": "user", "content": user},
             ])
             return self._parse_memory_json(text)
-        except Exception:
+        except Exception as exc:
+            self.last_chat_error = type(exc).__name__
+            logger.warning("memory extraction failed: %s", exc)
             return []
 
     async def score_character_state(
@@ -206,7 +223,9 @@ class LlmClient:
                 {"role": "user", "content": user},
             ])
             return self._parse_state_json(text)
-        except Exception:
+        except Exception as exc:
+            self.last_chat_error = type(exc).__name__
+            logger.warning("character state scoring failed: %s", exc)
             return None
 
     async def score_character_bond(
@@ -241,7 +260,9 @@ class LlmClient:
                 {"role": "user", "content": user},
             ])
             return self._parse_bond_json(text)
-        except Exception:
+        except Exception as exc:
+            self.last_chat_error = type(exc).__name__
+            logger.warning("character bond scoring failed: %s", exc)
             return None
 
     async def analyze_turn(
@@ -275,13 +296,20 @@ class LlmClient:
                 {"role": "system", "content": self.turn_analysis_system_prompt()},
                 {"role": "user", "content": user},
             ])
+            self.last_analysis_error = None
             return self._parse_turn_analysis_json(text)
-        except Exception:
+        except Exception as exc:
+            self.last_analysis_error = type(exc).__name__
+            logger.warning("turn analysis failed: %s", exc)
             return {"state": None, "bond": None, "memories": []}
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         clean_texts = [text.strip() for text in texts if text and text.strip()]
-        if not clean_texts or not self.embedding_provider:
+        if not clean_texts:
+            self.last_embedding_error = None
+            return []
+        if not self.embedding_provider:
+            self.last_embedding_error = "not_configured"
             return []
         body = {
             "model": self.embedding_provider["model"],
@@ -300,10 +328,13 @@ class LlmClient:
                     json=body,
                 )
                 response.raise_for_status()
-                payload = response.json()
+            payload = response.json()
             vectors = [item["embedding"] for item in sorted(payload.get("data", []), key=lambda item: item.get("index", 0))]
+            self.last_embedding_error = None
             return [[float(value) for value in vector] for vector in vectors]
-        except Exception:
+        except Exception as exc:
+            self.last_embedding_error = type(exc).__name__
+            logger.warning("embedding failed: %s", exc)
             return []
 
     def mock_reply(self, character: CharacterCard, user_message: str, recalled: list[str]) -> str:

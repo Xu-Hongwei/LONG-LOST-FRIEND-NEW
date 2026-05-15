@@ -74,6 +74,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.tmp-edge-canvas-test/
 cover/
 
 # Data / Runtime

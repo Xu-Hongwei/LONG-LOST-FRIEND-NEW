@@ -138,4 +138,221 @@ export interface ChatResponse {
   memory_pane: MemoryPane;
   prompt_slots: ContextSlot[];
   timings: Record<string, number>;
+  diagnostics?: Record<string, unknown>;
+}
+
+export type NovelPerspective = "third_person" | "user_view" | "character_view" | "dual_view";
+export type NovelForm = "daily_short" | "campus_romance" | "vignette" | "chapter_one" | "side_story";
+export type NovelFidelity = "faithful" | "polished" | "literary";
+
+export interface NovelGenerateRequest {
+  message_limit: number;
+  perspective: NovelPerspective;
+  form: NovelForm;
+  fidelity: NovelFidelity;
+  atmosphere: string;
+  target_length: number;
+}
+
+export interface NovelGenerateResponse {
+  title: string;
+  synopsis: string;
+  body: string;
+  used_memories: string[];
+  source_message_count: number;
+  diagnostics: Record<string, unknown>;
+}
+
+export type NovelMaterialSource = "message" | "memory" | "story" | "manual";
+export type NovelMaterialCategory = "fact" | "foreshadowing" | "open_thread" | "relationship" | "boundary" | "inspiration";
+export type NovelChapterStatus = "planned" | "drafting" | "draft" | "revised" | "locked";
+
+export interface NovelMaterial {
+  id: string;
+  source_type: NovelMaterialSource;
+  source_id: string;
+  category: NovelMaterialCategory;
+  label: string;
+  content: string;
+  evidence_level: StoryEvidenceLevel;
+  created_at: string;
+}
+
+export interface NovelVersion {
+  id: string;
+  chapter_id: string;
+  version_type: string;
+  title: string;
+  body: string;
+  summary: string;
+  source: string;
+  created_at: string;
+}
+
+export interface NovelChapter {
+  id: string;
+  project_id: string;
+  chapter_order: number;
+  title: string;
+  goal: string;
+  summary: string;
+  body: string;
+  status: NovelChapterStatus;
+  scene_card: Record<string, unknown>;
+  source_material_ids: string[];
+  created_at: string;
+  updated_at: string;
+  versions?: NovelVersion[];
+}
+
+export interface StoryCanvasAct {
+  id: string;
+  order: number;
+  title: string;
+  purpose: string;
+  chapter_ids: string[];
+}
+
+export interface StoryCanvasChapter {
+  id: string;
+  act_id: string;
+  chapter_order: number;
+  title: string;
+  goal: string;
+  external_event: string;
+  trigger_event: string;
+  immediate_reaction: string;
+  obstacle_escalation: string;
+  counterpart_reaction: string;
+  character_choice: string;
+  scene_consequence: string;
+  relationship_shift: string;
+  ending_hook: string;
+  target_length: number;
+  status: NovelChapterStatus;
+  emotion_curve: string;
+  conflict_level: number;
+  scene_ids: string[];
+}
+
+export interface StoryCanvasScene {
+  id: string;
+  chapter_id: string;
+  scene_order: number;
+  current_scene: string;
+  pov: string;
+  present_characters: string;
+  surface_event: string;
+  character_desire: string;
+  tension: string;
+  required_facts: string[];
+  forbidden_progress: string[];
+  ending_beat: string;
+  linked_material_ids: string[];
+}
+
+export interface StoryCanvasThread {
+  id: string;
+  kind: string;
+  label: string;
+  setup_chapter_id: string;
+  payoff_chapter_id: string;
+  status: string;
+  notes: string;
+}
+
+export interface StoryCanvas {
+  version: number;
+  mode: string;
+  acts: StoryCanvasAct[];
+  chapters: StoryCanvasChapter[];
+  scenes: StoryCanvasScene[];
+  threads: StoryCanvasThread[];
+  quality_rules?: string[];
+  diagnostics?: Record<string, unknown>;
+}
+
+export interface NovelProject {
+  id: string;
+  session_id: string;
+  visitor_id: string;
+  character_id: string;
+  title: string;
+  genre: string;
+  tone: string;
+  protagonist: string;
+  worldview: string;
+  relationship_setup: string;
+  outline: string;
+  story_bible: Record<string, string[]>;
+  story_canvas: StoryCanvas;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  materials: NovelMaterial[];
+  chapters: NovelChapter[];
+}
+
+export interface NovelProjectCreateRequest {
+  title?: string;
+  genre: string;
+  tone: string;
+  protagonist?: string;
+  worldview?: string;
+  relationship_setup?: string;
+  outline?: string;
+  story_canvas?: StoryCanvas;
+}
+
+export interface NovelProjectUpdateRequest {
+  title?: string;
+  genre?: string;
+  tone?: string;
+  protagonist?: string;
+  worldview?: string;
+  relationship_setup?: string;
+  outline?: string;
+  story_bible?: Record<string, string[]>;
+  story_canvas?: StoryCanvas;
+}
+
+export interface NovelChapterUpdateRequest {
+  title?: string;
+  goal?: string;
+  summary?: string;
+  body?: string;
+  status?: NovelChapterStatus;
+  scene_card?: Record<string, unknown>;
+  source_material_ids?: string[];
+}
+
+export interface NovelContinuityReport {
+  project_id: string;
+  chapter_id?: string | null;
+  issues: { severity: "ok" | "warning" | "error"; label: string; detail: string }[];
+  summary: string;
+  diagnostics: Record<string, unknown>;
+}
+
+export type StoryKind = "motif" | "story_beat" | "open_thread" | "relationship_texture" | "boundary";
+export type StoryEvidenceLevel = "explicit" | "inferred" | "weak";
+export type StoryStatus = "active" | "seed" | "developed" | "archived";
+
+export interface StoryItem {
+  id: string;
+  kind: StoryKind;
+  label: string;
+  content: string;
+  evidence: string;
+  evidence_level: StoryEvidenceLevel;
+  status: StoryStatus;
+  source_message_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoryPane {
+  session_id: string;
+  items: StoryItem[];
+  diagnostics?: Record<string, unknown>;
 }
