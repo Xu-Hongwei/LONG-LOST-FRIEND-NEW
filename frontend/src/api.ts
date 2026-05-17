@@ -92,6 +92,10 @@ export async function listNovelProjects(sessionId: string): Promise<NovelProject
   return request(`/api/sessions/${sessionId}/novel/projects`);
 }
 
+export async function getNovelProject(projectId: string): Promise<NovelProject> {
+  return request(`/api/novel/projects/${projectId}`);
+}
+
 export async function createNovelProject(sessionId: string, payload: NovelProjectCreateRequest): Promise<NovelProject> {
   return request(`/api/sessions/${sessionId}/novel/projects`, {
     method: "POST",
@@ -130,7 +134,7 @@ export async function updateNovelChapter(chapterId: string, payload: NovelChapte
 export async function generateProjectChapter(projectId: string, chapterId: string | null, instruction: string, targetLength: number): Promise<NovelProject> {
   return request(`/api/novel/projects/${projectId}/generate-chapter`, {
     method: "POST",
-    body: JSON.stringify({ chapter_id: chapterId, instruction, target_length: targetLength })
+    body: JSON.stringify({ chapter_id: chapterId, instruction, target_length: targetLength, defer_postprocess: true })
   });
 }
 
@@ -149,6 +153,12 @@ export async function restoreNovelVersion(versionId: string): Promise<NovelProje
   return request(`/api/novel/versions/${versionId}/restore`, {
     method: "POST",
     body: JSON.stringify({})
+  });
+}
+
+export async function deleteNovelVersion(versionId: string): Promise<NovelProject> {
+  return request(`/api/novel/versions/${versionId}`, {
+    method: "DELETE"
   });
 }
 

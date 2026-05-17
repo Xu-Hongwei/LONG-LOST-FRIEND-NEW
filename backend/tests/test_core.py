@@ -600,6 +600,24 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(len(rebuilt.chapters), len(canvas_chapters))
             self.assertEqual(rebuilt.chapters[-1].chapter_order, len(canvas_chapters))
 
+    def test_novel_build_canvas_refuses_after_body_exists(self) -> None:
+        class CanvasFallbackLlm:
+            last_chat_error = None
+
+            def configured(self) -> bool:
+                return False
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            storage.update_novel_chapter(project.chapters[0].id, {"body": "正文已经开始。"}, "manual")
+            with self.assertRaisesRegex(ValueError, "Cannot rebuild initial canvas"):
+                self.run_async(service.build_canvas(CanvasFallbackLlm(), project.id))
+
     def test_novel_build_canvas_uses_remote_when_configured(self) -> None:
         class CanvasLlm:
             last_chat_error = None
@@ -638,7 +656,6 @@ class CampusLiteCoreTest(unittest.TestCase):
                             "target_length": "约1800字",
                             "status": "planned",
                             "emotion_curve": "慌乱 -> 被接住 -> 留下钩子",
-                            "conflict_level": "中等 3",
                             "scene_ids": ["scene_remote"],
                         }
                     ],
@@ -690,8 +707,348 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(rebuilt.story_canvas["diagnostics"]["source"], "remote")
             self.assertEqual(rebuilt.story_canvas["chapters"][0]["title"], "第1章 远程画布")
             self.assertEqual(rebuilt.story_canvas["chapters"][0]["target_length"], 1800)
-            self.assertEqual(rebuilt.story_canvas["chapters"][0]["conflict_level"], 3)
             self.assertEqual(rebuilt.chapters[0].title, "第1章 远程画布")
+
+    def test_novel_generation_rolls_forward_two_future_chapters(self) -> None:
+        class FakeLlm:
+            last_chat_error = None
+            calls = 0
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return json.dumps({"beats": [
+                        {"type": "event", "purpose": "start", "visible_action": "林晚栀抱着书在走廊停下。", "dialogue": ["“这个是你的？”", "“谢谢。”"], "inner_turn": "她记住了对方的名字。"},
+                        {"type": "choice", "purpose": "choice", "visible_action": "她没有立刻离开。", "dialogue": ["“你叫什么？”", "“许砚清。”"], "inner_turn": "她放慢了脚步。"},
+                        {"type": "hook", "purpose": "hook", "visible_action": "便签从书页里露出一角。", "dialogue": ["“明天见。”", "“嗯。”"], "inner_turn": "她把便签收好。"},
+                    ]}, ensure_ascii=False)
+                if self.calls == 2:
+                    return json.dumps({
+                        "title": "第一章",
+                        "summary": "林晚栀在走廊遇见许砚清，并记住了他的名字。",
+                        "body": "林晚栀抱着书走过走廊，风把便签吹出一角。许砚清停在她面前：“这个是你的？”她接过来：“谢谢。”两个人都没有急着走。她低头把便签夹回书里，忽然问：“你叫什么？”他把书脊理正，回答：“许砚清。”铃声从楼下传来，她点点头：“明天见。”走到楼梯口时，她才发现自己已经记住了这个名字。",
+                        "source_material_ids": [],
+                    }, ensure_ascii=False)
+                if self.calls == 3:
+                    return json.dumps({"hard_fail": False, "rewrite_required": False, "checks": {"has_visible_event": True, "has_character_choice": True, "has_dialogue": True, "has_ending_hook": True, "uses_scene_card_terms": False, "has_meta_narration": False, "has_repeated_paragraphs": False, "breaks_confirmed_facts": False, "style_breaks_previous_chapter": False}, "issues": [], "rewrite_brief": ""}, ensure_ascii=False)
+                return json.dumps({
+                    "happened": ["林晚栀和许砚清在走廊正式说话。"],
+                    "relationship_delta": ["从陌生到记住名字。"],
+                    "ending_hook": ["便签留下未完问题。"],
+                    "next_must_continue": ["承接便签。"],
+                    "avoid_repeating": ["不要重复初次遇见。"],
+                    "open_threads": ["便签"],
+                    "global_summary": "林晚栀和许砚清在走廊正式说话。",
+                    "confirmed_facts": ["两人已经互通姓名。"],
+                    "character_states": [],
+                    "relationship_states": ["从陌生到记住名字。"],
+                    "resolved_threads": [],
+                    "chapter_handoffs": [{"chapter_order": 1, "happened": ["互通姓名"]}],
+                    "last_completed_chapter_order": 1,
+                    "version": 1,
+                    "mode": "story_canvas",
+                    "acts": [],
+                    "chapters": [
+                        {"id": "canvas_ch_2", "act_id": "act_1", "chapter_order": 2, "title": "第二章", "goal": "承接便签", "external_event": "便签引出小事件", "trigger_event": "便签露出", "immediate_reaction": "她犹豫", "obstacle_escalation": "同学打断", "counterpart_reaction": "对方帮忙", "character_choice": "她留下", "scene_consequence": "再次说话", "relationship_shift": "更熟一点", "ending_hook": "新的疑问", "target_length": 1000, "status": "planned", "emotion_curve": "克制", "scene_ids": ["scene_2"]},
+                        {"id": "canvas_ch_3", "act_id": "act_1", "chapter_order": 3, "title": "第三章", "goal": "继续承接", "external_event": "共同整理资料", "trigger_event": "资料散落", "immediate_reaction": "她去捡", "obstacle_escalation": "时间紧", "counterpart_reaction": "对方递回", "character_choice": "她开口", "scene_consequence": "留下约定", "relationship_shift": "能协作", "ending_hook": "约定未定", "target_length": 1000, "status": "planned", "emotion_curve": "克制", "scene_ids": ["scene_3"]},
+                    ],
+                    "scenes": [
+                        {"id": "scene_2", "chapter_id": "canvas_ch_2", "scene_order": 1, "current_scene": "走廊", "pov": "林晚栀", "present_characters": "林晚栀、许砚清", "surface_event": "便签引出小事件", "character_desire": "确认", "tension": "同学打断", "required_facts": [], "forbidden_progress": [], "ending_beat": "新的疑问", "linked_material_ids": []},
+                        {"id": "scene_3", "chapter_id": "canvas_ch_3", "scene_order": 1, "current_scene": "教室", "pov": "林晚栀", "present_characters": "林晚栀、许砚清", "surface_event": "整理资料", "character_desire": "自然回应", "tension": "时间紧", "required_facts": [], "forbidden_progress": [], "ending_beat": "约定未定", "linked_material_ids": []},
+                    ],
+                    "threads": [],
+                    "quality_rules": [],
+                    "diagnostics": {"source": "remote", "mode": "rolling_extend"},
+                }, ensure_ascii=False)
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            generated, chapter = self.run_async(
+                service.generate_chapter(FakeLlm(), project.id, project.chapters[0].id, "写第一章。", 1000)
+            )
+            self.assertEqual(chapter.chapter_order, 1)
+            self.assertEqual(generated.novel_state["last_completed_chapter_order"], 1)
+            self.assertEqual(len(generated.story_canvas["chapters"]), 3)
+            self.assertEqual([item["chapter_order"] for item in generated.story_canvas["chapters"]], [1, 2, 3])
+            self.assertEqual([item.chapter_order for item in generated.chapters], [1, 2, 3])
+            self.assertEqual(generated.story_canvas["diagnostics"]["mode"], "rolling_extend")
+
+    def test_novel_generation_roll_anchor_ignores_stale_future_drafts(self) -> None:
+        class FakeLlm:
+            last_chat_error = None
+            calls = 0
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return json.dumps({"beats": [
+                        {"type": "event", "purpose": "start", "visible_action": "林晚栀抱着书停下。", "dialogue": ["“这个是你的？”", "“谢谢。”"], "inner_turn": "她记住名字。"},
+                        {"type": "choice", "purpose": "choice", "visible_action": "她问了名字。", "dialogue": ["“你叫什么？”", "“许砚清。”"], "inner_turn": "她没有离开。"},
+                        {"type": "hook", "purpose": "hook", "visible_action": "便签露出一角。", "dialogue": ["“明天见。”", "“嗯。”"], "inner_turn": "她收好便签。"},
+                    ]}, ensure_ascii=False)
+                if self.calls == 2:
+                    return json.dumps({
+                        "title": "第一章",
+                        "summary": "林晚栀和许砚清在走廊互通姓名。",
+                        "body": "林晚栀抱着书停在走廊里，便签从书页里露出一角。许砚清把它递回来：“这个是你的？”她接过来：“谢谢。”她本来可以立刻走开，却还是问：“你叫什么？”他说：“许砚清。”铃声响起来，她把名字在心里过了一遍，点头说：“明天见。”",
+                        "source_material_ids": [],
+                    }, ensure_ascii=False)
+                if self.calls == 3:
+                    return json.dumps({
+                        "title": "Chapter One",
+                        "summary": "Lin and Xu speak in the corridor.",
+                        "body": "Lin stopped in the corridor with books in her arms. A folded note slipped from the pages, and Xu picked it up before the wind could carry it away. \"Is this yours?\" he asked. \"Thanks,\" she said, taking it back. She could have left at once, but she stayed by the window for another second. \"What is your name?\" Xu answered, \"Xu Yanqing.\" The bell rang downstairs. Lin tucked the note into the book and said, \"See you tomorrow.\"",
+                        "source_material_ids": [],
+                        "hard_fail": False,
+                        "rewrite_required": False,
+                        "checks": {"has_visible_event": True, "has_character_choice": True, "has_dialogue": True, "has_ending_hook": True},
+                        "issues": [],
+                        "rewrite_brief": "",
+                    }, ensure_ascii=False)
+                return "{}"
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            for order in (2, 3, 4):
+                storage.create_novel_chapter(
+                    project.id,
+                    f"Old chapter {order}",
+                    "stale future draft",
+                    "stale summary",
+                    f"stale body {order}",
+                    "draft",
+                    {},
+                    [],
+                    order,
+                )
+            generated, chapter = self.run_async(
+                service.generate_chapter(FakeLlm(), project.id, project.chapters[0].id, "write chapter one", 1000)
+            )
+            self.assertEqual(chapter.chapter_order, 1)
+            self.assertEqual([item["chapter_order"] for item in generated.story_canvas["chapters"]], [1, 2, 3])
+            self.assertEqual(generated.story_canvas["diagnostics"]["extended_from_order"], 1)
+            self.assertNotIn(5, [item["chapter_order"] for item in generated.story_canvas["chapters"]])
+
+    def test_mock_chapter_does_not_update_global_state_or_roll_canvas(self) -> None:
+        class FailingChapterLlm:
+            last_chat_error = None
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                user = messages[-1]["content"]
+                if response_format == {"type": "json_object"}:
+                    return json.dumps({"ok": True})
+                if "Scene Beats" in user or "Scene Card" in user:
+                    raise RuntimeError("chapter_generation_failed")
+                return json.dumps({
+                    "beats": [
+                        {
+                            "type": "event",
+                            "purpose": "start",
+                            "visible_action": "林晚栀抱着书走过走廊。",
+                            "dialogue": ["“我来帮你。”", "“谢谢。”"],
+                            "inner_turn": "她停了一下。",
+                        }
+                    ]
+                }, ensure_ascii=False)
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            generated, chapter = self.run_async(
+                service.generate_chapter(FailingChapterLlm(), project.id, project.chapters[0].id, "write chapter one", 1000)
+            )
+            self.assertEqual(generated.novel_state["last_completed_chapter_order"], 0)
+            self.assertEqual(len(generated.novel_state["chapter_handoffs"]), 0)
+            self.assertEqual([item["chapter_order"] for item in generated.story_canvas["chapters"]], [1, 2, 3, 4])
+            self.assertEqual(chapter.scene_card.get("handoff_source"), "skipped_mock")
+            self.assertTrue(chapter.scene_card.get("chapter_audit", {}).get("global_state_skipped"))
+
+    def test_rebuilding_novel_state_uses_latest_trusted_chapter_version(self) -> None:
+        class OfflineLlm:
+            last_chat_error = None
+
+            def configured(self) -> bool:
+                return False
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter = storage.get_novel_chapter(project.chapters[0].id)
+            assert chapter is not None
+            storage.update_novel_project(project.id, {
+                "novel_state": {
+                    "global_summary": "旧摘要污染",
+                    "confirmed_facts": ["旧事实污染"],
+                    "relationship_states": ["旧关系污染"],
+                    "open_threads": ["旧线索污染"],
+                    "chapter_handoffs": [{"chapter_order": 1, "happened": ["旧交接单污染"]}],
+                    "last_completed_chapter_order": 1,
+                }
+            })
+            old_handoff = {
+                "happened": ["旧事件"],
+                "relationship_delta": ["旧关系"],
+                "ending_hook": ["旧钩子"],
+                "next_must_continue": ["旧承接"],
+                "avoid_repeating": [],
+                "open_threads": ["旧线索"],
+            }
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "第一章",
+                "summary": "旧摘要",
+                "body": "旧正文",
+                "scene_card": {"chapter_handoff": old_handoff, "handoff_source": "remote"},
+            }, "remote")
+            new_handoff = {
+                "happened": ["新事件"],
+                "relationship_delta": ["新关系"],
+                "ending_hook": ["新钩子"],
+                "next_must_continue": ["新承接"],
+                "avoid_repeating": [],
+                "open_threads": ["新线索"],
+            }
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "第一章新版",
+                "summary": "新摘要",
+                "body": "新正文",
+                "scene_card": {"chapter_handoff": new_handoff, "handoff_source": "remote"},
+            }, "remote")
+
+            self.run_async(service._rebuild_novel_state_from_latest_chapters(project.id, OfflineLlm()))
+            rebuilt = service.project_response(project.id).novel_state
+
+            self.assertIn("新摘要", rebuilt["global_summary"])
+            self.assertIn("新事件", rebuilt["confirmed_facts"])
+            self.assertIn("新关系", rebuilt["relationship_states"])
+            self.assertIn("新线索", rebuilt["open_threads"])
+            self.assertNotIn("旧事实污染", rebuilt["confirmed_facts"])
+            self.assertNotIn("旧关系污染", rebuilt["relationship_states"])
+            self.assertNotIn("旧线索污染", rebuilt["open_threads"])
+            self.assertEqual(rebuilt["chapter_handoffs"][0]["happened"], ["新事件"])
+
+    def test_latest_mock_version_blocks_chapter_from_novel_state(self) -> None:
+        class OfflineLlm:
+            last_chat_error = None
+
+            def configured(self) -> bool:
+                return False
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter = storage.get_novel_chapter(project.chapters[0].id)
+            assert chapter is not None
+            handoff = {
+                "happened": ["可信事件"],
+                "relationship_delta": ["可信关系"],
+                "ending_hook": ["可信钩子"],
+                "next_must_continue": ["可信承接"],
+                "avoid_repeating": [],
+                "open_threads": ["可信线索"],
+            }
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "第一章",
+                "summary": "可信摘要",
+                "body": "可信正文",
+                "scene_card": {"chapter_handoff": handoff, "handoff_source": "remote"},
+            }, "remote")
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "第一章本地",
+                "summary": "本地摘要",
+                "body": "本地正文",
+                "scene_card": {"chapter_handoff": {}, "handoff_source": "skipped_mock"},
+            }, "mock")
+
+            self.run_async(service._rebuild_novel_state_from_latest_chapters(project.id, OfflineLlm()))
+            rebuilt = service.project_response(project.id).novel_state
+
+            self.assertEqual(rebuilt["last_completed_chapter_order"], 0)
+            self.assertEqual(rebuilt["chapter_handoffs"], [])
+            self.assertNotIn("可信事件", rebuilt["confirmed_facts"])
+
+    def test_chapter_revision_uses_cutoff_state_and_marks_future_affected(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter1 = storage.get_novel_chapter(project.chapters[0].id)
+            assert chapter1 is not None
+            chapter2_id = storage.create_novel_chapter(project.id, "第二章", "第二章目标", "第二章摘要", "第二章正文", "draft", {
+                "chapter_handoff": {
+                    "happened": ["第二章已发生"],
+                    "relationship_delta": ["第二章关系"],
+                    "ending_hook": ["第二章钩子"],
+                    "next_must_continue": ["第二章承接"],
+                    "avoid_repeating": [],
+                    "open_threads": ["第二章线索"],
+                },
+                "handoff_source": "remote",
+            }, [], 2)
+            chapter3_id = storage.create_novel_chapter(project.id, "第三章", "第三章目标", "第三章摘要", "第三章正文", "draft", {}, [], 3)
+            handoff1 = {
+                "happened": ["第一章已发生"],
+                "relationship_delta": ["第一章关系"],
+                "ending_hook": ["第一章钩子"],
+                "next_must_continue": ["第一章承接"],
+                "avoid_repeating": [],
+                "open_threads": ["第一章线索"],
+            }
+            storage.update_novel_chapter(chapter1["id"], {
+                "summary": "第一章摘要",
+                "body": "第一章正文",
+                "scene_card": {"chapter_handoff": handoff1, "handoff_source": "remote"},
+            }, "remote")
+            project_row = storage.get_novel_project(project.id)
+            assert project_row is not None
+
+            cutoff = service._novel_state_until(project_row, 1)
+            self.assertIn("第一章已发生", cutoff["confirmed_facts"])
+            self.assertNotIn("第二章已发生", cutoff["confirmed_facts"])
+
+            service.mark_chapter_revision_boundary(project.id, 1)
+            affected = storage.get_novel_chapter(chapter2_id)
+            untouched_future = storage.get_novel_chapter(chapter3_id)
+            assert affected is not None and untouched_future is not None
+            self.assertEqual(affected["status"], "affected")
+            self.assertEqual(untouched_future["status"], "affected")
+            rebuilt = service.project_response(project.id).novel_state
+            self.assertEqual(rebuilt["last_completed_chapter_order"], 1)
+            self.assertIn("第一章已发生", rebuilt["confirmed_facts"])
+            self.assertNotIn("第二章已发生", rebuilt["confirmed_facts"])
 
     def test_novel_canvas_parser_derives_scenes_when_remote_omits_them(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -720,7 +1077,6 @@ class CampusLiteCoreTest(unittest.TestCase):
                     "target_length": 1800,
                     "status": "planned",
                     "emotion_curve": "慌乱到安定",
-                    "conflict_level": 3,
                     "scene_ids": ["sc_1"],
                 }],
                 "threads": [],
@@ -734,6 +1090,63 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(canvas["diagnostics"]["scene_source"], "derived_from_chapters")
             self.assertEqual(canvas["scenes"][0]["id"], "sc_1")
             self.assertEqual(canvas["scenes"][0]["surface_event"], "傍晚起风。")
+
+    def test_canvas_parser_normalizes_numeric_scene_tension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            fallback = service._default_story_canvas("测试长篇", "校园日常长篇", "温柔", "林晚栀", {}, [])
+            text = json.dumps({
+                "version": 1,
+                "mode": "story_canvas",
+                "acts": [],
+                "chapters": [{
+                    "id": "ch_1",
+                    "act_id": "act_1",
+                    "chapter_order": 1,
+                    "title": "第一章",
+                    "goal": "推进一次交流",
+                    "external_event": "林晚栀在公告栏前遇见许砚清。",
+                    "trigger_event": "公告栏名单引出误会。",
+                    "immediate_reaction": "她想确认名字。",
+                    "obstacle_escalation": "旁人催促和名单误会让她不能马上问清。",
+                    "counterpart_reaction": "许砚清先替她挡住催促。",
+                    "character_choice": "她留下核对名单。",
+                    "scene_consequence": "两人多说了几句话。",
+                    "relationship_shift": "更熟一点。",
+                    "ending_hook": "名单旁边出现陌生名字。",
+                    "target_length": 1200,
+                    "status": "planned",
+                    "emotion_curve": "克制",
+                    "scene_ids": ["scene_1"],
+                }],
+                "scenes": [{
+                    "id": "scene_1",
+                    "chapter_id": "ch_1",
+                    "scene_order": 1,
+                    "current_scene": "公告栏前",
+                    "pov": "林晚栀",
+                    "present_characters": "林晚栀、许砚清",
+                    "surface_event": "核对名单",
+                    "character_desire": "确认名字",
+                    "tension": "3",
+                    "required_facts": [],
+                    "forbidden_progress": [],
+                    "ending_beat": "陌生名字出现",
+                    "linked_material_ids": [],
+                }],
+                "threads": [],
+                "quality_rules": [],
+                "diagnostics": {"source": "remote"},
+            }, ensure_ascii=False)
+            canvas = service._parse_canvas_response(text, fallback)
+            self.assertNotEqual(canvas["scenes"][0]["tension"], "3")
+            self.assertIn("旁人催促", canvas["scenes"][0]["tension"])
+            self.assertEqual(canvas["diagnostics"]["scene_tension_repaired"], 1)
+            self.assertEqual(
+                canvas["diagnostics"]["scene_tension_repair_reason"],
+                "remote_returned_number_instead_of_obstacle_text",
+            )
 
     def test_novel_canvas_parser_repairs_common_llm_json_issues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -764,7 +1177,6 @@ class CampusLiteCoreTest(unittest.TestCase):
                 target_length: "约1800字",
                 status: "planned",
                 emotion_curve: "慌乱到安定",
-                conflict_level: "中等3",
                 scene_ids: ["sc_1",],
               },],
               scenes: [{
@@ -793,7 +1205,6 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(canvas["chapters"][0]["chapter_order"], 1)
             self.assertEqual(canvas["chapters"][0]["title"], "第1章 风起")
             self.assertEqual(canvas["chapters"][0]["target_length"], 1800)
-            self.assertEqual(canvas["chapters"][0]["conflict_level"], 3)
             self.assertEqual(canvas["scenes"][0]["scene_order"], 1)
 
     def test_novel_versions_dedupe_identical_content(self) -> None:
@@ -820,6 +1231,9 @@ class CampusLiteCoreTest(unittest.TestCase):
             third = storage.add_novel_version(project.id, chapter_id, "draft", "第一章", "另一版正文。", "同一版摘要。", "manual")
             self.assertNotEqual(first, third)
             self.assertEqual(len(storage.list_novel_versions(chapter_id)), 2)
+            self.assertTrue(storage.delete_novel_version(first))
+            self.assertEqual([row["id"] for row in storage.list_novel_versions(chapter_id)], [third])
+            self.assertFalse(storage.delete_novel_version(first))
 
     def test_novel_chapter_generation_versions_and_restore(self) -> None:
         class FakeLlm:
@@ -871,6 +1285,10 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertIn("ending_beat", chapter.scene_card)
             self.assertTrue(chapter.scene_card["surface_event"])
             self.assertTrue(chapter.scene_card["ending_beat"])
+            self.assertEqual(chapter.scene_card.get("handoff_source"), "skipped_mock")
+            self.assertEqual(generated.novel_state.get("last_completed_chapter_order", 0), 0)
+            self.assertTrue(generated.novel_state.get("global_summary"))
+            self.assertFalse(generated.novel_state.get("chapter_handoffs"))
             versions = storage.list_novel_versions(chapter.id)
             self.assertGreaterEqual(len(versions), 1)
             storage.update_novel_chapter(chapter.id, {"body": "手动改写版本。", "summary": "手动摘要。"}, "manual")
@@ -974,6 +1392,27 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertNotIn("user_preference", chapter.body)
             self.assertNotIn("这一章", chapter.body)
             self.assertIn("雨天图书馆", chapter.body)
+
+    def test_novel_local_quality_allows_story_material_word(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            body = (
+                "林晚栀把社团材料抱在怀里，纸页边缘被风吹得轻轻响。"
+                "许砚清从走廊另一端走来，停在她面前：“要不要我帮你拿一点？”"
+                "她摇头，又很快把最上面那本递过去：“那你拿这本，别弄乱顺序。”"
+                "两个人并肩往教室走，楼下的铃声催得很急，她却第一次没有把脚步放得太快。"
+                "到门口时，许砚清把材料还给她，指尖在封皮上停了一下：“明天还要继续吗？”"
+                "林晚栀低头看着那行被压弯的字，点了点头。"
+            )
+            parsed = service._parse_chapter_response(json.dumps({
+                "title": "第二章",
+                "summary": "林晚栀和许砚清整理社团材料。",
+                "body": body,
+                "source_material_ids": [],
+            }, ensure_ascii=False), 800)
+            check = service._chapter_local_check(parsed["body"], 800)
+            self.assertEqual(check["blockers"], [])
 
     def test_novel_continuity_flags_internal_terms_and_seed_risk(self) -> None:
         card = CharacterStore().get("lin_wanzhi")

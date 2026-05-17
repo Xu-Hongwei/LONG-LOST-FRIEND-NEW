@@ -367,7 +367,8 @@ def create_app() -> FastAPI:
         try:
             return await novel.build_canvas(llm, project_id)
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            status_code = 404 if "not found" in str(exc).lower() else 400
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
     @app.post("/api/novel/projects/{project_id}/chapters", response_model=NovelProjectResponse)
     def create_novel_chapter(project_id: str, payload: NovelChapterUpdateRequest) -> NovelProjectResponse:
@@ -394,10 +395,12 @@ def create_app() -> FastAPI:
         updated = storage.update_novel_chapter(chapter_id, payload.model_dump(exclude_unset=True), "manual")
         if not updated:
             raise HTTPException(status_code=404, detail="Novel chapter not found")
+        if payload.body is not None or payload.summary is not None or payload.scene_card is not None:
+            novel.mark_chapter_revision_boundary(chapter["project_id"], int(chapter["chapter_order"]))
         return novel.project_response(chapter["project_id"])
 
     @app.post("/api/novel/projects/{project_id}/generate-chapter", response_model=NovelProjectResponse)
-    async def generate_novel_chapter(project_id: str, payload: NovelChapterGenerateRequest) -> NovelProjectResponse:
+    async def generate_novel_chapter(project_id: str, payload: NovelChapterGenerateRequest, background_tasks: BackgroundTasks) -> NovelProjectResponse:
         try:
             project, _chapter = await novel.generate_chapter(
                 llm,
@@ -405,7 +408,10 @@ def create_app() -> FastAPI:
                 payload.chapter_id,
                 payload.instruction,
                 payload.target_length,
+                payload.defer_postprocess,
             )
+            if payload.defer_postprocess:
+                background_tasks.add_task(novel.finalize_chapter_postprocess, llm, project_id, _chapter.id)
             return project
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -443,6 +449,19 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Novel version not found")
         restored = storage.restore_novel_version(version_id)
         if not restored:
+            raise HTTPException(status_code=404, detail="Novel version not found")
+        chapter = storage.get_novel_chapter(version["chapter_id"])
+        if chapter:
+            novel.mark_chapter_revision_boundary(version["project_id"], int(chapter["chapter_order"]))
+        return novel.project_response(version["project_id"])
+
+    @app.delete("/api/novel/versions/{version_id}", response_model=NovelProjectResponse)
+    def delete_novel_version(version_id: str) -> NovelProjectResponse:
+        version = storage.get_novel_version(version_id)
+        if not version:
+            raise HTTPException(status_code=404, detail="Novel version not found")
+        deleted = storage.delete_novel_version(version_id)
+        if not deleted:
             raise HTTPException(status_code=404, detail="Novel version not found")
         return novel.project_response(version["project_id"])
 

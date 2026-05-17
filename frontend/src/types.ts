@@ -165,7 +165,7 @@ export interface NovelGenerateResponse {
 
 export type NovelMaterialSource = "message" | "memory" | "story" | "manual";
 export type NovelMaterialCategory = "fact" | "foreshadowing" | "open_thread" | "relationship" | "boundary" | "inspiration";
-export type NovelChapterStatus = "planned" | "drafting" | "draft" | "revised" | "locked";
+export type NovelChapterStatus = "planned" | "drafting" | "draft" | "revised" | "locked" | "affected";
 
 export interface NovelMaterial {
   id: string;
@@ -231,7 +231,6 @@ export interface StoryCanvasChapter {
   target_length: number;
   status: NovelChapterStatus;
   emotion_curve: string;
-  conflict_level: number;
   scene_ids: string[];
 }
 
@@ -286,6 +285,7 @@ export interface NovelProject {
   outline: string;
   story_bible: Record<string, string[]>;
   story_canvas: StoryCanvas;
+  novel_state: Record<string, unknown>;
   status: string;
   created_at: string;
   updated_at: string;

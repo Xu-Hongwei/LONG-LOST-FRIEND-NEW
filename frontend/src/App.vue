@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, ref, nextTick } from "vue";
 import html2canvas from "html2canvas";
 import {
@@ -8,9 +8,11 @@ import {
   createNovelProject,
   createSession,
   deleteMemoryItem,
+  deleteNovelVersion,
   exportSession,
   generateNovel,
   generateProjectChapter,
+  getNovelProject,
   getStoryPane,
   listCharacters,
   listNovelProjects,
@@ -60,7 +62,8 @@ const STORY_AUTO_REFRESH_USER_INTERVAL = 6;
 type PageKey = "chat" | "love-test" | "novel";
 type NovelStudioMode = "select" | "quick" | "project";
 type NovelWorkflowMode = Exclude<NovelStudioMode, "select">;
-type NovelProgressStage = "idle" | "collecting" | "composing" | "generating" | "checking" | "done" | "failed";
+type NovelProgressStage = "idle" | "collecting" | "state" | "beats" | "drafting" | "local_check" | "reviewing" | "rewriting" | "fallback" | "handoff" | "replan" | "done" | "failed";
+type NovelPipelineStep = { id: NovelProgressStage; label: string; detail: string };
 type StoryCanvasView = "flow" | "chapters" | "scenes" | "threads";
 type CanvasBuildStage = "idle" | "materials" | "structure" | "chapters" | "scenes" | "threads" | "done" | "failed";
 type StoryRefreshOptions = { silent?: boolean };
@@ -110,6 +113,8 @@ const activeNovelWorkflowMode = ref<NovelWorkflowMode | null>(null);
 const novelProgressStage = ref<NovelProgressStage>("idle");
 const novelProgressPercent = ref(0);
 const novelProgressVisible = ref(false);
+const novelProgressWaitingSeconds = ref(0);
+const novelProgressDetail = ref("");
 const lastAutoStoryRefreshUserCount = ref(0);
 const novelProjects = ref<NovelProject[]>([]);
 const activeNovelProjectId = ref("");
@@ -146,16 +151,25 @@ const chapterVersions = ref<NovelVersion[]>([]);
 const novelFocusMode = ref(false);
 const novelEditorFont = ref<"serif" | "sans">("serif");
 let novelProgressTimers: number[] = [];
+let novelProgressTicker: number | null = null;
+let novelGenerationRunId = 0;
 let canvasBuildTimers: number[] = [];
 let canvasBuildTicker: number | null = null;
 
-const novelPipelineSteps: { id: NovelProgressStage; label: string; detail: string }[] = [
-  { id: "collecting", label: "取材", detail: "读取会话和记忆" },
-  { id: "composing", label: "组装", detail: "整理角色与关系" },
-  { id: "generating", label: "生成", detail: "写作正文" },
-  { id: "checking", label: "校验", detail: "检查结构和依据" },
-  { id: "done", label: "完成", detail: "可预览或导出" }
+const novelDraftSteps: NovelPipelineStep[] = [
+  { id: "collecting", label: "读取", detail: "读取章节、画布、素材和上一章尾段" },
+  { id: "state", label: "本地状态", detail: "本地重建截至上一章的 Novel State" },
+  { id: "beats", label: "远程场景", detail: "远程拆出 Scene Beats 和可见动作链" },
+  { id: "drafting", label: "远程正文/本地正文", detail: "远程生成当前章；远程失败时返回本地正文草稿" }
 ];
+const novelReviewSteps: NovelPipelineStep[] = [
+  { id: "local_check", label: "本地检查", detail: "只拦截内部字段、ID、空正文和重复段落" },
+  { id: "reviewing", label: "远程审稿", detail: "用 checklist 判断事件、对白、选择和钩子" },
+  { id: "rewriting", label: "远程重写/通过", detail: "需要时远程重写一次，否则直接通过" },
+  { id: "handoff", label: "后台交接", detail: "正文已返回，后台生成交接单并更新全局状态" },
+  { id: "replan", label: "后台滚动", detail: "后台重规划后续两章画布和场景卡" }
+];
+const novelPipelineSteps = [...novelDraftSteps, ...novelReviewSteps];
 
 const canvasBuildSteps: { id: Exclude<CanvasBuildStage, "idle" | "done" | "failed">; label: string; detail: string }[] = [
   { id: "materials", label: "取材", detail: "读取会话片段、记忆和剧情标签" },
@@ -169,6 +183,7 @@ const novelChapterStatusOptions: { value: NovelChapterStatus; label: string }[] 
   { value: "planned", label: "计划中" },
   { value: "draft", label: "草稿" },
   { value: "revised", label: "已修订" },
+  { value: "affected", label: "受影响" },
   { value: "locked", label: "已锁定" }
 ];
 
@@ -177,6 +192,7 @@ const novelChapterStatusLabels: Record<NovelChapterStatus, string> = {
   drafting: "生成中",
   draft: "草稿",
   revised: "已修订",
+  affected: "受影响",
   locked: "已锁定"
 };
 
@@ -359,16 +375,37 @@ const storyStatusLabels: Record<string, string> = {
   archived: "归档"
 };
 const activeNovelStepIndex = computed(() => {
-  if (novelProgressStage.value === "failed") return 2;
+  if (novelProgressStage.value === "done") return novelPipelineSteps.length;
+  if (novelProgressStage.value === "fallback") {
+    return Math.max(0, novelPipelineSteps.findIndex((step) => step.id === "drafting"));
+  }
+  if (novelProgressStage.value === "failed") {
+    return Math.max(0, novelPipelineSteps.findIndex((step) => step.id === "drafting"));
+  }
   return novelPipelineSteps.findIndex((step) => step.id === novelProgressStage.value);
 });
+function novelStepClass(step: NovelPipelineStep) {
+  const index = novelPipelineSteps.findIndex((item) => item.id === step.id);
+  const activeIndex = activeNovelStepIndex.value;
+  return {
+    active: step.id === novelProgressStage.value || (novelProgressStage.value === "fallback" && step.id === "drafting"),
+    done: novelProgressStage.value === "done" || (index >= 0 && index < activeIndex),
+    failed: novelProgressStage.value === "failed" && index === activeIndex
+  };
+}
 const activeCanvasBuildStepIndex = computed(() => {
   if (canvasBuildStage.value === "done") return canvasBuildSteps.length;
   if (canvasBuildStage.value === "failed") return Math.max(0, canvasBuildSteps.length - 1);
   return canvasBuildSteps.findIndex((step) => step.id === canvasBuildStage.value);
 });
+const writtenNovelChapterCount = computed(() =>
+  activeNovelProject.value?.chapters.filter((chapter) => chapter.body.trim()).length || 0
+);
+const isInitialCanvasRebuildLocked = computed(() =>
+  storyCanvasDraft.value.chapters.length > 0 && writtenNovelChapterCount.value > 0
+);
 const canvasBuildActionLabel = computed(() =>
-  storyCanvasDraft.value.chapters.length ? "重新生成画布" : "生成画布"
+  storyCanvasDraft.value.chapters.length ? "重建初版画布" : "生成初版画布"
 );
 const canvasFlowMetrics = computed(() => ({
   acts: storyCanvasDraft.value.acts.length,
@@ -387,7 +424,8 @@ const canvasBuildSummary = computed(() => {
   if (canvasBuildStage.value === "failed") return "画布生成失败，当前编辑内容已保留。";
   if (canvasBuildStage.value === "done") return `画布已生成 ${canvasBuildRunCount.value} 次${canvasBuildLastLabel.value ? ` · ${canvasBuildLastLabel.value}` : ""}`;
   if (canvasBuildStage.value !== "idle") return `${canvasBuildSteps[activeCanvasBuildStepIndex.value]?.detail || "正在生成画布"} · 已等待 ${canvasBuildWaitingSeconds.value}s`;
-  if (storyCanvasDraft.value.chapters.length) return "当前画布可继续编辑，也可以重新生成一版。";
+  if (isInitialCanvasRebuildLocked.value) return `已有 ${writtenNovelChapterCount.value} 章正文，初版画布已锁定；继续写作会自动滚动重规划后续两章。`;
+  if (storyCanvasDraft.value.chapters.length) return "画布会随章节生成自动滚动更新后续两章；这里可手动微调或大改重建。";
   return "还没有画布，先从素材生成章节、场景和线索。";
 });
 const isCanvasBuilding = computed(() => !["idle", "done", "failed"].includes(canvasBuildStage.value));
@@ -400,7 +438,7 @@ const canvasBuildProgressLabel = computed(() => {
   return "等待生成";
 });
 const isNovelGenerating = computed(() =>
-  !["idle", "done", "failed"].includes(novelProgressStage.value)
+  !["idle", "done", "failed", "fallback"].includes(novelProgressStage.value)
 );
 const showActiveNovelProgress = computed(() =>
   activeNovelWorkflowMode.value === novelStudioMode.value
@@ -408,7 +446,37 @@ const showActiveNovelProgress = computed(() =>
 );
 const novelProgressLabel = computed(() => {
   if (novelProgressStage.value === "failed") return "生成失败";
-  return novelPipelineSteps[activeNovelStepIndex.value]?.detail || "等待开始";
+  if (novelProgressStage.value === "fallback") return "远程正文未返回，已保存本地正文草稿";
+  if (novelProgressStage.value === "done") return "正文、状态和后续画布已更新";
+  const detail = novelProgressDetail.value || novelPipelineSteps[activeNovelStepIndex.value]?.detail || "等待开始";
+  if (isNovelGenerating.value && novelProgressWaitingSeconds.value >= 8) {
+    return `${detail} · 已等待 ${novelProgressWaitingSeconds.value}s`;
+  }
+  return detail;
+});
+const novelStateSummary = computed(() => {
+  const value = activeNovelProject.value?.novel_state?.global_summary;
+  return typeof value === "string" && value.trim() ? value.trim() : "还没有长期摘要。生成章节后会自动更新。";
+});
+const novelStateOpenThreads = computed(() => {
+  const value = activeNovelProject.value?.novel_state?.open_threads;
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean).slice(0, 5) : [];
+});
+const novelStateLastHandoff = computed(() => {
+  const handoffs = activeNovelProject.value?.novel_state?.chapter_handoffs;
+  if (!Array.isArray(handoffs) || !handoffs.length) return null;
+  const item = handoffs[handoffs.length - 1];
+  return item && typeof item === "object" ? item as Record<string, unknown> : null;
+});
+const novelStateLastHandoffText = computed(() => {
+  const handoff = novelStateLastHandoff.value;
+  if (!handoff) return "还没有上一章交接单。";
+  const parts = [
+    ...(Array.isArray(handoff.happened) ? handoff.happened.map((item) => `已发生：${item}`) : []),
+    ...(Array.isArray(handoff.next_must_continue) ? handoff.next_must_continue.map((item) => `下章承接：${item}`) : []),
+    ...(Array.isArray(handoff.ending_hook) ? handoff.ending_hook.map((item) => `钩子：${item}`) : [])
+  ];
+  return parts.map((item) => String(item)).filter(Boolean).slice(0, 4).join("；") || "交接单为空。";
 });
 const activeNovelProject = computed(() =>
   novelProjects.value.find((project) => project.id === activeNovelProjectId.value) || null
@@ -756,7 +824,6 @@ function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
         target_length: Number(chapter.target_length || 1800),
         status: (chapter.status || "planned") as NovelChapterStatus,
         emotion_curve: String(chapter.emotion_curve || ""),
-        conflict_level: Number(chapter.conflict_level || 2),
         scene_ids: stringArray(chapter.scene_ids)
       };
     }),
@@ -795,6 +862,10 @@ function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
   };
 }
 
+function syncStoryCanvasDraft(project: NovelProject | null) {
+  storyCanvasDraft.value = normalizeStoryCanvas(project?.story_canvas);
+}
+
 function syncProjectDraft(project: NovelProject | null) {
   projectDraft.value = {
     title: project?.title || "",
@@ -805,7 +876,7 @@ function syncProjectDraft(project: NovelProject | null) {
     relationship_setup: project?.relationship_setup || "",
     outline: project?.outline || ""
   };
-  storyCanvasDraft.value = normalizeStoryCanvas(project?.story_canvas);
+  syncStoryCanvasDraft(project);
 }
 
 function normalizeSceneCardDraft(sceneCard: Record<string, unknown> | null | undefined): ChapterSceneCardDraft {
@@ -819,7 +890,9 @@ function normalizeSceneCardDraft(sceneCard: Record<string, unknown> | null | und
   return draft;
 }
 
-function activeSceneToChapterDraft() {
+async function activeSceneToChapterDraft() {
+  if (!activeNovelProject.value) return;
+  error.value = "";
   const scene = activeCanvasScenes.value[0];
   const canvasChapter = activeCanvasChapter.value;
   if (!scene || !canvasChapter) return;
@@ -827,6 +900,14 @@ function activeSceneToChapterDraft() {
   chapterDraft.value.goal = canvasChapter.goal || chapterDraft.value.goal;
   chapterDraft.value.scene_card = normalizeSceneCardDraft(scene as unknown as Record<string, unknown>);
   projectChapterTargetLength.value = canvasChapter.target_length || projectChapterTargetLength.value;
+  getNovelProject(activeNovelProject.value.id)
+    .then((latestProject) => {
+      replaceNovelProject(latestProject);
+      syncStoryCanvasDraft(latestProject);
+    })
+    .catch((err) => {
+      error.value = `已应用当前画布；刷新最新画布失败：${readableError(err)}`;
+    });
 }
 
 function updateSceneArray(scene: StoryCanvasScene, key: "required_facts" | "forbidden_progress" | "linked_material_ids", event: Event) {
@@ -996,6 +1077,10 @@ async function saveNovelProject() {
 
 async function rebuildStoryCanvas() {
   if (!activeNovelProject.value || novelProjectBusy.value) return;
+  if (isInitialCanvasRebuildLocked.value) {
+    error.value = "已有正文后不能重建初版画布。请通过生成/续写当前章来滚动更新后续两章画布。";
+    return;
+  }
   novelProjectBusy.value = true;
   error.value = "";
   beginCanvasBuildFlow();
@@ -1074,19 +1159,27 @@ async function saveNovelChapter() {
 
 async function generateActiveChapter() {
   if (!activeNovelProject.value || novelProjectBusy.value) return;
+  const runId = ++novelGenerationRunId;
   novelStudioMode.value = "project";
   novelProjectBusy.value = true;
   error.value = "";
   beginNovelProgress("project");
   try {
+    const generatingChapterId = activeNovelChapter.value?.id || "";
     const savedProject = await updateNovelProject(activeNovelProject.value.id, {
       ...projectDraft.value,
       story_canvas: storyCanvasDraft.value
     });
+    if (runId !== novelGenerationRunId) return;
     replaceNovelProject(savedProject);
     if (activeNovelChapter.value) {
       const syncedProject = await updateNovelChapter(activeNovelChapter.value.id, chapterDraft.value);
+      if (runId !== novelGenerationRunId) return;
       replaceNovelProject(syncedProject);
+    }
+    const liveChapterId = activeNovelChapter.value?.id || generatingChapterId;
+    if (liveChapterId) {
+      void pollLiveNovelProgress(runId, activeNovelProject.value.id, liveChapterId);
     }
     const project = await generateProjectChapter(
       activeNovelProject.value.id,
@@ -1094,20 +1187,35 @@ async function generateActiveChapter() {
       chapterInstruction.value,
       projectChapterTargetLength.value
     );
+    if (runId !== novelGenerationRunId) return;
     replaceNovelProject(project);
+    syncProjectDraft(project);
     if (!activeNovelChapterId.value) {
       activeNovelChapterId.value = project.chapters[project.chapters.length - 1]?.id || "";
     }
     syncChapterDraft(activeNovelChapter.value);
     await loadChapterVersions();
-    clearNovelProgressTimers();
-    setNovelProgress("done", 100);
+    const generatedChapter = project.chapters.find((chapter) => chapter.id === (generatingChapterId || activeNovelChapterId.value)) || activeNovelChapter.value;
+    applyChapterGenerationProgress(generatedChapter);
+    if (chapterUsedLocalFallback(generatedChapter)) {
+      clearNovelProgressTimers();
+      setNovelProgress("fallback", 100);
+    } else if (chapterHasBackgroundPostprocess(generatedChapter)) {
+      setNovelProgress("handoff", 96);
+      pollChapterPostprocess(project.id, generatedChapter?.id || activeNovelChapterId.value);
+    } else {
+      clearNovelProgressTimers();
+      setNovelProgress("done", 100);
+    }
   } catch (err) {
+    if (runId !== novelGenerationRunId) return;
     error.value = readableError(err);
     clearNovelProgressTimers();
     setNovelProgress("failed", 100);
   } finally {
-    novelProjectBusy.value = false;
+    if (runId === novelGenerationRunId) {
+      novelProjectBusy.value = false;
+    }
   }
 }
 
@@ -1136,6 +1244,41 @@ async function loadChapterVersions() {
   }
 }
 
+async function pollChapterPostprocess(projectId: string, chapterId: string) {
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 5000));
+    if (!activeNovelProject.value || activeNovelProject.value.id !== projectId) return;
+    try {
+      const project = await getNovelProject(projectId);
+      replaceNovelProject(project);
+      syncProjectDraft(project);
+      const chapter = project.chapters.find((item) => item.id === chapterId);
+      applyChapterGenerationProgress(chapter);
+      const status = chapterPostprocessStatus(chapter);
+      if (status === "handoff_done") {
+        setNovelProgress("replan", Math.max(novelProgressPercent.value, 96), novelProgressDetail.value || "后台滚动重规划后续两章画布和场景卡");
+      }
+      if (status === "done") {
+        clearNovelProgressTimers();
+        setNovelProgress("done", 100, "正文、状态和后续画布已更新");
+        syncChapterDraft(activeNovelChapter.value);
+        await loadChapterVersions();
+        return;
+      }
+      if (status === "failed") {
+        clearNovelProgressTimers();
+        setNovelProgress("failed", 100, novelProgressDetail.value);
+        error.value = "正文已返回，但后台交接或滚动画布失败。可以稍后重新生成或刷新项目。";
+        return;
+      }
+    } catch (err) {
+      error.value = `正文已返回；后台状态刷新失败：${readableError(err)}`;
+      return;
+    }
+  }
+  error.value = "正文已返回；后台交接仍在运行，可以继续编辑或稍后刷新查看 Novel State。";
+}
+
 async function restoreVersion(versionId: string) {
   if (novelProjectBusy.value) return;
   novelProjectBusy.value = true;
@@ -1144,6 +1287,22 @@ async function restoreVersion(versionId: string) {
     const project = await restoreNovelVersion(versionId);
     replaceNovelProject(project);
     syncChapterDraft(activeNovelChapter.value);
+    await loadChapterVersions();
+  } catch (err) {
+    error.value = readableError(err);
+  } finally {
+    novelProjectBusy.value = false;
+  }
+}
+
+async function deleteVersion(versionId: string) {
+  if (novelProjectBusy.value) return;
+  if (!window.confirm("删除这个版本记录？当前章节正文不会被删除。")) return;
+  novelProjectBusy.value = true;
+  error.value = "";
+  try {
+    const project = await deleteNovelVersion(versionId);
+    replaceNovelProject(project);
     await loadChapterVersions();
   } catch (err) {
     error.value = readableError(err);
@@ -1230,21 +1389,96 @@ function clearNovelProgressTimers() {
     window.clearTimeout(timer);
   }
   novelProgressTimers = [];
+  if (novelProgressTicker !== null) {
+    window.clearInterval(novelProgressTicker);
+    novelProgressTicker = null;
+  }
 }
 
-function setNovelProgress(stage: NovelProgressStage, percent: number) {
+function setNovelProgress(stage: NovelProgressStage, percent: number, detail = "") {
   novelProgressStage.value = stage;
   novelProgressPercent.value = percent;
+  novelProgressDetail.value = detail;
+}
+
+function asNovelProgressStage(value: unknown): NovelProgressStage | null {
+  const stage = String(value || "");
+  return novelPipelineSteps.some((step) => step.id === stage) || ["idle", "fallback", "done", "failed"].includes(stage)
+    ? stage as NovelProgressStage
+    : null;
+}
+
+function applyChapterGenerationProgress(chapter: NovelChapter | null | undefined) {
+  const progress = chapter?.scene_card?.generation_progress;
+  if (!progress || typeof progress !== "object") return false;
+  const raw = progress as Record<string, unknown>;
+  const stage = asNovelProgressStage(raw.stage);
+  if (!stage) return false;
+  const percent = Number(raw.percent);
+  const detail = typeof raw.detail === "string" ? raw.detail : "";
+  setNovelProgress(stage, Number.isFinite(percent) ? Math.max(0, Math.min(100, Math.round(percent))) : novelProgressPercent.value, detail);
+  return true;
+}
+
+async function pollLiveNovelProgress(runId: number, projectId: string, chapterId: string) {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    if (runId !== novelGenerationRunId) return;
+    if (["done", "fallback", "failed"].includes(novelProgressStage.value)) return;
+    try {
+      const project = await getNovelProject(projectId);
+      if (runId !== novelGenerationRunId) return;
+      replaceNovelProject(project);
+      const chapter = project.chapters.find((item) => item.id === chapterId);
+      applyChapterGenerationProgress(chapter);
+    } catch {
+      return;
+    }
+  }
+}
+
+function chapterUsedLocalFallback(chapter: NovelChapter | null | undefined) {
+  const audit = chapter?.scene_card?.chapter_audit;
+  return Boolean(
+    audit
+    && typeof audit === "object"
+    && "global_state_skipped" in audit
+    && (audit as Record<string, unknown>).global_state_skipped
+  );
+}
+
+function chapterPostprocessStatus(chapter: NovelChapter | null | undefined) {
+  const postprocess = chapter?.scene_card?.postprocess;
+  if (!postprocess || typeof postprocess !== "object") return "";
+  return String((postprocess as Record<string, unknown>).status || "");
+}
+
+function chapterHasBackgroundPostprocess(chapter: NovelChapter | null | undefined) {
+  return ["pending", "running", "handoff_done"].includes(chapterPostprocessStatus(chapter));
 }
 
 function beginNovelProgress(mode: NovelWorkflowMode) {
   clearNovelProgressTimers();
   activeNovelWorkflowMode.value = mode;
   novelProgressVisible.value = true;
-  setNovelProgress("collecting", 12);
-  novelProgressTimers.push(window.setTimeout(() => setNovelProgress("composing", 32), 180));
-  novelProgressTimers.push(window.setTimeout(() => setNovelProgress("generating", 58), 520));
-  novelProgressTimers.push(window.setTimeout(() => setNovelProgress("checking", 78), 1200));
+  novelProgressWaitingSeconds.value = 0;
+  setNovelProgress("collecting", 12, mode === "project" ? "等待后端返回真实阶段" : "");
+  if (mode === "quick") {
+    novelProgressTimers.push(window.setTimeout(() => setNovelProgress("state", 22), 180));
+    novelProgressTimers.push(window.setTimeout(() => setNovelProgress("drafting", 58), 520));
+    novelProgressTimers.push(window.setTimeout(() => setNovelProgress("local_check", 78), 1200));
+  }
+  novelProgressTicker = window.setInterval(() => {
+    novelProgressWaitingSeconds.value += 1;
+  }, 1000);
+}
+
+function unlockNovelProgress() {
+  novelGenerationRunId += 1;
+  novelProjectBusy.value = false;
+  clearNovelProgressTimers();
+  setNovelProgress("failed", 100);
+  error.value = "已解除前端生成锁定。如果后端稍后完成，刷新项目即可查看最新章节。";
 }
 
 function clearCanvasBuildTimers() {
@@ -1803,21 +2037,18 @@ function downloadNovelProjectMarkdown() {
         </aside>
 
         <article class="novel-desk" :class="{ 'quick-desk': novelStudioMode === 'quick' }">
-          <section v-if="showActiveNovelProgress" class="novel-progress-card inline-progress">
+          <section v-if="showActiveNovelProgress && novelStudioMode === 'quick'" class="novel-progress-card inline-progress">
             <div class="novel-progress-meter">
               <span>{{ novelProgressLabel }}</span>
               <strong>{{ novelProgressPercent }}%</strong>
               <i><b :style="{ width: `${novelProgressPercent}%` }"></b></i>
+              <button v-if="novelProjectBusy" type="button" class="ghost muted progress-unlock" @click="unlockNovelProgress">解除卡住</button>
             </div>
             <div class="novel-step-list">
               <span
                 v-for="(step, index) in novelPipelineSteps"
                 :key="step.id"
-                :class="{
-                  active: index === activeNovelStepIndex,
-                  done: novelProgressStage === 'done' || index < activeNovelStepIndex,
-                  failed: novelProgressStage === 'failed' && index === activeNovelStepIndex
-                }"
+                :class="novelStepClass(step)"
               >
                 <b>{{ index + 1 }}</b>
                 <em>{{ step.label }}</em>
@@ -1928,7 +2159,7 @@ function downloadNovelProjectMarkdown() {
                 <small>{{ canvasBuildSummary }}</small>
               </div>
               <div class="story-canvas-actions">
-                <button class="ghost muted" type="button" :disabled="novelProjectBusy" @click="rebuildStoryCanvas">{{ canvasBuildActionLabel }}</button>
+                <button class="ghost muted" type="button" :disabled="novelProjectBusy || isInitialCanvasRebuildLocked" @click="rebuildStoryCanvas">{{ canvasBuildActionLabel }}</button>
                 <button class="ghost muted" type="button" :disabled="novelProjectBusy" @click="saveStoryCanvas">保存画布</button>
                 <button type="button" :disabled="novelProjectBusy || !activeCanvasScenes.length" @click="activeSceneToChapterDraft">应用到章节</button>
               </div>
@@ -1981,8 +2212,26 @@ function downloadNovelProjectMarkdown() {
                 </li>
               </ol>
               <div class="canvas-flow-note">
-                <strong>可反复生成</strong>
-                <span>每次生成会基于当前项目设定和素材重新写入画布；如果你手动调整过画布，先保存或确认可以被新版本覆盖。</span>
+                <strong>自动滚动</strong>
+                <span>每章生成后会整理交接单、更新 Novel State，并重规划后续两章；“重新生成画布”只适合开局大改。</span>
+              </div>
+              <div class="novel-state-panel">
+                <article>
+                  <p class="eyebrow">Novel State</p>
+                  <strong>当前全局摘要</strong>
+                  <span>{{ novelStateSummary }}</span>
+                </article>
+                <article>
+                  <p class="eyebrow">Last Handoff</p>
+                  <strong>上一章交接单</strong>
+                  <span>{{ novelStateLastHandoffText }}</span>
+                </article>
+                <article>
+                  <p class="eyebrow">Open Threads</p>
+                  <strong>未解决线索</strong>
+                  <span v-if="!novelStateOpenThreads.length">暂无未解决线索。</span>
+                  <span v-else>{{ novelStateOpenThreads.join("；") }}</span>
+                </article>
               </div>
             </div>
             <div v-else-if="storyCanvasView === 'chapters'" class="canvas-card-grid">
@@ -2090,6 +2339,54 @@ function downloadNovelProjectMarkdown() {
                 </div>
               </article>
             </div>
+          </section>
+
+          <section v-if="showActiveNovelProgress && novelStudioMode === 'project'" class="novel-progress-card inline-progress chapter-progress-card">
+            <div class="novel-progress-meter">
+              <span>{{ novelProgressLabel }}</span>
+              <strong>{{ novelProgressPercent }}%</strong>
+              <i><b :style="{ width: `${novelProgressPercent}%` }"></b></i>
+              <button v-if="novelProjectBusy" type="button" class="ghost muted progress-unlock" @click="unlockNovelProgress">解除卡住</button>
+            </div>
+            <div class="novel-step-groups">
+              <div class="novel-step-group">
+                <div class="novel-step-group-title">
+                  <span>正文生成</span>
+                  <small>决定这一章从远程正文还是本地草稿返回</small>
+                </div>
+                <div class="novel-step-list detailed">
+                  <span
+                    v-for="(step, index) in novelDraftSteps"
+                    :key="step.id"
+                    :class="novelStepClass(step)"
+                  >
+                    <b>{{ index + 1 }}</b>
+                    <em>{{ step.label }}</em>
+                    <small>{{ step.detail }}</small>
+                  </span>
+                </div>
+              </div>
+              <div class="novel-step-group">
+                <div class="novel-step-group-title">
+                  <span>质检与续写状态</span>
+                  <small>正文返回后再审稿、必要时重写，并更新交接和滚动画布</small>
+                </div>
+                <div class="novel-step-list detailed review">
+                  <span
+                    v-for="(step, index) in novelReviewSteps"
+                    :key="step.id"
+                    :class="novelStepClass(step)"
+                  >
+                    <b>{{ novelDraftSteps.length + index + 1 }}</b>
+                    <em>{{ step.label }}</em>
+                    <small>{{ step.detail }}</small>
+                  </span>
+                </div>
+              </div>
+            </div>
+            <p v-if="novelProgressStage === 'fallback'" class="progress-note warning">
+              远程正文没有成功返回，本次只保留本地正文草稿；不会写入全局摘要、交接单或滚动画布。
+            </p>
           </section>
 
           <section v-if="novelStudioMode === 'project' && activeNovelChapter" class="chapter-editor">
@@ -2254,7 +2551,10 @@ function downloadNovelProjectMarkdown() {
                   {{ novelVersionSourceLabel(version) }} · {{ version.created_at }}
                   <span v-if="novelVersionFoldLabel(version)" class="version-fold">{{ novelVersionFoldLabel(version) }}</span>
                 </small>
-                <button class="ghost muted" type="button" :disabled="novelProjectBusy" @click="restoreVersion(version.id)">恢复</button>
+                <div class="version-actions">
+                  <button class="ghost muted" type="button" :disabled="novelProjectBusy" @click="restoreVersion(version.id)">恢复</button>
+                  <button class="ghost muted danger" type="button" :disabled="novelProjectBusy" @click="deleteVersion(version.id)">删除</button>
+                </div>
               </article>
             </div>
             <p v-else class="empty">保存或生成正文后会保留版本。</p>

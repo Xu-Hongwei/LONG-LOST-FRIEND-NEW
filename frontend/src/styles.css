@@ -1290,9 +1290,25 @@ textarea::placeholder {
   white-space: nowrap;
 }
 
-.version-list button {
+.version-actions {
   grid-column: 2 / 3;
   grid-row: 1 / 3;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.version-actions button {
+  min-width: 48px;
+}
+
+.version-actions .danger {
+  color: rgba(255, 180, 162, 0.9);
+}
+
+.version-actions .danger:hover {
+  border-color: rgba(255, 180, 162, 0.35);
+  background: rgba(255, 180, 162, 0.12);
 }
 
 .novel-controls {
@@ -1394,8 +1410,9 @@ textarea::placeholder {
 
 .novel-progress-meter {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   gap: 8px;
+  align-items: center;
   color: rgba(244, 241, 232, 0.68);
   font-size: 0.78rem;
 }
@@ -1419,6 +1436,11 @@ textarea::placeholder {
   border-radius: inherit;
   background: linear-gradient(90deg, #8ab17d, #e9c46a);
   transition: width 240ms ease;
+}
+
+.progress-unlock {
+  padding: 5px 9px;
+  font-size: 0.72rem;
 }
 
 .novel-step-list {
@@ -1450,6 +1472,58 @@ textarea::placeholder {
   font-style: normal;
 }
 
+.novel-step-list.detailed {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.novel-step-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.novel-step-group {
+  display: grid;
+  gap: 8px;
+}
+
+.novel-step-group-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+  color: rgba(244, 241, 232, 0.88);
+  font-size: 0.78rem;
+}
+
+.novel-step-group-title span {
+  font-weight: 800;
+}
+
+.novel-step-group-title small {
+  color: rgba(244, 241, 232, 0.5);
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.novel-step-list.detailed.review {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.novel-step-list.detailed span {
+  align-items: start;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.novel-step-list.detailed small {
+  grid-column: 2;
+  color: rgba(244, 241, 232, 0.5);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
 .novel-step-list span.active {
   color: rgba(244, 241, 232, 0.9);
 }
@@ -1469,10 +1543,60 @@ textarea::placeholder {
   background: #ffb4a2;
 }
 
+.progress-note {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: rgba(244, 241, 232, 0.72);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.progress-note.warning {
+  border: 1px solid rgba(233, 196, 106, 0.22);
+  color: rgba(244, 241, 232, 0.82);
+  background: rgba(233, 196, 106, 0.08);
+}
+
 .novel-preview {
   min-height: 0;
   overflow-y: auto;
   padding: 4px 8px 40px;
+}
+
+.chapter-progress-card {
+  margin: 12px 0 16px;
+  border: 1px solid rgba(233, 196, 106, 0.16);
+}
+
+.novel-state-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.novel-state-panel article {
+  display: grid;
+  gap: 6px;
+  min-height: 110px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.novel-state-panel strong {
+  color: rgba(244, 241, 232, 0.9);
+  font-size: 0.9rem;
+}
+
+.novel-state-panel span {
+  max-height: 138px;
+  overflow-y: auto;
+  color: rgba(244, 241, 232, 0.62);
+  font-size: 0.78rem;
+  line-height: 1.55;
 }
 
 .novel-title-row {
@@ -2503,6 +2627,11 @@ select {
     grid-template-columns: 1fr;
   }
 
+  .novel-state-panel,
+  .novel-step-list.detailed {
+    grid-template-columns: 1fr;
+  }
+
   .canvas-flow-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2819,6 +2948,11 @@ select {
 
   .canvas-flow-steps {
     display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .novel-state-panel,
+  .novel-step-list.detailed {
     grid-template-columns: 1fr;
   }
 

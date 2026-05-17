@@ -79,7 +79,7 @@ NovelForm = Literal["daily_short", "campus_romance", "vignette", "chapter_one", 
 NovelFidelity = Literal["faithful", "polished", "literary"]
 NovelMaterialSource = Literal["message", "memory", "story", "manual"]
 NovelMaterialCategory = Literal["fact", "foreshadowing", "open_thread", "relationship", "boundary", "inspiration"]
-NovelChapterStatus = Literal["planned", "drafting", "draft", "revised", "locked"]
+NovelChapterStatus = Literal["planned", "drafting", "draft", "revised", "locked", "affected"]
 
 
 class NovelGenerateRequest(BaseModel):
@@ -175,6 +175,7 @@ class NovelChapterGenerateRequest(BaseModel):
     chapter_id: str | None = None
     instruction: str = Field(default="生成下一章正文", max_length=1000)
     target_length: int = Field(default=1800, ge=400, le=6000)
+    defer_postprocess: bool = True
 
 
 class NovelContinuityIssue(BaseModel):
@@ -205,6 +206,7 @@ class NovelProjectResponse(BaseModel):
     outline: str
     story_bible: dict[str, Any] = Field(default_factory=dict)
     story_canvas: dict[str, Any] = Field(default_factory=dict)
+    novel_state: dict[str, Any] = Field(default_factory=dict)
     status: str = "active"
     created_at: str
     updated_at: str

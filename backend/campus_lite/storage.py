@@ -154,6 +154,7 @@ class Storage:
                     outline TEXT NOT NULL DEFAULT '',
                     story_bible_json TEXT NOT NULL DEFAULT '{}',
                     story_canvas_json TEXT NOT NULL DEFAULT '{}',
+                    novel_state_json TEXT NOT NULL DEFAULT '{}',
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -241,6 +242,7 @@ class Storage:
             self._ensure_column(conn, "memories", "normalized_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "sessions", "character_state_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "novel_projects", "story_canvas_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "novel_projects", "novel_state_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "novel_chapters", "scene_card_json", "TEXT NOT NULL DEFAULT '{}'")
             conn.execute(
                 """
@@ -493,6 +495,7 @@ class Storage:
         outline: str,
         story_bible: dict[str, Any],
         story_canvas: dict[str, Any] | None = None,
+        novel_state: dict[str, Any] | None = None,
     ) -> str:
         project_id = f"novel_{uuid.uuid4().hex[:12]}"
         with self.connect() as conn:
@@ -501,9 +504,9 @@ class Storage:
                 INSERT INTO novel_projects (
                     id, session_id, visitor_id, character_id, title, genre, tone,
                     protagonist, worldview, relationship_setup, outline, story_bible_json,
-                    story_canvas_json
+                    story_canvas_json, novel_state_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
@@ -519,6 +522,7 @@ class Storage:
                     outline.strip()[:4000],
                     json.dumps(story_bible, ensure_ascii=False),
                     json.dumps(story_canvas or {}, ensure_ascii=False),
+                    json.dumps(novel_state or {}, ensure_ascii=False),
                 ),
             )
         return project_id
@@ -561,6 +565,9 @@ class Storage:
         if "story_canvas" in updates and updates["story_canvas"] is not None:
             fields.append("story_canvas_json = ?")
             values.append(json.dumps(updates["story_canvas"], ensure_ascii=False)[:20000])
+        if "novel_state" in updates and updates["novel_state"] is not None:
+            fields.append("novel_state_json = ?")
+            values.append(json.dumps(updates["novel_state"], ensure_ascii=False)[:24000])
         if not fields:
             return bool(self.get_novel_project(project_id))
         fields.append("updated_at = datetime('now')")
@@ -650,14 +657,18 @@ class Storage:
         status: str = "planned",
         scene_card: dict[str, Any] | None = None,
         source_material_ids: list[str] | None = None,
+        chapter_order: int | None = None,
     ) -> str:
         chapter_id = f"chapter_{uuid.uuid4().hex[:12]}"
         with self.connect() as conn:
-            row = conn.execute(
-                "SELECT coalesce(max(chapter_order), 0) + 1 AS next_order FROM novel_chapters WHERE project_id = ?",
-                (project_id,),
-            ).fetchone()
-            chapter_order = int(row["next_order"] if row else 1)
+            if chapter_order is None:
+                row = conn.execute(
+                    "SELECT coalesce(max(chapter_order), 0) + 1 AS next_order FROM novel_chapters WHERE project_id = ?",
+                    (project_id,),
+                ).fetchone()
+                next_order = int(row["next_order"] if row else 1)
+            else:
+                next_order = max(1, int(chapter_order))
             conn.execute(
                 """
                 INSERT INTO novel_chapters (
@@ -669,8 +680,8 @@ class Storage:
                 (
                     chapter_id,
                     project_id,
-                    chapter_order,
-                    title.strip()[:120] or f"第 {chapter_order} 章",
+                    next_order,
+                    title.strip()[:120] or f"第 {next_order} 章",
                     goal.strip()[:1000],
                     summary.strip()[:1200],
                     body.strip()[:20000],
@@ -799,6 +810,11 @@ class Storage:
     def get_novel_version(self, version_id: str) -> sqlite3.Row | None:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM novel_versions WHERE id = ?", (version_id,)).fetchone()
+
+    def delete_novel_version(self, version_id: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute("DELETE FROM novel_versions WHERE id = ?", (version_id,))
+            return cur.rowcount > 0
 
     def restore_novel_version(self, version_id: str) -> bool:
         version = self.get_novel_version(version_id)
