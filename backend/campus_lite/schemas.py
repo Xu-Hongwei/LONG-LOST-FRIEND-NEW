@@ -119,6 +119,8 @@ class NovelVersion(BaseModel):
     body: str
     summary: str = ""
     source: str = ""
+    state_delta: dict[str, Any] = Field(default_factory=dict)
+    planning_snapshot: dict[str, Any] = Field(default_factory=dict)
     created_at: str
 
 
@@ -135,6 +137,7 @@ class NovelChapter(BaseModel):
     source_material_ids: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
+    version_count: int = 0
     versions: list[NovelVersion] = Field(default_factory=list)
 
 
@@ -173,9 +176,31 @@ class NovelChapterUpdateRequest(BaseModel):
 
 class NovelChapterGenerateRequest(BaseModel):
     chapter_id: str | None = None
-    instruction: str = Field(default="生成下一章正文", max_length=1000)
+    instruction: str = Field(default="生成下一章正文", max_length=4000)
     target_length: int = Field(default=1800, ge=400, le=6000)
     defer_postprocess: bool = True
+
+
+class NovelInstructionOptimizeRequest(BaseModel):
+    chapter_id: str | None = None
+    base_instruction: str = Field(default="", max_length=4000)
+    title: str = Field(default="", max_length=120)
+    goal: str = Field(default="", max_length=1000)
+    summary: str = Field(default="", max_length=1200)
+    body: str = Field(default="", max_length=20000)
+    status: NovelChapterStatus | None = None
+    scene_card: dict[str, Any] = Field(default_factory=dict)
+    canvas_chapter: dict[str, Any] = Field(default_factory=dict)
+    previous_handoff: dict[str, Any] = Field(default_factory=dict)
+    prior_novel_state: dict[str, Any] = Field(default_factory=dict)
+    quality_diagnosis: dict[str, Any] = Field(default_factory=dict)
+    target_length: int = Field(default=1800, ge=400, le=6000)
+
+
+class NovelInstructionOptimizeResponse(BaseModel):
+    instruction: str
+    source: Literal["remote", "fallback"] = "fallback"
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class NovelContinuityIssue(BaseModel):

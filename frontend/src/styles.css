@@ -837,19 +837,115 @@ textarea::placeholder {
   text-align: right;
 }
 
-.scene-card-grid {
+.canvas-link-editor {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(159, 182, 215, 0.12);
+  border-radius: 8px;
+  background: rgba(159, 182, 215, 0.04);
+}
+
+.canvas-link-editor strong {
+  display: block;
+  color: rgba(244, 241, 232, 0.86);
+  font-size: 0.9rem;
+}
+
+.canvas-link-editor small {
+  display: block;
+  margin-top: 4px;
+  color: rgba(244, 241, 232, 0.48);
+  line-height: 1.5;
+}
+
+.canvas-action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  align-items: stretch;
   gap: 10px;
 }
 
-.scene-card-grid label {
+.canvas-action-grid label,
+.scene-card-grid label,
+.canvas-field-grid article,
+.canvas-read-grid article {
+  display: grid;
+  grid-template-rows: 18px minmax(0, 1fr);
+  gap: 6px;
   min-width: 0;
+  min-height: 0;
 }
 
+.canvas-action-grid span,
+.scene-card-grid label > span,
+.canvas-field-grid article span,
+.canvas-read-grid article span {
+  display: block;
+  align-self: end;
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(233, 196, 106, 0.84);
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-action-grid textarea,
 .scene-card-grid textarea {
-  min-height: 42px;
+  width: 100%;
+  min-width: 0;
+  height: 72px;
+  min-height: 72px;
+  max-height: 72px;
+  resize: none;
+  overflow: auto;
   background: rgba(255, 255, 255, 0.045);
+}
+
+.canvas-field-grid article p,
+.canvas-read-grid article p {
+  width: 100%;
+  min-width: 0;
+  height: 72px;
+  min-height: 72px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 6px;
+  color: rgba(244, 241, 232, 0.76);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  background: rgba(255, 255, 255, 0.035);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.canvas-action-grid textarea,
+.scene-card-grid textarea,
+.canvas-field-grid article p,
+.canvas-read-grid article p {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.canvas-action-grid textarea::-webkit-scrollbar,
+.scene-card-grid textarea::-webkit-scrollbar,
+.canvas-field-grid article p::-webkit-scrollbar,
+.canvas-read-grid article p::-webkit-scrollbar {
+  display: none;
+}
+
+.scene-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  align-items: stretch;
+  gap: 10px;
 }
 
 .story-canvas-panel {
@@ -919,16 +1015,20 @@ textarea::placeholder {
 
 .canvas-card-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
 }
 
 .canvas-card {
   display: grid;
+  align-content: start;
   gap: 10px;
+  height: 100%;
+  min-width: 0;
   padding: 12px;
   border: 1px solid rgba(255, 255, 255, 0.075);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.045);
-  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+  transition: border-color 160ms ease, background 160ms ease;
 }
 
 .canvas-card:hover,
@@ -937,21 +1037,21 @@ textarea::placeholder {
   background: rgba(255, 255, 255, 0.065);
 }
 
-.canvas-card:hover {
-  transform: translateY(-1px);
-}
-
 .canvas-card-title {
   justify-content: space-between;
   align-items: start;
+  min-height: 24px;
 }
 
 .canvas-card-title strong {
+  min-width: 0;
   color: rgba(244, 241, 232, 0.94);
+  line-height: 1.35;
 }
 
 .canvas-card-title span,
 .canvas-thread-route {
+  flex: 0 0 auto;
   color: rgba(244, 241, 232, 0.56);
   font-size: 0.78rem;
 }
@@ -970,6 +1070,12 @@ textarea::placeholder {
 
 .canvas-field-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.canvas-read-grid {
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+  align-items: stretch;
 }
 
 .canvas-thread-route {
@@ -1307,6 +1413,15 @@ textarea::placeholder {
 }
 
 .version-actions .danger:hover {
+  border-color: rgba(255, 180, 162, 0.35);
+  background: rgba(255, 180, 162, 0.12);
+}
+
+.ghost.danger {
+  color: rgba(255, 180, 162, 0.9);
+}
+
+.ghost.danger:hover {
   border-color: rgba(255, 180, 162, 0.35);
   background: rgba(255, 180, 162, 0.12);
 }
@@ -2476,6 +2591,12 @@ textarea::placeholder {
   color: #8ab17d;
 }
 
+.instruction-optimization-note {
+  margin: -2px 0 2px;
+  color: rgba(244, 241, 232, 0.56);
+  font-size: 0.76rem;
+}
+
 select,
 input[type="range"] {
   width: 100%;
@@ -2623,7 +2744,9 @@ select {
   }
 
   .canvas-card-grid,
-  .canvas-field-grid {
+  .canvas-field-grid,
+  .canvas-read-grid,
+  .canvas-action-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2919,7 +3042,9 @@ select {
   .novel-project-layout,
   .project-title-row,
   .chapter-grid,
-  .scene-card-grid {
+  .scene-card-grid,
+  .canvas-read-grid,
+  .canvas-action-grid {
     grid-template-columns: 1fr;
   }
 

@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import uuid
+import hashlib
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -198,6 +199,7 @@ class Storage:
                     body TEXT NOT NULL,
                     summary TEXT NOT NULL DEFAULT '',
                     source TEXT NOT NULL DEFAULT '',
+                    planning_snapshot_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
@@ -244,6 +246,8 @@ class Storage:
             self._ensure_column(conn, "novel_projects", "story_canvas_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "novel_projects", "novel_state_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "novel_chapters", "scene_card_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "novel_versions", "state_delta_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "novel_versions", "planning_snapshot_json", "TEXT NOT NULL DEFAULT '{}'")
             conn.execute(
                 """
                 UPDATE memories
@@ -692,7 +696,17 @@ class Storage:
             )
             conn.execute("UPDATE novel_projects SET updated_at = datetime('now') WHERE id = ?", (project_id,))
         if body:
-            self.add_novel_version(project_id, chapter_id, "draft", title, body, summary, "create")
+            row = self.get_novel_chapter(chapter_id)
+            planning_snapshot = self._novel_planning_snapshot(
+                row,
+                title,
+                goal,
+                summary,
+                status,
+                scene_card or {},
+                source_material_ids or [],
+            ) if row else {}
+            self.add_novel_version(project_id, chapter_id, "draft", title, body, summary, "create", planning_snapshot=planning_snapshot)
         return chapter_id
 
     def get_novel_chapter(self, chapter_id: str) -> sqlite3.Row | None:
@@ -709,6 +723,34 @@ class Storage:
                 """,
                 (project_id,),
             ).fetchall()
+
+    def delete_novel_chapter(self, chapter_id: str) -> sqlite3.Row | None:
+        existing = self.get_novel_chapter(chapter_id)
+        if not existing:
+            return None
+        project_id = existing["project_id"]
+        deleted_order = int(existing["chapter_order"])
+        with self.connect() as conn:
+            conn.execute("DELETE FROM novel_chapters WHERE id = ?", (chapter_id,))
+            conn.execute(
+                """
+                UPDATE novel_chapters
+                SET chapter_order = -chapter_order
+                WHERE project_id = ? AND chapter_order > ?
+                """,
+                (project_id, deleted_order),
+            )
+            conn.execute(
+                """
+                UPDATE novel_chapters
+                SET chapter_order = abs(chapter_order) - 1,
+                    updated_at = datetime('now')
+                WHERE project_id = ? AND chapter_order < 0
+                """,
+                (project_id,),
+            )
+            conn.execute("UPDATE novel_projects SET updated_at = datetime('now') WHERE id = ?", (project_id,))
+        return existing
 
     def update_novel_chapter(self, chapter_id: str, updates: dict[str, Any], version_source: str = "manual") -> bool:
         existing = self.get_novel_chapter(chapter_id)
@@ -742,9 +784,135 @@ class Storage:
             conn.execute("UPDATE novel_projects SET updated_at = datetime('now') WHERE id = ?", (existing["project_id"],))
         if "body" in updates and updates["body"] is not None and str(updates["body"]).strip():
             next_title = str(updates.get("title") if updates.get("title") is not None else existing["title"])
+            next_goal = str(updates.get("goal") if updates.get("goal") is not None else existing["goal"])
             next_summary = str(updates.get("summary") if updates.get("summary") is not None else existing["summary"])
-            self.add_novel_version(existing["project_id"], chapter_id, "draft", next_title, str(updates["body"]), next_summary, version_source)
+            next_status = str(updates.get("status") if updates.get("status") is not None else existing["status"])
+            next_scene_card = updates.get("scene_card") if isinstance(updates.get("scene_card"), dict) else self._json_dict(existing["scene_card_json"] if "scene_card_json" in existing.keys() else "{}")
+            if version_source in {"mock", "manual", "create", "system", "canvas"}:
+                next_scene_card = self._strip_novel_state_fields(next_scene_card)
+            next_source_material_ids = updates.get("source_material_ids") if isinstance(updates.get("source_material_ids"), list) else self._json_list(existing["source_material_ids_json"] if "source_material_ids_json" in existing.keys() else "[]")
+            state_delta = self._novel_version_state_delta(existing, next_title, str(updates["body"]), next_summary, version_source, next_scene_card)
+            if version_source == "mock" and not state_delta.get("handoff_source"):
+                state_delta["handoff_source"] = "skipped_mock"
+            planning_snapshot = self._novel_planning_snapshot(
+                existing,
+                next_title,
+                next_goal,
+                next_summary,
+                next_status,
+                next_scene_card,
+                next_source_material_ids,
+            )
+            version_id = self.add_novel_version(
+                existing["project_id"],
+                chapter_id,
+                "draft",
+                next_title,
+                str(updates["body"]),
+                next_summary,
+                version_source,
+                state_delta,
+                planning_snapshot,
+            )
+            state_delta = {**state_delta, "chapter_version_id": version_id}
+            next_scene_card = {
+                **next_scene_card,
+                "active_version_id": version_id,
+                "active_state_delta": state_delta,
+            }
+            if state_delta.get("handoff_source"):
+                next_scene_card["handoff_source"] = state_delta["handoff_source"]
+            if state_delta.get("chapter_handoff"):
+                next_scene_card["chapter_handoff"] = state_delta["chapter_handoff"]
+            with self.connect() as conn:
+                conn.execute(
+                    "UPDATE novel_chapters SET scene_card_json = ?, updated_at = datetime('now') WHERE id = ?",
+                    (json.dumps(next_scene_card, ensure_ascii=False)[:8000], chapter_id),
+                )
         return True
+
+    def _strip_novel_state_fields(self, scene_card: dict[str, Any]) -> dict[str, Any]:
+        cleaned = dict(scene_card) if isinstance(scene_card, dict) else {}
+        for key in (
+            "active_state_delta",
+            "chapter_handoff",
+            "handoff_source",
+            "chapter_state_delta",
+        ):
+            cleaned.pop(key, None)
+        return cleaned
+
+    def _json_dict(self, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        try:
+            parsed = json.loads(value or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _json_list(self, value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        try:
+            parsed = json.loads(value or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    def _novel_version_state_delta(
+        self,
+        chapter: sqlite3.Row,
+        title: str,
+        body: str,
+        summary: str,
+        source: str,
+        scene_card: dict[str, Any],
+    ) -> dict[str, Any]:
+        handoff = scene_card.get("chapter_handoff") if isinstance(scene_card.get("chapter_handoff"), dict) else {}
+        def handoff_list(key: str) -> list[str]:
+            value = handoff.get(key) if isinstance(handoff, dict) else []
+            if isinstance(value, list):
+                return [str(item).strip()[:240] for item in value if str(item).strip()][:8]
+            return [str(value).strip()[:240]] if str(value or "").strip() else []
+        return {
+            "chapter_id": chapter["id"],
+            "chapter_order": int(chapter["chapter_order"]),
+            "chapter_title": title.strip()[:120],
+            "chapter_version_id": "",
+            "body_hash": hashlib.sha256(body.strip().encode("utf-8")).hexdigest()[:16],
+            "summary_delta": summary.strip()[:1200],
+            "facts_delta": handoff_list("happened"),
+            "relationship_delta": handoff_list("relationship_delta"),
+            "open_threads_delta": (handoff_list("open_threads") + handoff_list("next_must_continue"))[:12],
+            "resolved_threads_delta": handoff_list("resolved_threads"),
+            "chapter_handoff": handoff if isinstance(handoff, dict) else {},
+            "handoff_source": str(scene_card.get("handoff_source") or "").strip(),
+            "source": source.strip()[:120],
+        }
+
+    def _novel_planning_snapshot(
+        self,
+        chapter: sqlite3.Row | None,
+        title: str,
+        goal: str,
+        summary: str,
+        status: str,
+        scene_card: dict[str, Any],
+        source_material_ids: list[Any],
+    ) -> dict[str, Any]:
+        chapter_order = int(chapter["chapter_order"]) if chapter and "chapter_order" in chapter.keys() else 0
+        chapter_id = str(chapter["id"]) if chapter and "id" in chapter.keys() else ""
+        return {
+            "chapter_id": chapter_id,
+            "chapter_order": chapter_order,
+            "title": title.strip()[:120],
+            "goal": goal.strip()[:1000],
+            "summary": summary.strip()[:1200],
+            "status": status.strip()[:40] or "draft",
+            "scene_card": scene_card if isinstance(scene_card, dict) else {},
+            "source_material_ids": [str(item).strip() for item in source_material_ids if str(item).strip()][:24],
+        }
 
     def add_novel_version(
         self,
@@ -755,11 +923,15 @@ class Storage:
         body: str,
         summary: str = "",
         source: str = "",
+        state_delta: dict[str, Any] | None = None,
+        planning_snapshot: dict[str, Any] | None = None,
     ) -> str:
         next_title = title.strip()[:120]
         next_body = body.strip()[:20000]
         next_summary = summary.strip()[:1200]
         next_source = source.strip()[:120]
+        next_state_delta = state_delta if isinstance(state_delta, dict) else {}
+        next_planning_snapshot = planning_snapshot if isinstance(planning_snapshot, dict) else {}
         version_id = f"ver_{uuid.uuid4().hex[:12]}"
         with self.connect() as conn:
             existing = conn.execute(
@@ -775,13 +947,25 @@ class Storage:
                 (chapter_id, next_title, next_body, next_summary),
             ).fetchone()
             if existing:
+                if next_state_delta:
+                    conn.execute(
+                        "UPDATE novel_versions SET state_delta_json = ? WHERE id = ?",
+                        (json.dumps({**next_state_delta, "chapter_version_id": str(existing["id"])}, ensure_ascii=False)[:8000], existing["id"]),
+                    )
+                if next_planning_snapshot:
+                    conn.execute(
+                        "UPDATE novel_versions SET planning_snapshot_json = ? WHERE id = ?",
+                        (json.dumps({**next_planning_snapshot, "chapter_version_id": str(existing["id"])}, ensure_ascii=False)[:12000], existing["id"]),
+                    )
                 return str(existing["id"])
+            next_state_delta = {**next_state_delta, "chapter_version_id": version_id}
+            next_planning_snapshot = {**next_planning_snapshot, "chapter_version_id": version_id}
             conn.execute(
                 """
                 INSERT INTO novel_versions (
-                    id, project_id, chapter_id, version_type, title, body, summary, source
+                    id, project_id, chapter_id, version_type, title, body, summary, source, state_delta_json, planning_snapshot_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     version_id,
@@ -792,6 +976,8 @@ class Storage:
                     next_body,
                     next_summary,
                     next_source,
+                    json.dumps(next_state_delta, ensure_ascii=False)[:8000],
+                    json.dumps(next_planning_snapshot, ensure_ascii=False)[:12000],
                 ),
             )
         return version_id
@@ -820,13 +1006,35 @@ class Storage:
         version = self.get_novel_version(version_id)
         if not version:
             return False
+        chapter = self.get_novel_chapter(version["chapter_id"])
+        if not chapter:
+            return False
+        scene_card = self._json_dict(chapter["scene_card_json"] if "scene_card_json" in chapter.keys() else "{}")
+        state_delta = self._json_dict(version["state_delta_json"] if "state_delta_json" in version.keys() else "{}")
+        planning_snapshot = self._json_dict(version["planning_snapshot_json"] if "planning_snapshot_json" in version.keys() else "{}")
+        state_delta = {**state_delta, "chapter_version_id": version_id}
+        snapshot_scene_card = planning_snapshot.get("scene_card") if isinstance(planning_snapshot.get("scene_card"), dict) else {}
+        if snapshot_scene_card:
+            scene_card = snapshot_scene_card
+        scene_card = {
+            **scene_card,
+            "active_version_id": version_id,
+            "active_state_delta": state_delta,
+        }
+        handoff = state_delta.get("chapter_handoff") if isinstance(state_delta.get("chapter_handoff"), dict) else {}
+        if handoff:
+            scene_card["chapter_handoff"] = handoff
+            scene_card["handoff_source"] = state_delta.get("handoff_source") or scene_card.get("handoff_source") or ""
         return self.update_novel_chapter(
             version["chapter_id"],
             {
                 "title": version["title"],
+                "goal": str(planning_snapshot.get("goal") or chapter["goal"] or ""),
                 "body": version["body"],
                 "summary": version["summary"],
-                "status": "revised",
+                "status": str(planning_snapshot.get("status") or "revised"),
+                "scene_card": scene_card,
+                "source_material_ids": planning_snapshot.get("source_material_ids") if isinstance(planning_snapshot.get("source_material_ids"), list) else self._json_list(chapter["source_material_ids_json"] if "source_material_ids_json" in chapter.keys() else "[]"),
             },
             "restore",
         )

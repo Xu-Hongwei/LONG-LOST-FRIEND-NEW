@@ -8,6 +8,7 @@ import {
   createNovelProject,
   createSession,
   deleteMemoryItem,
+  deleteNovelChapter,
   deleteNovelVersion,
   exportSession,
   generateNovel,
@@ -17,6 +18,7 @@ import {
   listCharacters,
   listNovelProjects,
   listNovelVersions,
+  optimizeNovelInstruction,
   patchMemory,
   refreshStoryPane,
   resolveVisitor,
@@ -68,6 +70,17 @@ type StoryCanvasView = "flow" | "chapters" | "scenes" | "threads";
 type CanvasBuildStage = "idle" | "materials" | "structure" | "chapters" | "scenes" | "threads" | "done" | "failed";
 type StoryRefreshOptions = { silent?: boolean };
 type ChapterSceneCardDraft = Record<string, string>;
+type CanvasActionKey =
+  | "external_event"
+  | "trigger_event"
+  | "immediate_reaction"
+  | "obstacle_escalation"
+  | "counterpart_reaction"
+  | "character_choice"
+  | "scene_consequence"
+  | "relationship_shift"
+  | "ending_hook";
+const DEFAULT_CHAPTER_INSTRUCTION = "承接上一章，写出下一段自然推进，但不制造越界进展。";
 type NovelVersionDisplay = NovelVersion & {
   duplicateCount: number;
   restoreCount: number;
@@ -144,8 +157,12 @@ const chapterDraft = ref({
   status: "planned" as NovelChapterStatus,
   scene_card: {} as ChapterSceneCardDraft
 });
-const chapterInstruction = ref("承接上一章，写出下一段自然推进，但不制造越界进展。");
+const chapterInstruction = ref(DEFAULT_CHAPTER_INSTRUCTION);
+const chapterInstructionsById = ref<Record<string, string>>({});
+const activeInstructionChapterId = ref("");
 const projectChapterTargetLength = ref(1800);
+const isOptimizingInstruction = ref(false);
+const instructionOptimizationNote = ref("");
 const continuityReport = ref<NovelContinuityReport | null>(null);
 const chapterVersions = ref<NovelVersion[]>([]);
 const novelFocusMode = ref(false);
@@ -166,7 +183,7 @@ const novelReviewSteps: NovelPipelineStep[] = [
   { id: "local_check", label: "本地检查", detail: "只拦截内部字段、ID、空正文和重复段落" },
   { id: "reviewing", label: "远程审稿", detail: "用 checklist 判断事件、对白、选择和钩子" },
   { id: "rewriting", label: "远程重写/通过", detail: "需要时远程重写一次，否则直接通过" },
-  { id: "handoff", label: "后台交接", detail: "正文已返回，后台生成交接单并更新全局状态" },
+  { id: "handoff", label: "后台交接", detail: "正文已返回，后台生成交接单并本地增量更新 Novel State" },
   { id: "replan", label: "后台滚动", detail: "后台重规划后续两章画布和场景卡" }
 ];
 const novelPipelineSteps = [...novelDraftSteps, ...novelReviewSteps];
@@ -207,12 +224,20 @@ const sceneCardFields: { key: string; label: string; rows: number }[] = [
   { key: "current_scene", label: "当前场景", rows: 2 },
   { key: "pov", label: "视角", rows: 2 },
   { key: "present_characters", label: "在场人物", rows: 1 },
-  { key: "surface_event", label: "表层事件", rows: 2 },
   { key: "character_desire", label: "人物欲望", rows: 2 },
-  { key: "tension", label: "阻碍 / 张力", rows: 2 },
   { key: "required_facts", label: "必须保留事实", rows: 2 },
-  { key: "forbidden_progress", label: "禁止推进", rows: 2 },
-  { key: "ending_beat", label: "结尾落点", rows: 2 }
+  { key: "forbidden_progress", label: "禁止推进", rows: 2 }
+];
+const canvasActionChainFields: { key: CanvasActionKey; label: string }[] = [
+  { key: "external_event", label: "外部事件" },
+  { key: "trigger_event", label: "触发事件" },
+  { key: "immediate_reaction", label: "即时反应" },
+  { key: "obstacle_escalation", label: "阻碍升级" },
+  { key: "counterpart_reaction", label: "对方反应" },
+  { key: "character_choice", label: "人物选择" },
+  { key: "scene_consequence", label: "场景后果" },
+  { key: "relationship_shift", label: "关系变化" },
+  { key: "ending_hook", label: "结尾钩子" }
 ];
 const novelFormLabels: Record<NovelForm, string> = {
   daily_short: "日常短篇",
@@ -398,11 +423,13 @@ const activeCanvasBuildStepIndex = computed(() => {
   if (canvasBuildStage.value === "failed") return Math.max(0, canvasBuildSteps.length - 1);
   return canvasBuildSteps.findIndex((step) => step.id === canvasBuildStage.value);
 });
-const writtenNovelChapterCount = computed(() =>
-  activeNovelProject.value?.chapters.filter((chapter) => chapter.body.trim()).length || 0
+const initialCanvasVersionedChapterCount = computed(() =>
+  activeNovelProject.value?.chapters
+    .filter((chapter) => chapter.chapter_order <= 4 && Number(chapter.version_count || 0) > 0)
+    .length || 0
 );
 const isInitialCanvasRebuildLocked = computed(() =>
-  storyCanvasDraft.value.chapters.length > 0 && writtenNovelChapterCount.value > 0
+  storyCanvasDraft.value.chapters.length > 0 && initialCanvasVersionedChapterCount.value > 0
 );
 const canvasBuildActionLabel = computed(() =>
   storyCanvasDraft.value.chapters.length ? "重建初版画布" : "生成初版画布"
@@ -424,7 +451,7 @@ const canvasBuildSummary = computed(() => {
   if (canvasBuildStage.value === "failed") return "画布生成失败，当前编辑内容已保留。";
   if (canvasBuildStage.value === "done") return `画布已生成 ${canvasBuildRunCount.value} 次${canvasBuildLastLabel.value ? ` · ${canvasBuildLastLabel.value}` : ""}`;
   if (canvasBuildStage.value !== "idle") return `${canvasBuildSteps[activeCanvasBuildStepIndex.value]?.detail || "正在生成画布"} · 已等待 ${canvasBuildWaitingSeconds.value}s`;
-  if (isInitialCanvasRebuildLocked.value) return `已有 ${writtenNovelChapterCount.value} 章正文，初版画布已锁定；继续写作会自动滚动重规划后续两章。`;
+  if (isInitialCanvasRebuildLocked.value) return `前四章仍有 ${initialCanvasVersionedChapterCount.value} 章版本记录，初版画布已锁定；删除这些章节版本后可重建。`;
   if (storyCanvasDraft.value.chapters.length) return "画布会随章节生成自动滚动更新后续两章；这里可手动微调或大改重建。";
   return "还没有画布，先从素材生成章节、场景和线索。";
 });
@@ -454,19 +481,66 @@ const novelProgressLabel = computed(() => {
   }
   return detail;
 });
+function isTrustedNovelStateDelta(delta: Record<string, unknown> | undefined | null) {
+  const source = String(delta?.source || "").trim();
+  return !["mock", "manual", "create", "system", "canvas"].includes(source);
+}
+
+function chapterBoundHandoff(chapter: NovelChapter): Record<string, unknown> | null {
+  const delta = chapter.scene_card?.active_state_delta;
+  if (delta && typeof delta === "object" && isTrustedNovelStateDelta(delta as Record<string, unknown>)) {
+    const source = String((delta as Record<string, unknown>).handoff_source || chapter.scene_card?.handoff_source || "");
+    const handoff = (delta as Record<string, unknown>).chapter_handoff;
+    if (handoff && typeof handoff === "object" && !["pending", "skipped_mock", "cleaned_mock"].includes(source)) {
+      return handoff as Record<string, unknown>;
+    }
+  }
+  const source = String(chapter.scene_card?.handoff_source || "");
+  const handoff = chapter.scene_card?.chapter_handoff;
+  if (handoff && typeof handoff === "object" && !["pending", "skipped_mock", "cleaned_mock"].includes(source)) {
+    return handoff as Record<string, unknown>;
+  }
+  return null;
+}
+const activeNovelPriorStateEntries = computed(() => {
+  const project = activeNovelProject.value;
+  const currentOrder = activeNovelChapter.value?.chapter_order || 0;
+  if (!project || currentOrder <= 1) return [];
+  const entries: Array<{ chapter: NovelChapter; handoff: Record<string, unknown> }> = [];
+  const chapters = [...project.chapters].sort((a, b) => a.chapter_order - b.chapter_order);
+  for (const chapter of chapters) {
+    if (chapter.chapter_order >= currentOrder) break;
+    if (chapter.chapter_order !== entries.length + 1) break;
+    const handoff = chapterBoundHandoff(chapter);
+    if (!handoff || !chapter.body.trim() || chapter.status === "affected") break;
+    entries.push({ chapter, handoff });
+  }
+  return entries;
+});
 const novelStateSummary = computed(() => {
-  const value = activeNovelProject.value?.novel_state?.global_summary;
-  return typeof value === "string" && value.trim() ? value.trim() : "还没有长期摘要。生成章节后会自动更新。";
+  const entries = activeNovelPriorStateEntries.value;
+  if (!entries.length) return "当前章节之前还没有全局摘要。";
+  return entries
+    .map(({ chapter, handoff }) => {
+      const delta = chapter.scene_card?.active_state_delta as Record<string, unknown> | undefined;
+      const summary = isTrustedNovelStateDelta(delta) ? String(delta?.summary_delta || chapter.summary || "") : "";
+      const happened = Array.isArray(handoff.happened) ? handoff.happened.map((item) => String(item)).filter(Boolean).join("；") : "";
+      return `第${chapter.chapter_order}章：${summary || happened}`;
+    })
+    .filter(Boolean)
+    .join(" ");
 });
 const novelStateOpenThreads = computed(() => {
-  const value = activeNovelProject.value?.novel_state?.open_threads;
-  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean).slice(0, 5) : [];
+  const threads: string[] = [];
+  for (const { handoff } of activeNovelPriorStateEntries.value) {
+    if (Array.isArray(handoff.open_threads)) threads.push(...handoff.open_threads.map((item) => String(item)).filter(Boolean));
+    if (Array.isArray(handoff.next_must_continue)) threads.push(...handoff.next_must_continue.map((item) => String(item)).filter(Boolean));
+  }
+  return [...new Set(threads)].slice(0, 5);
 });
 const novelStateLastHandoff = computed(() => {
-  const handoffs = activeNovelProject.value?.novel_state?.chapter_handoffs;
-  if (!Array.isArray(handoffs) || !handoffs.length) return null;
-  const item = handoffs[handoffs.length - 1];
-  return item && typeof item === "object" ? item as Record<string, unknown> : null;
+  const entries = activeNovelPriorStateEntries.value;
+  return entries.length ? entries[entries.length - 1].handoff : null;
 });
 const novelStateLastHandoffText = computed(() => {
   const handoff = novelStateLastHandoff.value;
@@ -491,6 +565,12 @@ const activeCanvasChapter = computed<StoryCanvasChapter | null>(() => {
 const activeCanvasScenes = computed<StoryCanvasScene[]>(() => {
   const chapterId = activeCanvasChapter.value?.id || "";
   return storyCanvasDraft.value.scenes.filter((scene) => scene.chapter_id === chapterId);
+});
+const activeCanvasActionChain = computed(() => {
+  const chapter = activeCanvasChapter.value;
+  if (!chapter) return [];
+  return canvasActionChainFields
+    .map((field) => ({ key: field.key, label: field.label, text: String(chapter[field.key] || "").trim() }));
 });
 const storyBibleEntries = computed(() => {
   const bible = activeNovelProject.value?.story_bible || {};
@@ -532,6 +612,33 @@ const chapterLengthGuide = computed(() => {
     return { tone: "long", label: "偏长", detail: "建议压缩重复描写。" };
   }
   return { tone: "ok", label: "接近目标", detail: "长度处在可用范围。" };
+});
+const chapterQualityDiagnosis = computed(() => {
+  const body = chapterDraft.value.body.trim();
+  const paragraphs = body.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
+  const dialogueCount = (body.match(/[“"][^”"]{1,80}[”"]/g) || []).length;
+  const hasSceneCard = Object.values(chapterDraft.value.scene_card).some((value) => {
+    if (Array.isArray(value)) return value.some((item) => String(item).trim());
+    return String(value || "").trim();
+  });
+  return {
+    word_count: activeChapterWordCount.value,
+    target_length: projectChapterTargetLength.value,
+    length_ratio: chapterLengthRatio.value,
+    length_label: chapterLengthGuide.value.label,
+    length_detail: chapterLengthGuide.value.detail,
+    paragraph_count: paragraphs.length,
+    dialogue_count: dialogueCount,
+    has_scene_card: hasSceneCard,
+    body_empty: !body,
+    likely_needs: [
+      !body ? "新写完整章节" : "",
+      activeChapterWordCount.value > 0 && chapterLengthRatio.value < 70 ? "扩写同一章" : "",
+      dialogueCount < 2 ? "补足自然对白" : "",
+      paragraphs.length < 4 ? "增加可见动作和场景转折" : "",
+      !hasSceneCard ? "先明确场景卡" : ""
+    ].filter(Boolean)
+  };
 });
 const editorUpdatedLabel = computed(() => {
   const updated = activeNovelChapter.value?.updated_at || activeNovelProject.value?.updated_at || "";
@@ -822,9 +929,12 @@ function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
         relationship_shift: String(chapter.relationship_shift || ""),
         ending_hook: String(chapter.ending_hook || ""),
         target_length: Number(chapter.target_length || 1800),
-        status: (chapter.status || "planned") as NovelChapterStatus,
+        status: String(chapter.status || "planned") as StoryCanvasChapter["status"],
         emotion_curve: String(chapter.emotion_curve || ""),
-        scene_ids: stringArray(chapter.scene_ids)
+        scene_ids: stringArray(chapter.scene_ids),
+        completed_summary: String(chapter.completed_summary || ""),
+        actual_word_count: Number(chapter.actual_word_count || 0),
+        completed_at: String(chapter.completed_at || "")
       };
     }),
     scenes: scenes.map((item, index) => {
@@ -890,35 +1000,188 @@ function normalizeSceneCardDraft(sceneCard: Record<string, unknown> | null | und
   return draft;
 }
 
-async function activeSceneToChapterDraft() {
-  if (!activeNovelProject.value) return;
-  error.value = "";
-  const scene = activeCanvasScenes.value[0];
-  const canvasChapter = activeCanvasChapter.value;
-  if (!scene || !canvasChapter) return;
-  chapterDraft.value.title = canvasChapter.title || chapterDraft.value.title;
-  chapterDraft.value.goal = canvasChapter.goal || chapterDraft.value.goal;
-  chapterDraft.value.scene_card = normalizeSceneCardDraft(scene as unknown as Record<string, unknown>);
-  projectChapterTargetLength.value = canvasChapter.target_length || projectChapterTargetLength.value;
-  getNovelProject(activeNovelProject.value.id)
-    .then((latestProject) => {
-      replaceNovelProject(latestProject);
-      syncStoryCanvasDraft(latestProject);
-    })
-    .catch((err) => {
-      error.value = `已应用当前画布；刷新最新画布失败：${readableError(err)}`;
-    });
+function derivedSceneCardFromCanvasChapter(chapter: StoryCanvasChapter | null | undefined): ChapterSceneCardDraft {
+  if (!chapter) return {};
+  return {
+    surface_event: chapter.trigger_event || chapter.external_event || chapter.goal || "",
+    tension: chapter.obstacle_escalation || "",
+    ending_beat: chapter.ending_hook || ""
+  };
 }
 
-function updateSceneArray(scene: StoryCanvasScene, key: "required_facts" | "forbidden_progress" | "linked_material_ids", event: Event) {
-  scene[key] = stringArray((event.target as HTMLTextAreaElement).value);
+function sceneCardDraftFromCanvas(scene: Record<string, unknown> | null | undefined, chapter: StoryCanvasChapter | null | undefined): ChapterSceneCardDraft {
+  return {
+    ...normalizeSceneCardDraft(scene),
+    ...derivedSceneCardFromCanvasChapter(chapter)
+  };
+}
+
+function currentSceneCardForSave(): ChapterSceneCardDraft {
+  return {
+    ...chapterDraft.value.scene_card,
+    ...derivedSceneCardFromCanvasChapter(activeCanvasChapter.value)
+  };
+}
+
+function canvasChapterForOrder(canvas: StoryCanvas, order: number) {
+  return canvas.chapters.find((chapter) => chapter.chapter_order === order) || canvas.chapters[0] || null;
+}
+
+function canvasScenesForChapter(canvas: StoryCanvas, chapter: StoryCanvasChapter | null) {
+  const chapterId = chapter?.id || "";
+  return canvas.scenes.filter((scene) => scene.chapter_id === chapterId);
+}
+
+function canvasFieldText(value: unknown) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean).join("；") || "未设定";
+  return String(value || "").trim() || "未设定";
+}
+
+function splitSceneDraftList(value: string) {
+  return value
+    .split(/[；;\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function storyCanvasWithChapterDraft(canvas: StoryCanvas, chapter: NovelChapter | null, draft: typeof chapterDraft.value) {
+  const nextCanvas = normalizeStoryCanvas(JSON.parse(JSON.stringify(canvas)) as StoryCanvas);
+  const order = chapter?.chapter_order || activeCanvasChapter.value?.chapter_order || 1;
+  let canvasChapter = canvasChapterForOrder(nextCanvas, order);
+  if (!canvasChapter) {
+    canvasChapter = {
+      id: `canvas_ch_${order}`,
+      act_id: nextCanvas.acts[0]?.id || "act_1",
+      chapter_order: order,
+      title: draft.title || `第${order}章`,
+      goal: draft.goal,
+      external_event: "",
+      trigger_event: "",
+      immediate_reaction: "",
+      obstacle_escalation: "",
+      counterpart_reaction: "",
+      character_choice: "",
+      scene_consequence: "",
+      relationship_shift: "",
+      ending_hook: "",
+      target_length: projectChapterTargetLength.value,
+      status: draft.status,
+      emotion_curve: "",
+      scene_ids: []
+    };
+    nextCanvas.chapters.push(canvasChapter);
+  }
+  canvasChapter.title = draft.title || canvasChapter.title;
+  canvasChapter.goal = draft.goal || canvasChapter.goal;
+  canvasChapter.target_length = projectChapterTargetLength.value || canvasChapter.target_length;
+  canvasChapter.status = draft.status;
+
+  let scene = canvasScenesForChapter(nextCanvas, canvasChapter)[0];
+  if (!scene) {
+    scene = {
+      id: `scene_${order}`,
+      chapter_id: canvasChapter.id,
+      scene_order: 1,
+      current_scene: "",
+      pov: "",
+      present_characters: "",
+      surface_event: "",
+      character_desire: "",
+      tension: "",
+      required_facts: [],
+      forbidden_progress: [],
+      ending_beat: "",
+      linked_material_ids: []
+    };
+    nextCanvas.scenes.push(scene);
+    canvasChapter.scene_ids = [...new Set([...canvasChapter.scene_ids, scene.id])];
+  }
+  scene.current_scene = draft.scene_card.current_scene || scene.current_scene;
+  scene.pov = draft.scene_card.pov || scene.pov;
+  scene.present_characters = draft.scene_card.present_characters || scene.present_characters;
+  scene.surface_event = canvasChapter.trigger_event || canvasChapter.external_event || draft.goal || scene.surface_event;
+  scene.character_desire = draft.scene_card.character_desire || scene.character_desire;
+  scene.tension = canvasChapter.obstacle_escalation || scene.tension;
+  scene.required_facts = splitSceneDraftList(draft.scene_card.required_facts || "").length
+    ? splitSceneDraftList(draft.scene_card.required_facts || "")
+    : scene.required_facts;
+  scene.forbidden_progress = splitSceneDraftList(draft.scene_card.forbidden_progress || "").length
+    ? splitSceneDraftList(draft.scene_card.forbidden_progress || "")
+    : scene.forbidden_progress;
+  scene.ending_beat = canvasChapter.ending_hook || scene.ending_beat;
+  return nextCanvas;
+}
+
+async function activeSceneToChapterDraft() {
+  if (!activeNovelProject.value || novelProjectBusy.value) return;
+  novelProjectBusy.value = true;
+  error.value = "";
+  try {
+    const activeOrder = activeNovelChapter.value?.chapter_order || activeCanvasChapter.value?.chapter_order || 1;
+    const savedProject = await updateNovelProject(activeNovelProject.value.id, {
+      ...projectDraft.value,
+      story_canvas: storyCanvasDraft.value
+    });
+    replaceNovelProject(savedProject);
+    syncStoryCanvasDraft(savedProject);
+    const savedCanvas = normalizeStoryCanvas(savedProject.story_canvas);
+    const canvasChapter = canvasChapterForOrder(savedCanvas, activeOrder);
+    const scene = canvasScenesForChapter(savedCanvas, canvasChapter)[0];
+    if (!scene || !canvasChapter) return;
+    const nextDraft = {
+      ...chapterDraft.value,
+      title: canvasChapter.title || chapterDraft.value.title,
+      goal: canvasChapter.goal || chapterDraft.value.goal,
+      scene_card: sceneCardDraftFromCanvas(scene as unknown as Record<string, unknown>, canvasChapter)
+    };
+    chapterDraft.value = nextDraft;
+    projectChapterTargetLength.value = canvasChapter.target_length || projectChapterTargetLength.value;
+    if (activeNovelChapter.value) {
+      const project = await updateNovelChapter(activeNovelChapter.value.id, {
+        title: nextDraft.title,
+        goal: nextDraft.goal,
+        scene_card: nextDraft.scene_card
+      });
+      replaceNovelProject(project);
+      syncStoryCanvasDraft(project);
+      syncChapterDraft(activeNovelChapter.value);
+      await loadChapterVersions();
+    }
+  } catch (err) {
+    error.value = readableError(err);
+  } finally {
+    novelProjectBusy.value = false;
+  }
 }
 
 function canvasChapterTitle(chapterId: string) {
   return storyCanvasDraft.value.chapters.find((chapter) => chapter.id === chapterId)?.title || chapterId || "未绑定章节";
 }
 
+function isInstructionLikeGoal(text: string) {
+  const value = text.trim();
+  if (!value) return false;
+  return [
+    "生成模式：",
+    "长度要求：",
+    "最低可接受长度",
+    "场景任务：",
+    "扩写策略：",
+    "禁止事项：",
+    "不要出现“本章",
+    "目标长度："
+  ].some((marker) => value.includes(marker));
+}
+
+function chapterPlotGoal(chapter: NovelChapter | null) {
+  const rawGoal = chapter?.goal || "";
+  if (rawGoal && !isInstructionLikeGoal(rawGoal)) return rawGoal;
+  const canvasGoal = storyCanvasDraft.value.chapters.find((item) => item.chapter_order === chapter?.chapter_order)?.goal || "";
+  return canvasGoal || "";
+}
+
 function selectCanvasChapter(chapter: StoryCanvasChapter) {
+  rememberChapterInstruction();
   const matched = activeNovelProject.value?.chapters.find((item) => item.chapter_order === chapter.chapter_order);
   if (matched) {
     activeNovelChapterId.value = matched.id;
@@ -926,15 +1189,57 @@ function selectCanvasChapter(chapter: StoryCanvasChapter) {
   }
 }
 
+function rememberChapterInstruction() {
+  if (activeInstructionChapterId.value) {
+    chapterInstructionsById.value[activeInstructionChapterId.value] = chapterInstruction.value;
+  }
+}
+
+function syncChapterInstruction(chapter: NovelChapter | null) {
+  activeInstructionChapterId.value = chapter?.id || "";
+  instructionOptimizationNote.value = "";
+  chapterInstruction.value = chapter?.id
+    ? chapterInstructionsById.value[chapter.id] || DEFAULT_CHAPTER_INSTRUCTION
+    : DEFAULT_CHAPTER_INSTRUCTION;
+}
+
+function clearReorderedChapterInstructionCache(project: NovelProject, deletedChapterId: string, deletedOrder: number) {
+  const nextCache = { ...chapterInstructionsById.value };
+  delete nextCache[deletedChapterId];
+  for (const chapter of project.chapters) {
+    if (chapter.chapter_order >= deletedOrder) {
+      delete nextCache[chapter.id];
+    }
+  }
+  chapterInstructionsById.value = nextCache;
+  activeInstructionChapterId.value = "";
+  chapterInstruction.value = DEFAULT_CHAPTER_INSTRUCTION;
+  instructionOptimizationNote.value = "";
+}
+
+function chapterDraftForApi() {
+  const sceneCard = currentSceneCardForSave();
+  const instruction = chapterInstruction.value.trim();
+  if (instruction) {
+    sceneCard.generation_instruction = instruction;
+  }
+  return {
+    ...chapterDraft.value,
+    scene_card: sceneCard
+  };
+}
+
 function syncChapterDraft(chapter: NovelChapter | null) {
+  rememberChapterInstruction();
   chapterDraft.value = {
     title: chapter?.title || "",
-    goal: chapter?.goal || "",
+    goal: chapterPlotGoal(chapter),
     summary: chapter?.summary || "",
     body: chapter?.body || "",
     status: chapter?.status || "planned",
-    scene_card: normalizeSceneCardDraft(chapter?.scene_card)
+    scene_card: sceneCardDraftFromCanvas(chapter?.scene_card, activeCanvasChapter.value)
   };
+  syncChapterInstruction(chapter);
 }
 
 async function loadNovelProjects() {
@@ -1013,24 +1318,187 @@ function compactInstructionText(text: string) {
   return text.replace(/\s+/g, " ").replace(/\?+/g, "").trim();
 }
 
-function optimizedChapterInstruction() {
-  const goal = compactInstructionText(chapterDraft.value.goal) || "承接前文，推进一个可验证的小目标";
-  const current = activeChapterWordCount.value;
-  const target = projectChapterTargetLength.value;
-  if (!current) {
-    return `围绕“${goal}”写出完整章节，目标约 ${target} 字。直接进入小说场景，用动作、环境、对白和心理推进，不写创作说明，不制造越界进展。`;
-  }
-  if (chapterLengthRatio.value < 85) {
-    return `在保留现有正文事实和语气的基础上扩写到约 ${target} 字。围绕“${goal}”补足场景细节、人物动作、自然对白和内心转折，不新增重大关系进展。`;
-  }
-  if (chapterLengthRatio.value > 130) {
-    return `在保留核心事实的基础上精修到约 ${target} 字。围绕“${goal}”压缩重复描写，保留最有画面感的动作、对白和情绪落点。`;
-  }
-  return `承接现有正文继续润色，目标约 ${target} 字。围绕“${goal}”保持节奏自然，补强场景连贯性和章节收束，不制造越界进展。`;
+function sceneCardInstructionValue(key: string) {
+  return compactInstructionText(chapterDraft.value.scene_card[key] || "");
 }
 
-function applyOptimizedChapterInstruction() {
-  chapterInstruction.value = optimizedChapterInstruction();
+function canvasActionInstructionValue(key: CanvasActionKey) {
+  return compactInstructionText(String(activeCanvasChapter.value?.[key] || ""));
+}
+
+function instructionSection(title: string, lines: string[]) {
+  const cleaned = lines.map((line) => line.trim()).filter(Boolean);
+  return cleaned.length ? `${title}：\n${cleaned.join("\n")}` : "";
+}
+
+function optimizedChapterInstruction() {
+  const goal = compactInstructionText(chapterDraft.value.goal) || "承接前文，完成一个具体事件中的关系推进";
+  const current = activeChapterWordCount.value;
+  const target = Math.max(400, Number(projectChapterTargetLength.value) || 1800);
+  const minimum = Math.max(400, Math.round(target * 0.7));
+  const ratio = chapterLengthRatio.value;
+  const card = {
+    currentScene: sceneCardInstructionValue("current_scene"),
+    pov: sceneCardInstructionValue("pov"),
+    presentCharacters: sceneCardInstructionValue("present_characters"),
+    characterDesire: sceneCardInstructionValue("character_desire"),
+    requiredFacts: sceneCardInstructionValue("required_facts"),
+    forbiddenProgress: sceneCardInstructionValue("forbidden_progress")
+  };
+  const canvasAction = {
+    externalEvent: canvasActionInstructionValue("external_event"),
+    triggerEvent: canvasActionInstructionValue("trigger_event"),
+    immediateReaction: canvasActionInstructionValue("immediate_reaction"),
+    obstacleEscalation: canvasActionInstructionValue("obstacle_escalation"),
+    counterpartReaction: canvasActionInstructionValue("counterpart_reaction"),
+    characterChoice: canvasActionInstructionValue("character_choice"),
+    sceneConsequence: canvasActionInstructionValue("scene_consequence"),
+    relationshipShift: canvasActionInstructionValue("relationship_shift"),
+    endingHook: canvasActionInstructionValue("ending_hook")
+  };
+  let mode = "精修当前章";
+  let lengthDirective = `当前正文约 ${current} 字，接近目标区间。请保持已有节奏，补强场景连贯性和章节收束。`;
+  if (!current) {
+    mode = "新写完整章节";
+    lengthDirective = "当前正文为空。请直接进入小说场景，写出完整章节，不要写大纲、说明或创作报告。";
+  } else if (ratio < 70) {
+    mode = "扩写当前章";
+    lengthDirective = `当前正文约 ${current} 字，明显低于目标 ${target} 字。请在保留已有事实、语气和人物边界的基础上扩写同一章，不要另起新章，不要跳到后续剧情。`;
+  } else if (ratio < 90) {
+    mode = "续写并补足当前章";
+    lengthDirective = `当前正文约 ${current} 字，略低于目标 ${target} 字。请承接现有正文继续写，并补足动作、对白和场景转折。`;
+  } else if (ratio > 130) {
+    mode = "压缩精修当前章";
+    lengthDirective = `当前正文约 ${current} 字，超过目标 ${target} 字较多。请保留核心事实和最有画面感的动作、对白、情绪落点，压缩重复描写。`;
+  }
+  const sceneLines = [
+    card.currentScene ? `当前场景：${card.currentScene}` : "",
+    card.pov ? `视角：${card.pov}` : "",
+    card.presentCharacters ? `在场人物：${card.presentCharacters}` : "",
+    card.characterDesire ? `人物欲望：${card.characterDesire}` : "",
+    card.requiredFacts ? `必须保留事实：${card.requiredFacts}` : "",
+    card.forbiddenProgress ? `禁止推进：${card.forbiddenProgress}` : ""
+  ];
+  const canvasActionLines = [
+    canvasAction.externalEvent ? `外部事件：${canvasAction.externalEvent}` : "",
+    canvasAction.triggerEvent ? `触发事件：${canvasAction.triggerEvent}` : "",
+    canvasAction.immediateReaction ? `即时反应：${canvasAction.immediateReaction}` : "",
+    canvasAction.obstacleEscalation ? `阻碍升级：${canvasAction.obstacleEscalation}` : "",
+    canvasAction.counterpartReaction ? `对方反应：${canvasAction.counterpartReaction}` : "",
+    canvasAction.characterChoice ? `人物选择：${canvasAction.characterChoice}` : "",
+    canvasAction.sceneConsequence ? `场景后果：${canvasAction.sceneConsequence}` : "",
+    canvasAction.relationshipShift ? `关系变化：${canvasAction.relationshipShift}` : "",
+    canvasAction.endingHook ? `结尾钩子：${canvasAction.endingHook}` : ""
+  ];
+  const sceneTaskLines = sceneLines.some(Boolean) ? sceneLines : [
+    "围绕本章剧情概述和画布动作链展开一个连续、可见的校园日常场面。",
+    "场景卡只负责镜头、人物欲望、事实边界和禁止推进，不负责另行改写剧情事件。"
+  ];
+  const actionTaskLines = canvasActionLines.some(Boolean) ? canvasActionLines : [
+    "用一个具体外部事件打开场景。",
+    "让人物遇到一个不能立刻解决的小阻碍。",
+    "安排至少一个人物小选择，并用具体动作收束到可续写的钩子。"
+  ];
+  return [
+    `生成模式：${mode}`,
+    instructionSection("信息优先级", [
+      "本章剧情概述决定这一章发生什么，是剧情事实和方向，不是写作命令。",
+      "画布动作链决定事件推进顺序：先外部事件，再触发反应、阻碍升级、人物选择和结尾钩子。",
+      "场景卡决定怎么贴近人物和场景来写：视角、在场人物、人物欲望、必须保留事实和禁止推进。",
+      "生成指令只决定写法、篇幅、节奏和质量补救；不得改写本章剧情概述、画布动作链和已确认事实。"
+    ]),
+    instructionSection("长度要求", [
+      `目标长度：${target} 字`,
+      `最低可接受长度：${minimum} 字`,
+      lengthDirective,
+      "如果一次无法写满目标长度，也必须先达到最低可接受长度，并停在可继续续写的自然钩子上。"
+    ]),
+    instructionSection("本章剧情概述", [goal]),
+    instructionSection("画布动作链", actionTaskLines),
+    instructionSection("场景镜头与边界", sceneTaskLines),
+    instructionSection("场景展开顺序", [
+      "先按画布动作链里的外部事件或触发事件打开场景；如果画布缺失，再用雨势、铃声、旁人经过、物件掉落或时间被打断补足。",
+      "再写人物的即时动作和克制反应，让读者看见她想处理什么、又为什么不能马上处理；不要把阻碍写成分析句。",
+      "中段用短对白和动作来推进，不用解释关系变化；对白之间穿插物件、视线、距离和环境声。",
+      "结尾优先收在画布动作链的结尾钩子上；如果缺失，再收在一个可继续写的动作、物件或未问出口的问题上。"
+    ]),
+    instructionSection("长度与节奏", [
+      `正文目标约 ${target} 字，最低先达到 ${minimum} 字；如果当前只有 ${current} 字，优先扩写同一场景内部的动作链和对白，不另起新章。`,
+      "建议把篇幅分给：场景进入约 20%，事件展开约 35%，对白与选择约 30%，结尾钩子约 15%。",
+      "每 2-3 段必须有一个可见动作或环境变化，避免连续心理抒情。"
+    ]),
+    instructionSection("扩写策略", [
+      "保留已有正文事实、语气和人物边界。",
+      "增加 2-3 个可见动作节点，例如停顿、递还物品、整理书页、避开旁人、走廊里的短暂打断。",
+      "增加至少 2 轮自然对白；对白要短，不要把人物心意说满。",
+      "增加环境变化推动节奏，例如光线变化、铃声、脚步声、旁人经过、门被关上。",
+      "让主角做一个小选择，例如没有立刻离开、主动补一句话、收好某个物件、回头确认对方反应。",
+      canvasAction.endingHook ? "结尾必须停在画布动作链的结尾钩子附近。" : "结尾必须停在一个具体可续写的动作、物件或未说完的话上。"
+    ]),
+    "",
+    instructionSection("禁止事项", [
+      "不要出现“本章剧情概述”“场景卡”“人物欲望”“阻碍/张力”“作为伏笔”等元叙述。",
+      "不要直接写“他们关系变近了”“两人还不熟”“这是后续剧情的伏笔”。",
+      "不要突然表白、承诺、亲密越界。",
+      "不要重复已有段落。",
+      "不要把剧情标签、素材列表、内部字段名或编号写进正文。"
+    ])
+  ].filter(Boolean).join("\n\n");
+}
+
+async function applyOptimizedChapterInstruction() {
+  const baseInstruction = optimizedChapterInstruction();
+  chapterInstruction.value = baseInstruction;
+  if (activeInstructionChapterId.value) {
+    chapterInstructionsById.value[activeInstructionChapterId.value] = baseInstruction;
+  }
+  instructionOptimizationNote.value = "已生成本地硬约束骨架，正在请求远程导演优化。";
+  if (!activeNovelProject.value || isOptimizingInstruction.value) {
+    instructionOptimizationNote.value = activeNovelProject.value ? "正在优化中。" : "当前没有长篇项目，已使用本地骨架。";
+    return;
+  }
+  isOptimizingInstruction.value = true;
+  try {
+    const result = await optimizeNovelInstruction(activeNovelProject.value.id, {
+      chapter_id: activeNovelChapter.value?.id || null,
+      base_instruction: baseInstruction,
+      title: chapterDraft.value.title,
+      goal: chapterDraft.value.goal,
+      summary: chapterDraft.value.summary,
+      body: chapterDraft.value.body,
+      status: chapterDraft.value.status,
+      scene_card: chapterDraft.value.scene_card,
+      canvas_chapter: activeCanvasChapter.value ? { ...activeCanvasChapter.value } as unknown as Record<string, unknown> : {},
+      previous_handoff: novelStateLastHandoff.value || {},
+      prior_novel_state: {
+        summary: novelStateSummary.value,
+        open_threads: novelStateOpenThreads.value,
+        completed_chapters: activeNovelPriorStateEntries.value.map(({ chapter }) => ({
+          chapter_order: chapter.chapter_order,
+          title: chapter.title,
+          summary: chapter.summary,
+          status: chapter.status
+        }))
+      },
+      quality_diagnosis: chapterQualityDiagnosis.value,
+      target_length: projectChapterTargetLength.value
+    });
+    chapterInstruction.value = result.instruction || baseInstruction;
+    if (activeInstructionChapterId.value) {
+      chapterInstructionsById.value[activeInstructionChapterId.value] = chapterInstruction.value;
+    }
+    instructionOptimizationNote.value = result.source === "remote"
+      ? "远程导演优化已应用。"
+      : `远程优化不可用，已保留本地骨架${result.diagnostics?.reason ? `：${result.diagnostics.reason}` : "。"}`;
+  } catch (err) {
+    chapterInstruction.value = baseInstruction;
+    if (activeInstructionChapterId.value) {
+      chapterInstructionsById.value[activeInstructionChapterId.value] = chapterInstruction.value;
+    }
+    instructionOptimizationNote.value = `远程优化失败，已保留本地骨架：${readableError(err)}`;
+  } finally {
+    isOptimizingInstruction.value = false;
+  }
 }
 
 async function createLongNovelProject() {
@@ -1068,6 +1536,7 @@ async function saveNovelProject() {
       story_canvas: storyCanvasDraft.value
     });
     replaceNovelProject(project);
+    syncStoryCanvasDraft(project);
   } catch (err) {
     error.value = readableError(err);
   } finally {
@@ -1086,8 +1555,7 @@ async function rebuildStoryCanvas() {
   beginCanvasBuildFlow();
   try {
     const savedProject = await updateNovelProject(activeNovelProject.value.id, {
-      ...projectDraft.value,
-      story_canvas: storyCanvasDraft.value
+      ...projectDraft.value
     });
     replaceNovelProject(savedProject);
     const project = await buildStoryCanvas(savedProject.id);
@@ -1114,6 +1582,7 @@ async function saveStoryCanvas() {
       story_canvas: storyCanvasDraft.value
     });
     replaceNovelProject(project);
+    syncStoryCanvasDraft(project);
   } catch (err) {
     error.value = readableError(err);
   } finally {
@@ -1129,7 +1598,7 @@ async function addNovelChapter() {
   try {
     const project = await createNovelChapter(activeNovelProject.value.id, {
       title: "新章节",
-      goal: "承接前文，推进一个可验证的小目标。",
+      goal: "承接前文，完成一个具体事件中的关系推进。",
       status: "planned"
     });
     replaceNovelProject(project);
@@ -1142,13 +1611,43 @@ async function addNovelChapter() {
   }
 }
 
-async function saveNovelChapter() {
-  if (!activeNovelChapter.value || novelProjectBusy.value) return;
+async function deleteActiveNovelChapter() {
+  if (!activeNovelProject.value || !activeNovelChapter.value || novelProjectBusy.value) return;
+  const chapter = activeNovelChapter.value;
+  if (!window.confirm(`删除「${chapter.title || `第 ${chapter.chapter_order} 章`}」？章节正文和版本记录都会删除，后续章节会重新编号并标记受影响。`)) return;
   novelProjectBusy.value = true;
   error.value = "";
   try {
-    const project = await updateNovelChapter(activeNovelChapter.value.id, chapterDraft.value);
+    const deletedOrder = chapter.chapter_order;
+    const project = await deleteNovelChapter(chapter.id);
     replaceNovelProject(project);
+    syncStoryCanvasDraft(project);
+    clearReorderedChapterInstructionCache(project, chapter.id, deletedOrder);
+    const nextChapter = project.chapters.find((item) => item.chapter_order >= deletedOrder) || project.chapters[project.chapters.length - 1] || null;
+    activeNovelChapterId.value = nextChapter?.id || "";
+    syncChapterDraft(activeNovelChapter.value);
+    await loadChapterVersions();
+  } catch (err) {
+    error.value = readableError(err);
+  } finally {
+    novelProjectBusy.value = false;
+  }
+}
+
+async function saveNovelChapter() {
+  if (!activeNovelProject.value || !activeNovelChapter.value || novelProjectBusy.value) return;
+  novelProjectBusy.value = true;
+  error.value = "";
+  try {
+    const syncedCanvas = storyCanvasWithChapterDraft(storyCanvasDraft.value, activeNovelChapter.value, chapterDraft.value);
+    storyCanvasDraft.value = syncedCanvas;
+    await updateNovelProject(activeNovelProject.value.id, {
+      ...projectDraft.value,
+      story_canvas: syncedCanvas
+    });
+    const project = await updateNovelChapter(activeNovelChapter.value.id, chapterDraftForApi());
+    replaceNovelProject(project);
+    syncStoryCanvasDraft(project);
     await loadChapterVersions();
   } catch (err) {
     error.value = readableError(err);
@@ -1173,7 +1672,7 @@ async function generateActiveChapter() {
     if (runId !== novelGenerationRunId) return;
     replaceNovelProject(savedProject);
     if (activeNovelChapter.value) {
-      const syncedProject = await updateNovelChapter(activeNovelChapter.value.id, chapterDraft.value);
+      const syncedProject = await updateNovelChapter(activeNovelChapter.value.id, chapterDraftForApi());
       if (runId !== novelGenerationRunId) return;
       replaceNovelProject(syncedProject);
     }
@@ -2218,7 +2717,7 @@ function downloadNovelProjectMarkdown() {
               <div class="novel-state-panel">
                 <article>
                   <p class="eyebrow">Novel State</p>
-                  <strong>当前全局摘要</strong>
+                  <strong>截至上一章摘要</strong>
                   <span>{{ novelStateSummary }}</span>
                 </article>
                 <article>
@@ -2246,46 +2745,16 @@ function downloadNovelProjectMarkdown() {
                   <strong>{{ chapter.chapter_order }}. {{ chapter.title }}</strong>
                   <span>{{ novelChapterStatusLabel(chapter.status) }} · {{ chapter.target_length }} 字</span>
                 </div>
-                <label>
-                  <span>章节目标</span>
-                  <textarea v-model="chapter.goal" rows="2" />
-                </label>
-                <label>
-                  <span>外部事件</span>
-                  <textarea v-model="chapter.external_event" rows="2" />
-                </label>
-                <label>
-                  <span>触发事件</span>
-                  <textarea v-model="chapter.trigger_event" rows="2" />
-                </label>
-                <label>
-                  <span>即时反应</span>
-                  <textarea v-model="chapter.immediate_reaction" rows="2" />
-                </label>
-                <label>
-                  <span>阻碍升级</span>
-                  <textarea v-model="chapter.obstacle_escalation" rows="2" />
-                </label>
-                <label>
-                  <span>对方反应</span>
-                  <textarea v-model="chapter.counterpart_reaction" rows="2" />
-                </label>
-                <label>
-                  <span>人物选择</span>
-                  <textarea v-model="chapter.character_choice" rows="2" />
-                </label>
-                <label>
-                  <span>场景后果</span>
-                  <textarea v-model="chapter.scene_consequence" rows="2" />
-                </label>
-                <label>
-                  <span>关系变化</span>
-                  <textarea v-model="chapter.relationship_shift" rows="2" />
-                </label>
-                <label>
-                  <span>结尾钩子</span>
-                  <textarea v-model="chapter.ending_hook" rows="2" />
-                </label>
+                <div class="canvas-read-grid">
+                  <article>
+                    <span>剧情概述</span>
+                    <p>{{ canvasFieldText(chapter.goal) }}</p>
+                  </article>
+                  <article v-for="field in canvasActionChainFields" :key="field.key">
+                    <span>{{ field.label }}</span>
+                    <p>{{ canvasFieldText(chapter[field.key]) }}</p>
+                  </article>
+                </div>
               </article>
             </div>
             <div v-else-if="storyCanvasView === 'scenes'" class="canvas-scene-list">
@@ -2295,30 +2764,30 @@ function downloadNovelProjectMarkdown() {
                   <span>{{ scene.linked_material_ids.length }} 条素材</span>
                 </div>
                 <div class="canvas-field-grid">
-                  <label>
+                  <article>
                     <span>当前场景</span>
-                    <textarea v-model="scene.current_scene" rows="2" />
-                  </label>
-                  <label>
+                    <p>{{ canvasFieldText(scene.current_scene) }}</p>
+                  </article>
+                  <article>
                     <span>表层事件</span>
-                    <textarea v-model="scene.surface_event" rows="2" />
-                  </label>
-                  <label>
+                    <p>{{ canvasFieldText(scene.surface_event) }}</p>
+                  </article>
+                  <article>
                     <span>人物欲望</span>
-                    <textarea v-model="scene.character_desire" rows="2" />
-                  </label>
-                  <label>
+                    <p>{{ canvasFieldText(scene.character_desire) }}</p>
+                  </article>
+                  <article>
                     <span>阻碍 / 张力</span>
-                    <textarea v-model="scene.tension" rows="2" />
-                  </label>
-                  <label>
+                    <p>{{ canvasFieldText(scene.tension) }}</p>
+                  </article>
+                  <article>
                     <span>禁止推进</span>
-                    <textarea :value="scene.forbidden_progress.join('；')" rows="2" @input="updateSceneArray(scene, 'forbidden_progress', $event)" />
-                  </label>
-                  <label>
+                    <p>{{ canvasFieldText(scene.forbidden_progress) }}</p>
+                  </article>
+                  <article>
                     <span>结尾落点</span>
-                    <textarea v-model="scene.ending_beat" rows="2" />
-                  </label>
+                    <p>{{ canvasFieldText(scene.ending_beat) }}</p>
+                  </article>
                 </div>
               </article>
             </div>
@@ -2398,6 +2867,7 @@ function downloadNovelProjectMarkdown() {
               <div class="chapter-actions">
                 <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="checkActiveContinuity">检查</button>
                 <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="saveNovelChapter">保存</button>
+                <button type="button" class="ghost muted danger" :disabled="novelProjectBusy" @click="deleteActiveNovelChapter">删除</button>
                 <button type="button" :disabled="novelProjectBusy" @click="generateActiveChapter">生成/续写</button>
               </div>
             </div>
@@ -2416,7 +2886,7 @@ function downloadNovelProjectMarkdown() {
               </label>
             </div>
             <label>
-              <span>本章目标</span>
+              <span>本章剧情概述</span>
               <textarea v-model="chapterDraft.goal" rows="3" />
             </label>
             <section class="scene-card-editor">
@@ -2427,6 +2897,19 @@ function downloadNovelProjectMarkdown() {
                 </div>
                 <small>生成前先约束场景、人物欲望、张力和结尾落点。</small>
               </div>
+              <div v-if="activeCanvasChapter" class="canvas-link-editor">
+                <div>
+                  <p class="eyebrow">Canvas Link</p>
+                  <strong>对应画布动作链</strong>
+                  <small>剧情推进以这里为准，保存后会反向写回故事画布。</small>
+                </div>
+                <div class="canvas-action-grid">
+                  <label v-for="item in activeCanvasActionChain" :key="item.label">
+                    <span>{{ item.label }}</span>
+                    <textarea v-model="activeCanvasChapter[item.key]" rows="3" />
+                  </label>
+                </div>
+              </div>
               <div class="scene-card-grid">
                 <label v-for="field in sceneCardFields" :key="field.key">
                   <span>{{ field.label }}</span>
@@ -2436,7 +2919,7 @@ function downloadNovelProjectMarkdown() {
             </section>
             <label>
               <span>生成指令</span>
-              <textarea v-model="chapterInstruction" rows="2" />
+              <textarea v-model="chapterInstruction" rows="10" />
             </label>
             <label class="range-field">
               <span>项目章节目标长度 {{ projectChapterTargetLength }} 字</span>
@@ -2444,14 +2927,15 @@ function downloadNovelProjectMarkdown() {
             </label>
             <div class="chapter-length-panel" :class="`tone-${chapterLengthGuide.tone}`">
               <div>
-                <strong>{{ activeChapterWordCount }} / {{ projectChapterTargetLength }} 字</strong>
-                <span>{{ chapterLengthGuide.label }} · {{ chapterLengthRatio }}%</span>
-              </div>
-              <p>{{ chapterLengthGuide.detail }}</p>
-              <button class="ghost muted" type="button" :disabled="novelProjectBusy" @click="applyOptimizedChapterInstruction">
-                优化生成指令
+              <strong>{{ activeChapterWordCount }} / {{ projectChapterTargetLength }} 字</strong>
+              <span>{{ chapterLengthGuide.label }} · {{ chapterLengthRatio }}%</span>
+            </div>
+            <p>{{ chapterLengthGuide.detail }}</p>
+              <button class="ghost muted" type="button" :disabled="novelProjectBusy || isOptimizingInstruction" @click="applyOptimizedChapterInstruction">
+                {{ isOptimizingInstruction ? "远程优化中" : "优化生成指令" }}
               </button>
             </div>
+            <p v-if="instructionOptimizationNote" class="instruction-optimization-note">{{ instructionOptimizationNote }}</p>
             <div class="writing-surface" :class="`font-${novelEditorFont}`">
               <label>
                 <span>章节摘要</span>

@@ -15,6 +15,8 @@ from .schemas import (
     NovelContinuityReport,
     NovelGenerateRequest,
     NovelGenerateResponse,
+    NovelInstructionOptimizeRequest,
+    NovelInstructionOptimizeResponse,
     NovelMaterial,
     NovelProjectCreateRequest,
     NovelProjectResponse,
@@ -261,37 +263,33 @@ class NovelService:
         project = storage.get_novel_project(project_id)
         if not project:
             raise ValueError("Novel project not found")
-        if any(str(row["body"] or "").strip() for row in storage.list_novel_chapters(project_id)):
-            raise ValueError("Cannot rebuild initial canvas after chapters have body")
+        initial_chapters = [row for row in storage.list_novel_chapters(project_id) if int(row["chapter_order"]) <= 4]
+        if any(storage.list_novel_versions(row["id"]) for row in initial_chapters):
+            raise ValueError("Cannot rebuild initial canvas while the first four chapters still have versions")
         story_bible = self._json_dict(project["story_bible_json"])
         materials = storage.list_novel_materials(project_id)
-        canvas = self._default_story_canvas(
-            project["title"],
-            project["genre"],
-            project["tone"],
-            project["protagonist"],
-            story_bible,
-            [],
-        )
+        canvas = self._default_extension_canvas(project, {}, 0, 4)
         try:
             if not llm.configured():
                 raise RuntimeError("llm_not_configured")
             text = await llm.chat_complete([
-                {"role": "system", "content": self._canvas_system_prompt()},
-                {"role": "user", "content": self._canvas_source(project, story_bible, materials, canvas)},
+                {"role": "system", "content": self._canvas_extend_system_prompt()},
+                {"role": "user", "content": self._initial_canvas_source(project, story_bible, materials)},
             ], timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
             canvas = self._parse_canvas_response(text, canvas)
-            canvas["diagnostics"] = {**self._json_dict(canvas.get("diagnostics")), "source": "remote"}
+            canvas["diagnostics"] = {**self._json_dict(canvas.get("diagnostics")), "source": "remote", "mode": "initial_rolling"}
         except Exception as exc:
             llm.last_chat_error = type(exc).__name__
             canvas["diagnostics"] = {
                 **self._json_dict(canvas.get("diagnostics")),
                 "source": "local",
+                "mode": "initial_rolling",
                 "fallback_reason": type(exc).__name__,
                 "fallback_detail": str(exc)[:240],
             }
         canvas = self._story_canvas_with_materials(canvas, materials)
         storage.update_novel_project(project_id, {"story_canvas": canvas, "outline": self._canvas_outline(canvas)})
+        self._prune_empty_chapters_outside_canvas(project_id, canvas)
         self._sync_chapters_from_canvas(project_id, canvas)
         return self.project_response(project_id)
 
@@ -352,6 +350,19 @@ class NovelService:
         self._sync_chapters_from_canvas(project_id, canvas, start_order=from_order + 1)
         return self.project_response(project_id)
 
+    def sync_story_canvas_to_chapters(self, project_id: str, start_order: int = 1) -> None:
+        storage = self._require_storage()
+        project = storage.get_novel_project(project_id)
+        if not project:
+            raise ValueError("Novel project not found")
+        canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
+        if not canvas:
+            return
+        normalized = self._compact_story_canvas(canvas)
+        if normalized != canvas:
+            storage.update_novel_project(project_id, {"story_canvas": normalized, "outline": self._canvas_outline(normalized)})
+        self._sync_chapters_from_canvas(project_id, normalized, start_order=start_order)
+
     def _sync_chapters_from_canvas(self, project_id: str, canvas: dict[str, Any], start_order: int = 1) -> None:
         storage = self._require_storage()
         existing = list(storage.list_novel_chapters(project_id))
@@ -361,15 +372,16 @@ class NovelService:
             order = self._coerce_int(canvas_chapter.get("chapter_order"), len(existing_by_order) + 1, 1, 99)
             if order < start_order:
                 continue
-            scene = self._canvas_scene_for_canvas_chapter(canvas, str(canvas_chapter.get("id", ""))) or {}
+            scene = self._scene_card_planning_from_canvas(canvas_chapter, self._canvas_scene_for_canvas_chapter(canvas, str(canvas_chapter.get("id", ""))) or {})
             updates = {
                 "title": canvas_chapter.get("title") or f"第{order}章",
                 "goal": canvas_chapter.get("goal") or canvas_chapter.get("external_event") or "",
-                "scene_card": scene,
                 "source_material_ids": material_ids,
             }
             row = existing_by_order.get(order)
             if row:
+                existing_scene_card = self._json_dict(row["scene_card_json"] if "scene_card_json" in row.keys() else "{}")
+                updates["scene_card"] = self._merge_scene_card_planning(existing_scene_card, scene)
                 storage.update_novel_chapter(row["id"], updates, "canvas")
             else:
                 chapter_id = storage.create_novel_chapter(
@@ -386,6 +398,86 @@ class NovelService:
                 created = storage.get_novel_chapter(chapter_id)
                 if created:
                     existing_by_order[int(created["chapter_order"])] = created
+
+    def _scene_card_planning_from_canvas(self, canvas_chapter: dict[str, Any], scene: dict[str, Any]) -> dict[str, Any]:
+        if not canvas_chapter and not scene:
+            return {}
+        action_pairs = [
+            ("触发事件", canvas_chapter.get("trigger_event") or canvas_chapter.get("external_event")),
+            ("即时反应", canvas_chapter.get("immediate_reaction")),
+            ("阻碍升级", canvas_chapter.get("obstacle_escalation")),
+            ("对方反应", canvas_chapter.get("counterpart_reaction")),
+            ("人物选择", canvas_chapter.get("character_choice")),
+            ("场景后果", canvas_chapter.get("scene_consequence") or canvas_chapter.get("relationship_shift")),
+            ("结尾钩子", canvas_chapter.get("ending_hook")),
+        ]
+        planning = dict(scene)
+        if canvas_chapter:
+            planning["surface_event"] = (
+                str(canvas_chapter.get("trigger_event") or canvas_chapter.get("external_event") or "").strip()
+                or str(scene.get("surface_event") or "").strip()
+            )
+            planning["tension"] = (
+                str(canvas_chapter.get("obstacle_escalation") or "").strip()
+                or str(scene.get("tension") or "").strip()
+            )
+            planning["ending_beat"] = (
+                str(canvas_chapter.get("ending_hook") or "").strip()
+                or str(scene.get("ending_beat") or "").strip()
+            )
+        planning.update({
+            "canvas_chapter_id": str(canvas_chapter.get("id") or ""),
+            "canvas_scene_id": str(scene.get("id") or ""),
+            "canvas_chapter_order": self._coerce_int(canvas_chapter.get("chapter_order"), 0, 0, 999),
+            "canvas_chapter_status": str(canvas_chapter.get("status") or ""),
+            "canvas_action_chain": [
+                {"label": label, "text": str(value).strip()}
+                for label, value in action_pairs
+                if str(value or "").strip()
+            ],
+        })
+        return planning
+
+    def _merge_scene_card_planning(self, existing: dict[str, Any], scene: dict[str, Any]) -> dict[str, Any]:
+        if not scene:
+            return existing
+        planning_keys = {
+            "id",
+            "chapter_id",
+            "scene_order",
+            "current_scene",
+            "pov",
+            "present_characters",
+            "surface_event",
+            "character_desire",
+            "tension",
+            "required_facts",
+            "forbidden_progress",
+            "ending_beat",
+            "linked_material_ids",
+            "canvas_chapter_id",
+            "canvas_scene_id",
+            "canvas_chapter_order",
+            "canvas_chapter_status",
+            "canvas_action_chain",
+        }
+        merged = dict(existing)
+        for key in planning_keys:
+            if key in scene:
+                merged[key] = scene[key]
+        return merged
+
+    def _prune_empty_chapters_outside_canvas(self, project_id: str, canvas: dict[str, Any]) -> None:
+        storage = self._require_storage()
+        max_canvas_order = max([int(item.get("chapter_order") or 0) for item in self._canvas_chapters(canvas)] or [0])
+        for row in sorted(storage.list_novel_chapters(project_id), key=lambda item: int(item["chapter_order"]), reverse=True):
+            if int(row["chapter_order"]) <= max_canvas_order:
+                continue
+            if str(row["body"] or "").strip():
+                continue
+            if storage.list_novel_versions(row["id"]):
+                continue
+            storage.delete_novel_chapter(row["id"])
 
     def build_story_bible(
         self,
@@ -457,6 +549,7 @@ class NovelService:
             "chapters 每项必须包含 id, act_id, chapter_order, title, goal, external_event, trigger_event, immediate_reaction, "
             "obstacle_escalation, counterpart_reaction, character_choice, scene_consequence, relationship_shift, ending_hook, "
             "target_length, status, emotion_curve, scene_ids。"
+            "chapter.goal 是“本章剧情概述”，不是写作指令；必须写成 1-2 句具体剧情梗概，包含外部事件、人物欲望或阻碍、人物选择、关系变化和结尾边界，避免“推进关系”“建立印象”这类空泛表达。"
             "scenes 每项必须包含 id, chapter_id, scene_order, current_scene, pov, present_characters, surface_event, "
             "character_desire, tension, required_facts, forbidden_progress, ending_beat, linked_material_ids。"
             "不要输出任何数字评分、冲突等级或低/中/高标签；所有张力都必须写成具体可见的文字原因。"
@@ -470,6 +563,7 @@ class NovelService:
             "chapters 每项必须包含 id, act_id, chapter_order, title, goal, external_event, trigger_event, immediate_reaction, "
             "obstacle_escalation, counterpart_reaction, character_choice, scene_consequence, relationship_shift, ending_hook, "
             "target_length, status, emotion_curve, scene_ids。"
+            "chapter.goal 是“本章剧情概述”，不是写作指令；必须写成 1-2 句具体剧情梗概，说明本章发生什么、角色想要什么、被什么阻碍、做出什么小选择、关系停在什么边界。"
             "scenes 每项必须包含 id, chapter_id, scene_order, current_scene, pov, present_characters, surface_event, "
             "character_desire, tension, required_facts, forbidden_progress, ending_beat, linked_material_ids。"
             "不要输出任何数字评分、冲突等级或低/中/高标签；scene.tension 必须写具体阻碍，例如外部打断、"
@@ -509,6 +603,40 @@ class NovelService:
             "acts, chapters, scenes, threads 必须是数组。diagnostics.source 写 remote。",
         ])
 
+    def _initial_canvas_source(
+        self,
+        project: Any,
+        story_bible: dict[str, Any],
+        materials: list[Any],
+    ) -> str:
+        material_lines = "\n".join(self._canvas_material_line(row) for row in materials[:8]) or "无"
+        empty_state = self._empty_novel_state(project["title"])
+        return "\n\n".join([
+            "[作品设定]",
+            f"标题：{project['title']}",
+            f"类型：{project['genre']}",
+            f"基调：{project['tone']}",
+            f"主角：{project['protagonist']}",
+            f"世界观：{self._clean_material_text(project['worldview'])}",
+            f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
+            "[Story Bible]",
+            self._story_bible_prompt(story_bible),
+            "[Novel State 长期摘要]",
+            self._novel_state_prompt(empty_state),
+            "[可用素材]",
+            material_lines,
+            "[结构要求]",
+            self._canvas_schema_hint(),
+            "[初始滚动规划目标]",
+            "请使用和滚动规划完全一致的 Story Canvas 结构，从第 1 章开始连续规划 4 章。chapter_order 必须依次为 1 到 4。",
+            "每章都必须像可直接写正文的章节交接单：有具体外部事件、即时反应、阻碍升级、对方反应、人物选择、场景后果、关系变化和结尾钩子。",
+            "每章 goal 必须比一句目标更具体：用 60-140 字写出本章剧情概述，至少包含“场面/事件 + 主角想法或需求 + 具体阻碍 + 小选择 + 关系落点”，不能写成生成指令。",
+            "每章至少绑定 1 张 scene card；scene.tension 必须是具体阻碍文字，不允许数字、等级或抽象标签。",
+            "素材只作为熟悉感锚点，最多露出一到两个线索；剧情可以自由新增合理校园事件，不要把聊天素材按顺序改成流水账。",
+            "第一章也要按滚动章节的密度写：不要写总纲，不要写阶段说明，不要写关系分析句。",
+            "diagnostics.source 写 remote，diagnostics.mode 写 initial_rolling。",
+        ])
+
     def _canvas_schema_hint(self) -> str:
         return (
             "acts: 4 个阶段对象；chapters: 4-6 个章节对象，chapter_order 必须为 1..N；"
@@ -526,7 +654,7 @@ class NovelService:
         instruction: str,
     ) -> str:
         story_bible = self._json_dict(project["story_bible_json"])
-        novel_state = self._json_dict(project["novel_state_json"] if "novel_state_json" in project.keys() else "{}")
+        novel_state = self._novel_state_until(project, from_order)
         last_chapter = next((row for row in reversed(chapters) if int(row["chapter_order"]) <= from_order), None)
         last_tail = str(last_chapter["body"] or "")[-1200:] if last_chapter else "无"
         last_handoff = self._previous_or_current_handoff_prompt(novel_state, chapters, from_order)
@@ -560,6 +688,7 @@ class NovelService:
             "[硬约束]",
             "不要重写第 1 章到当前章节，不要让后续章节重复已经发生的偶遇、找话题或相同打断。"
             "每章必须从上一章未解决问题或结尾钩子里自然生长。"
+            "每章 goal 必须写成 60-140 字的本章剧情概述，包含场面/事件、人物需求、阻碍、选择、关系落点；不要写成“生成/扩写/续写”指令。"
             "每章只能推进一个小关系变化，必须通过外部事件、动作、对白和选择体现。"
             "允许自由新增校园事件，但熟悉线索只露出一小部分，不要把素材列表流水账化。"
             "diagnostics.source 写 remote，diagnostics.mode 写 rolling_extend。",
@@ -760,7 +889,7 @@ class NovelService:
         from_order: int,
         count: int,
     ) -> dict[str, Any]:
-        novel_state = self._json_dict(project["novel_state_json"] if "novel_state_json" in project.keys() else "{}")
+        novel_state = self._novel_state_until(project, from_order)
         start = from_order + 1
         act_id = f"rolling_act_{start}_{start + count - 1}"
         open_threads = [str(item) for item in novel_state.get("open_threads", []) if str(item).strip()]
@@ -795,7 +924,7 @@ class NovelService:
                 "act_id": act_id,
                 "chapter_order": order,
                 "title": f"第{order}章 {title}",
-                "goal": f"承接“{anchor[:80]}”，通过{event}让两人在边界内多一次具体协作。",
+                "goal": f"承接“{anchor[:70]}”，本章把场面放在{place}：{event}林晚栀需要先处理眼前麻烦，却被时间、旁人或信息差打断；她做出一个不越界的小选择，让两人多一件可回望的共同经历。",
                 "external_event": event,
                 "trigger_event": event,
                 "immediate_reaction": "林晚栀先处理眼前的小麻烦，没有急着解释自己的在意。",
@@ -845,6 +974,67 @@ class NovelService:
             "quality_rules": ["后续章节必须承接上一章交接单，不重复已发生事件。"],
             "diagnostics": {"source": "local", "mode": "rolling_extend"},
         }
+
+    def _update_canvas_from_completed_chapter(
+        self,
+        project_id: str,
+        chapter: Any,
+        scene_card: dict[str, Any],
+        parsed: dict[str, Any],
+    ) -> None:
+        storage = self._require_storage()
+        project = storage.get_novel_project(project_id)
+        if not project:
+            return
+        canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
+        if not canvas:
+            return
+        order = int(chapter["chapter_order"])
+        next_canvas = json.loads(json.dumps(canvas, ensure_ascii=False))
+        canvas_chapter = next((item for item in self._canvas_chapters(next_canvas) if int(item.get("chapter_order") or 0) == order), None)
+        if not canvas_chapter:
+            canvas_chapter = {
+                "id": f"canvas_ch_{order}",
+                "act_id": (next_canvas.get("acts") or [{}])[0].get("id", "act_1") if isinstance(next_canvas.get("acts"), list) else "act_1",
+                "chapter_order": order,
+                "title": str(parsed.get("title") or chapter["title"] or f"第{order}章"),
+                "goal": str(chapter["goal"] or parsed.get("summary") or ""),
+                "scene_ids": [],
+            }
+            next_canvas.setdefault("chapters", []).append(canvas_chapter)
+        canvas_chapter["title"] = str(parsed.get("title") or canvas_chapter.get("title") or chapter["title"])
+        canvas_chapter["goal"] = str(chapter["goal"] or canvas_chapter.get("goal") or parsed.get("summary") or "")
+        canvas_chapter["status"] = "complete"
+        canvas_chapter["completed_summary"] = str(parsed.get("summary") or "")[:1200]
+        canvas_chapter["actual_word_count"] = self._count_cjk_words(str(parsed.get("body") or ""))
+        canvas_chapter["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+        scene = self._canvas_scene_for_canvas_chapter(next_canvas, str(canvas_chapter.get("id", "")))
+        if not scene:
+            scene = {
+                "id": f"scene_{order}_1",
+                "chapter_id": str(canvas_chapter.get("id") or f"canvas_ch_{order}"),
+                "scene_order": 1,
+                "linked_material_ids": [],
+            }
+            next_canvas.setdefault("scenes", []).append(scene)
+            canvas_chapter["scene_ids"] = [scene["id"]]
+        for key in [
+            "current_scene",
+            "pov",
+            "present_characters",
+            "surface_event",
+            "character_desire",
+            "tension",
+            "required_facts",
+            "forbidden_progress",
+            "ending_beat",
+            "linked_material_ids",
+        ]:
+            if key in scene_card and scene_card.get(key) not in (None, "", []):
+                scene[key] = scene_card[key]
+        compacted = self._compact_story_canvas(next_canvas)
+        storage.update_novel_project(project_id, {"story_canvas": compacted, "outline": self._canvas_outline(compacted)})
 
     def _merge_extended_canvas(self, current: dict[str, Any], extension: dict[str, Any], from_order: int) -> dict[str, Any]:
         kept_chapters = [item for item in self._canvas_chapters(current) if int(item.get("chapter_order") or 0) <= from_order]
@@ -904,17 +1094,65 @@ class NovelService:
             "extended_from_order": from_order,
             "extended_count": len(normalized_chapters),
         }
-        return {
+        merged_chapters = [*kept_chapters, *normalized_chapters]
+        merged_scenes = [*kept_scenes, *normalized_scenes]
+        merged_threads = [*kept_threads, *normalized_threads][-24:]
+        return self._compact_story_canvas({
             **current,
             "version": self._coerce_int(current.get("version"), 1, 1, 99),
             "mode": "story_canvas",
             "acts": [*(current.get("acts") if isinstance(current.get("acts"), list) else []), *(extension.get("acts") if isinstance(extension.get("acts"), list) else [])],
-            "chapters": [*kept_chapters, *normalized_chapters],
-            "scenes": [*kept_scenes, *normalized_scenes],
-            "threads": [*kept_threads, *normalized_threads][-24:],
+            "chapters": merged_chapters,
+            "scenes": merged_scenes,
+            "threads": merged_threads,
             "quality_rules": self._unique_short_list([*(current.get("quality_rules") if isinstance(current.get("quality_rules"), list) else []), *(extension.get("quality_rules") if isinstance(extension.get("quality_rules"), list) else [])], 20),
             "diagnostics": diagnostics,
+        })
+
+    def _compact_story_canvas(self, canvas: dict[str, Any]) -> dict[str, Any]:
+        if not canvas:
+            return {}
+        next_canvas = json.loads(json.dumps(canvas, ensure_ascii=False))
+        chapters = self._canvas_chapters(next_canvas)
+        chapter_ids = {str(item.get("id") or "") for item in chapters if str(item.get("id") or "")}
+        next_canvas["acts"] = self._dedupe_canvas_acts(
+            next_canvas.get("acts") if isinstance(next_canvas.get("acts"), list) else [],
+            chapter_ids,
+        )
+        next_canvas["scenes"] = [
+            item for item in self._canvas_scenes(next_canvas)
+            if str(item.get("chapter_id") or "") in chapter_ids
+        ]
+        next_canvas["threads"] = [
+            item for item in next_canvas.get("threads", []) if isinstance(item, dict)
+            and (not str(item.get("setup_chapter_id") or "") or str(item.get("setup_chapter_id") or "") in chapter_ids)
+            and (not str(item.get("payoff_chapter_id") or "") or str(item.get("payoff_chapter_id") or "") in chapter_ids)
+        ][-24:] if isinstance(next_canvas.get("threads"), list) else []
+        diagnostics = self._json_dict(next_canvas.get("diagnostics"))
+        next_canvas["diagnostics"] = {
+            **diagnostics,
+            "compact_acts": len(next_canvas["acts"]),
         }
+        return next_canvas
+
+    def _dedupe_canvas_acts(self, acts: list[Any], chapter_ids: set[str]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in reversed(acts):
+            if not isinstance(item, dict):
+                continue
+            act_id = str(item.get("id") or "").strip()
+            order = self._coerce_int(item.get("order"), len(deduped) + 1, 1, 99)
+            key = act_id or f"order:{order}"
+            if key in seen:
+                continue
+            seen.add(key)
+            chapter_refs = item.get("chapter_ids")
+            if isinstance(chapter_refs, list):
+                item = {**item, "chapter_ids": [ref for ref in chapter_refs if str(ref) in chapter_ids]}
+            deduped.append(item)
+        deduped.reverse()
+        return deduped[-8:]
 
     def _default_story_canvas(
         self,
@@ -947,7 +1185,7 @@ class NovelService:
                 "act_id": "act_1",
                 "chapter_order": 1,
                 "title": "第一章 校园初识",
-                "goal": "通过一次具体的小事件让两人正式产生第一印象。",
+                "goal": "傍晚图书馆门口，林晚栀的书本和便签被风吹落，对方帮她捡起却没有追问便签内容；她在礼貌停顿里第一次问出对方名字，让第一印象从路人一面变成会被记住的人。",
                 "external_event": "林晚栀在图书馆门口掉落书本，对方帮她捡起，两人因此第一次正式说话。",
                 "trigger_event": "傍晚风从图书馆门口穿过，林晚栀怀里的书和便签一起散落。",
                 "immediate_reaction": "她急忙蹲下去捡，先遮住便签，声音比平时轻。",
@@ -967,7 +1205,7 @@ class NovelService:
                 "act_id": "act_2",
                 "chapter_order": 2,
                 "title": "第二章 共同的麻烦",
-                "goal": "让两人因为一个普通问题短暂合作，并产生可见误会。",
+                "goal": "公告栏前的通知被贴错位置，两人被临时卷入同一件校园小事；林晚栀想按规则处理，却因旁人催促和对方先安抚现场产生误会，留下下一次解释的理由。",
                 "external_event": "两人被同一件校园小事牵连，需要一起处理。",
                 "trigger_event": "校园公告栏前的一张通知被贴错位置，两人都被临时叫去处理。",
                 "immediate_reaction": "林晚栀想按规则重贴，对方却先去安抚等在旁边的人。",
@@ -987,7 +1225,7 @@ class NovelService:
                 "act_id": "act_3",
                 "chapter_order": 3,
                 "title": "第三章 没有说破的话",
-                "goal": "把关系推进放在人物选择里，而不是直接表白或越界。",
+                "goal": "前一章的误会被一次普通问候带出，林晚栀原想轻轻带过，却发现自己不想再只道谢；她主动补上一句真正想说的话，让关系停在被温和接住的信任停顿里。",
                 "external_event": "林晚栀在一个日常场景里选择主动回应对方一次。",
                 "trigger_event": "放学后两人在安静角落再次遇见，前一章的误会被一句普通问候带出来。",
                 "immediate_reaction": "林晚栀下意识想说没关系，却发现这次自己并不想敷衍过去。",
@@ -1007,7 +1245,7 @@ class NovelService:
                 "act_id": "act_4",
                 "chapter_order": 4,
                 "title": "第四章 普通傍晚",
-                "goal": "回收前文小线索，让关系停在可继续发展的明确落点。",
+                "goal": "傍晚再次出现前文留下的小线索，林晚栀意识到多问一句就会让关系靠近；她没有把情绪说满，而是用一个普通约定回应，让线索被回收、下一次见面被留下。",
                 "external_event": f"两人在普通傍晚重新谈到前文线索：{hook}",
                 "trigger_event": "前文留下的小线索在傍晚重新出现，打断了原本普通的同行。",
                 "immediate_reaction": "林晚栀先假装没有立刻认出来，指尖却停在书页边。",
@@ -1249,6 +1487,168 @@ class NovelService:
         except Exception:
             return
 
+    async def optimize_chapter_instruction(
+        self,
+        llm: Any,
+        project_id: str,
+        payload: NovelInstructionOptimizeRequest,
+    ) -> NovelInstructionOptimizeResponse:
+        storage = self._require_storage()
+        project = storage.get_novel_project(project_id)
+        if not project:
+            raise ValueError("Novel project not found")
+        chapter = storage.get_novel_chapter(payload.chapter_id) if payload.chapter_id else None
+        if payload.chapter_id and (not chapter or chapter["project_id"] != project_id):
+            raise ValueError("Novel chapter not found")
+        fallback = self._usable_instruction(payload.base_instruction) or self._usable_instruction(payload.goal) or "承接前文，写出一个有事件、有对白、有选择和结尾钩子的连续场景。"
+        diagnostics: dict[str, Any] = {
+            "llm_configured": bool(llm.configured()),
+            "fallback_length": len(fallback),
+            "target_length": payload.target_length,
+        }
+        if not llm.configured():
+            return NovelInstructionOptimizeResponse(instruction=fallback, source="fallback", diagnostics={**diagnostics, "reason": "llm_not_configured"})
+        try:
+            text = await llm.chat_complete([
+                {"role": "system", "content": self._instruction_optimizer_system_prompt()},
+                {"role": "user", "content": self._instruction_optimizer_source(project, chapter, payload, fallback)},
+            ], timeout_ms=NOVEL_GENERATION_TIMEOUT_MS)
+            raw = self._load_llm_json_object(text, "instruction_optimization")
+            instruction = self._usable_instruction(str(raw.get("instruction", "")))
+            diagnostics = {
+                **diagnostics,
+                "raw_keys": sorted(raw.keys()),
+                "remote_length": len(instruction),
+            }
+            if instruction:
+                return NovelInstructionOptimizeResponse(instruction=instruction, source="remote", diagnostics=diagnostics)
+            return NovelInstructionOptimizeResponse(instruction=fallback, source="fallback", diagnostics={**diagnostics, "reason": "empty_remote_instruction"})
+        except Exception as exc:
+            llm.last_chat_error = type(exc).__name__
+            return NovelInstructionOptimizeResponse(instruction=fallback, source="fallback", diagnostics={**diagnostics, "reason": type(exc).__name__})
+
+    def _instruction_optimizer_system_prompt(self) -> str:
+        return (
+            "你是小说创作导演，只优化写作指令，不写正文。"
+            "你必须返回 JSON 对象：{\"instruction\":\"...\"}。"
+            "instruction 用中文，面向后续正文生成模型，必须可执行、具体、分段清晰，建议 450-900 字。"
+            "保留本地骨架里的硬约束：目标字数、最低长度、禁止越界、禁止元叙述、不得重复正文。"
+            "把场景卡转成写作任务：可见事件、人物欲望、具体阻碍、动作链、对白、结尾钩子。"
+            "优先按这些小节组织：生成模式、剧情承接、场景展开、长度与节奏、质量补救、禁止事项。"
+            "不要输出评分、等级、解释、Markdown 代码块或正文片段。"
+        )
+
+    def _instruction_optimizer_source(
+        self,
+        project: Any,
+        chapter: Any,
+        payload: NovelInstructionOptimizeRequest,
+        fallback: str,
+    ) -> str:
+        body = str(payload.body or "")
+        body_excerpt = body[:900]
+        body_tail = body[-900:] if len(body) > 900 else ""
+        scene_card = payload.scene_card or {}
+        canvas_chapter = payload.canvas_chapter or {}
+        previous_handoff = payload.previous_handoff or {}
+        prior_novel_state = payload.prior_novel_state or {}
+        quality_diagnosis = payload.quality_diagnosis or {}
+        current_words = self._count_cjk_words(body)
+        min_words = max(400, int(payload.target_length * 0.7))
+        lines = [
+            f"作品：{project['title']}",
+            f"类型/基调：{project['genre']} / {project['tone']}",
+            f"章节：{payload.title or (chapter['title'] if chapter else '')}",
+            f"目标字数：{payload.target_length}",
+            f"最低可接受长度：{min_words}",
+            f"当前正文长度：{current_words}",
+            "",
+            "本地硬约束骨架：",
+            fallback,
+            "",
+            "章节目标：",
+            str(payload.goal or (chapter["goal"] if chapter else "") or ""),
+            "",
+            "章节摘要：",
+            str(payload.summary or (chapter["summary"] if chapter else "") or ""),
+            "",
+            "当前章节画布节点：",
+            json.dumps(canvas_chapter, ensure_ascii=False, indent=2)[:2400] if canvas_chapter else "无",
+            "",
+            "场景卡：",
+            json.dumps(scene_card, ensure_ascii=False, indent=2)[:3000],
+            "",
+            "上一章交接单：",
+            json.dumps(previous_handoff, ensure_ascii=False, indent=2)[:2200] if previous_handoff else "无",
+            "",
+            "截至上一章 Novel State 精简版：",
+            json.dumps(prior_novel_state, ensure_ascii=False, indent=2)[:2200] if prior_novel_state else "无",
+            "",
+            "当前正文质量诊断：",
+            json.dumps(quality_diagnosis, ensure_ascii=False, indent=2)[:1600] if quality_diagnosis else "无",
+            "",
+            "当前正文开头：",
+            body_excerpt,
+        ]
+        if body_tail and body_tail != body_excerpt:
+            lines.extend(["", "当前正文结尾：", body_tail])
+        lines.extend([
+            "",
+            "请生成优化后的 instruction。要求：",
+            "- 不写正文，只写给生成模型的操作指令。",
+            "- 如果当前正文明显短于目标，指令必须强调扩写同一章而不是另起新章。",
+            "- 指令必须要求增加具体事件、动作、对白、选择和结尾钩子。",
+            "- 指令必须提醒场景卡只作为指导，字段名和分析句不能进入正文。",
+            "- 必须参考章节画布节点、上一章交接单和截至上一章 Novel State，保证承接关系和边界不漂移。",
+            "- 必须针对质量诊断给出具体补救策略，例如补对白、补动作、补结尾钩子或压缩重复抒情。",
+            "- 请把优化结果写得比本地骨架更具体，但不要超过 900 字；优先给出 4-6 个可执行写作动作，而不是抽象审美要求。",
+        ])
+        return "\n".join(lines)
+
+    def _validate_optimized_instruction(
+        self,
+        instruction: str,
+        fallback: str,
+        payload: NovelInstructionOptimizeRequest,
+    ) -> tuple[bool, str]:
+        if not instruction:
+            return False, "empty_instruction"
+        if len(instruction) < 120:
+            return False, "too_short"
+        if len(instruction) > 4000:
+            return False, "too_long"
+        compact = re.sub(r"\s+", "", instruction)
+        if not compact:
+            return False, "empty_compact_instruction"
+        if str(payload.target_length) not in instruction and "目标" not in instruction:
+            return False, "missing_target_length"
+        if not any(term in instruction for term in ("不要", "禁止", "不得", "避免", "不能", "不可")):
+            return False, "missing_constraints"
+        if payload.goal:
+            goal_text = self._clean_material_text(payload.goal)
+            goal_keywords = [item for item in re.split(r"[\s，。；、,.!?！？：:]+", goal_text) if len(item) >= 3]
+            has_goal_signal = "章节目标" in instruction or "目标" in instruction or any(keyword[:12] in instruction for keyword in goal_keywords[:4])
+            if not has_goal_signal:
+                return False, "missing_goal"
+        scene_card = payload.scene_card or {}
+        scene_values = [
+            str(scene_card.get(key, "")).strip()
+            for key in ("current_scene", "surface_event", "character_desire", "tension", "ending_beat")
+            if str(scene_card.get(key, "")).strip()
+        ]
+        if scene_values:
+            matched = any(self._clean_material_text(value)[:16] and self._clean_material_text(value)[:16] in instruction for value in scene_values)
+            if not matched and "场景" not in instruction:
+                return False, "missing_scene_card"
+        if instruction.strip() == fallback.strip():
+            return False, "same_as_fallback"
+        return True, "ok"
+
+    def _count_cjk_words(self, text: str) -> int:
+        cjk = re.findall(r"[\u4e00-\u9fff]", text or "")
+        latin = re.findall(r"[A-Za-z0-9]+", text or "")
+        return len(cjk) + len(latin)
+
     async def generate_chapter(
         self,
         llm: Any,
@@ -1269,7 +1669,7 @@ class NovelService:
             effective_instruction = self._usable_instruction(instruction) or str(chapter["goal"] or "").strip() or "承接前文，推进一个可验证的小目标。"
         else:
             effective_instruction = self._usable_instruction(instruction) or "承接前文，推进一个可验证的小目标。"
-            chapter_id = storage.create_novel_chapter(project_id, "下一章", effective_instruction, "", "", "drafting")
+            chapter_id = storage.create_novel_chapter(project_id, "下一章", "承接前文，完成一个具体事件中的关系推进。", "", "", "drafting")
             chapter = storage.get_novel_chapter(chapter_id)
         assert chapter is not None
         scene_card: dict[str, Any] | None = None
@@ -1382,6 +1782,7 @@ class NovelService:
             }
         next_scene_card = {
             **scene_card,
+            "generation_instruction": effective_instruction,
             "scene_beats": scene_beats,
             "beat_source": beat_source,
             "chapter_audit": audit,
@@ -1394,7 +1795,6 @@ class NovelService:
             chapter["id"],
             {
                 "title": parsed["title"],
-                "goal": effective_instruction,
                 "summary": parsed["summary"],
                 "body": parsed["body"],
                 "status": "draft",
@@ -1406,6 +1806,7 @@ class NovelService:
         if should_update_global_state and not defer_postprocess:
             self._mark_following_chapters_affected(project_id, int(chapter["chapter_order"]))
             await self._update_novel_state_after_chapter(project_id, llm, project, chapter, parsed, handoff)
+            self._update_canvas_from_completed_chapter(project_id, chapter, next_scene_card, parsed)
             mark_progress("replan", 96, "同步滚动重规划后续两章画布和场景卡", "remote")
             await self.extend_canvas(
                 llm,
@@ -1476,9 +1877,20 @@ class NovelService:
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
             }
-            storage.update_novel_chapter(chapter_id, {"scene_card": scene_card}, "system")
+            storage.update_novel_chapter(
+                chapter_id,
+                {
+                    "title": parsed["title"],
+                    "summary": parsed["summary"],
+                    "body": parsed["body"],
+                    "scene_card": scene_card,
+                    "source_material_ids": parsed["source_material_ids"],
+                },
+                "remote",
+            )
             self._mark_following_chapters_affected(project_id, int(chapter["chapter_order"]))
             await self._update_novel_state_after_chapter(project_id, llm, project, chapter, parsed, handoff)
+            self._update_canvas_from_completed_chapter(project_id, chapter, scene_card, parsed)
             latest_for_replan = storage.get_novel_chapter(chapter_id)
             if latest_for_replan:
                 latest_scene_card = self._json_dict(latest_for_replan["scene_card_json"] if "scene_card_json" in latest_for_replan.keys() else "{}")
@@ -1551,7 +1963,8 @@ class NovelService:
                 {"role": "system", "content": self._handoff_system_prompt()},
                 {"role": "user", "content": self._handoff_source(project, chapter, scene_card, scene_beats, parsed)},
             ], timeout_ms=NOVEL_PLANNING_TIMEOUT_MS, response_format={"type": "json_object"})
-            return self._parse_chapter_handoff(text, fallback), "remote"
+            handoff = self._parse_chapter_handoff(text, fallback)
+            return self._sanitize_chapter_handoff(project, chapter, scene_card, parsed, handoff, fallback), "remote"
         except Exception as exc:
             llm.last_chat_error = type(exc).__name__
             return fallback, "mock"
@@ -1581,15 +1994,38 @@ class NovelService:
             f"第{chapter['chapter_order']}章《{parsed.get('title') or chapter['title']}》",
             "[章节摘要]",
             str(parsed.get("summary") or "")[:1200],
-            "[场景卡]",
-            self._scene_card_prompt(scene_card),
+            "[当前章节场景卡：只作为本章提示]",
+            self._handoff_scene_card_prompt(scene_card),
             "[Scene Beats]",
             self._scene_beats_prompt(scene_beats),
             "[正文尾段]",
             body[-2200:] if body else "无",
             "[输出要求]",
-            "提取交接单，供下一章承接。不要评价文笔，不要写创作建议，只写已经发生和必须承接的事项。",
+            "提取交接单，供下一章承接。happened 只能写本章正文里新发生的事实；"
+            "required_facts 和上一章背景只用于连续性，不能复制进 happened。"
+            "不要评价文笔，不要写创作建议，只写已经发生和必须承接的事项。",
         ])
+
+    def _handoff_scene_card_prompt(self, scene_card: dict[str, Any]) -> str:
+        current_only = {
+            "current_scene": scene_card.get("current_scene", ""),
+            "present_characters": scene_card.get("present_characters", []),
+            "surface_event": scene_card.get("surface_event", ""),
+            "character_desire": scene_card.get("character_desire", ""),
+            "tension": scene_card.get("tension", ""),
+            "ending_beat": scene_card.get("ending_beat", ""),
+        }
+        context_only = {
+            "required_facts_context_only": scene_card.get("required_facts", []),
+            "forbidden_progress_context_only": scene_card.get("forbidden_progress", []),
+        }
+        return json.dumps(
+            {
+                "current_chapter_hints": current_only,
+                "continuity_context_do_not_copy_to_happened": context_only,
+            },
+            ensure_ascii=False,
+        )
 
     def _parse_chapter_handoff(self, text: str, fallback: dict[str, Any]) -> dict[str, Any]:
         raw = self._load_llm_json_object(text, "chapter_handoff")
@@ -1604,6 +2040,55 @@ class NovelService:
                 cleaned = []
             result[key] = cleaned[:5] or result.get(key, [])
         return result
+
+    def _sanitize_chapter_handoff(
+        self,
+        project: Any,
+        chapter: Any,
+        scene_card: dict[str, Any],
+        parsed: dict[str, Any],
+        handoff: dict[str, Any],
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        order = int(chapter["chapter_order"])
+        previous_state = self._novel_state_until(project, order - 1)
+        stale_sources: list[Any] = []
+        for item in previous_state.get("chapter_handoffs", []) if isinstance(previous_state.get("chapter_handoffs"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            for key in ["happened", "relationship_delta", "ending_hook", "next_must_continue", "open_threads"]:
+                value = item.get(key)
+                if isinstance(value, list):
+                    stale_sources.extend(value)
+        required_facts = scene_card.get("required_facts")
+        if isinstance(required_facts, list):
+            stale_sources.extend(required_facts)
+        elif str(required_facts or "").strip():
+            stale_sources.extend(part for part in re.split(r"[；;]\s*", str(required_facts)) if part.strip())
+        stale_norms = {self._norm_handoff_text(value) for value in stale_sources if self._norm_handoff_text(value)}
+
+        result = dict(handoff)
+        for key in ["happened", "relationship_delta"]:
+            values = result.get(key)
+            if not isinstance(values, list):
+                continue
+            filtered = [
+                self._clean_material_text(str(item))[:220]
+                for item in values
+                if str(item).strip() and self._norm_handoff_text(item) not in stale_norms
+            ]
+            if key == "happened" and not filtered:
+                filtered = [str(item) for item in fallback.get("happened", []) if str(item).strip()]
+                if not filtered and str(parsed.get("summary") or "").strip():
+                    filtered = [self._clean_material_text(str(parsed.get("summary")))[:220]]
+            result[key] = self._unique_short_list(filtered, 5)
+        result["chapter_order"] = order
+        result["chapter_title"] = str(parsed.get("title") or chapter["title"])[:120]
+        return result
+
+    def _norm_handoff_text(self, value: Any) -> str:
+        text = self._clean_material_text(str(value or "")).lower()
+        return re.sub(r"[\s,，。.!！?？:：;；、\"'“”‘’（）()\[\]【】]+", "", text)
 
     def _mock_chapter_handoff(self, chapter: Any, scene_card: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
         ending = self._clean_material_text(str(scene_card.get("ending_beat") or parsed.get("summary") or ""))[:220]
@@ -1628,18 +2113,77 @@ class NovelService:
         parsed: dict[str, Any],
         handoff: dict[str, Any],
     ) -> None:
-        await self._rebuild_novel_state_from_latest_chapters(project_id, llm)
+        storage = self._require_storage()
+        latest_project = storage.get_novel_project(project_id) or project
+        chapter_order = int(chapter["chapter_order"])
+        previous_state = self._novel_state_until(latest_project, chapter_order - 1)
+        next_state = self._append_chapter_state_delta(previous_state, chapter, parsed, handoff)
+        storage.update_novel_project(project_id, {"novel_state": next_state})
+
+    def _empty_novel_state(self, title: str) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "title": title,
+            "global_summary": "",
+            "confirmed_facts": [],
+            "character_states": [],
+            "relationship_states": [],
+            "open_threads": [],
+            "resolved_threads": [],
+            "chapter_handoffs": [],
+            "last_completed_chapter_order": 0,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _append_chapter_state_delta(
+        self,
+        previous_state: dict[str, Any],
+        chapter: Any,
+        parsed: dict[str, Any],
+        handoff: dict[str, Any],
+    ) -> dict[str, Any]:
+        order = int(chapter["chapter_order"])
+        chapter_title = str(parsed.get("title") or chapter["title"] or "")[:120]
+        summary = self._clean_material_text(str(parsed.get("summary") or ""))[:1200]
+        next_handoff = {
+            **handoff,
+            "chapter_order": order,
+            "chapter_title": chapter_title,
+        }
+
+        def list_value(key: str) -> list[str]:
+            value = next_handoff.get(key)
+            if isinstance(value, list):
+                return [self._clean_material_text(str(item))[:260] for item in value if str(item).strip()]
+            return [self._clean_material_text(str(value))[:260]] if str(value or "").strip() else []
+
+        previous_handoffs = [
+            item for item in previous_state.get("chapter_handoffs", [])
+            if isinstance(item, dict) and self._coerce_int(item.get("chapter_order"), 0, 0, 999) < order
+        ]
+        previous_summary = self._clean_material_text(str(previous_state.get("global_summary") or ""))
+        summary_line = f"第{order}章：{summary}" if summary else ""
+        return {
+            **previous_state,
+            "global_summary": self._clean_material_text(" ".join(item for item in [previous_summary, summary_line] if item))[:1400],
+            "confirmed_facts": self._unique_short_list(list(previous_state.get("confirmed_facts", [])) + list_value("happened"), 16),
+            "relationship_states": self._unique_short_list(list(previous_state.get("relationship_states", [])) + list_value("relationship_delta"), 16),
+            "open_threads": self._unique_short_list(
+                list(previous_state.get("open_threads", [])) + list_value("open_threads") + list_value("next_must_continue"),
+                16,
+            ),
+            "resolved_threads": self._unique_short_list(list(previous_state.get("resolved_threads", [])) + list_value("resolved_threads"), 16),
+            "chapter_handoffs": [*previous_handoffs, next_handoff][-8:],
+            "last_completed_chapter_order": order,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     async def _rebuild_novel_state_from_latest_chapters(self, project_id: str, llm: Any) -> None:
         storage = self._require_storage()
         project = storage.get_novel_project(project_id)
         if not project:
             raise ValueError("Novel project not found")
-        base_state = self._default_novel_state(
-            project["title"],
-            self._json_dict(project["story_bible_json"]),
-            self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}"),
-        )
+        base_state = self._empty_novel_state(project["title"])
         trusted_entries = self._latest_trusted_chapter_state_entries(project_id)
         next_state = self._merge_novel_state_entries(base_state, trusted_entries)
         try:
@@ -1660,17 +2204,61 @@ class NovelService:
         project = storage.get_novel_project(project_id)
         if not project:
             raise ValueError("Novel project not found")
-        base_state = self._default_novel_state(
-            project["title"],
-            self._json_dict(project["story_bible_json"]),
-            self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}"),
-        )
+        base_state = self._empty_novel_state(project["title"])
         entries = self._latest_trusted_chapter_state_entries(project_id)
         storage.update_novel_project(project_id, {"novel_state": self._merge_novel_state_entries(base_state, entries)})
 
     def mark_chapter_revision_boundary(self, project_id: str, chapter_order: int) -> None:
         self._mark_following_chapters_affected(project_id, chapter_order)
         self.rebuild_novel_state_from_latest_chapters_sync(project_id)
+
+    def remove_chapter_from_story_canvas(self, project_id: str, deleted_order: int) -> None:
+        storage = self._require_storage()
+        project = storage.get_novel_project(project_id)
+        if not project:
+            return
+        canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
+        if not canvas:
+            return
+        removed_chapter_ids = {
+            str(item.get("id") or "")
+            for item in self._canvas_chapters(canvas)
+            if int(item.get("chapter_order") or 0) == deleted_order
+        }
+        if not removed_chapter_ids and not self._canvas_chapters(canvas):
+            return
+        next_canvas = json.loads(json.dumps(canvas, ensure_ascii=False))
+        next_chapters: list[dict[str, Any]] = []
+        for item in self._canvas_chapters(next_canvas):
+            order = int(item.get("chapter_order") or 0)
+            if order == deleted_order:
+                continue
+            if order > deleted_order:
+                item["chapter_order"] = order - 1
+            next_chapters.append(item)
+        next_canvas["chapters"] = next_chapters
+        next_canvas["scenes"] = [
+            item for item in self._canvas_scenes(next_canvas)
+            if str(item.get("chapter_id") or "") not in removed_chapter_ids
+        ]
+        for act in next_canvas.get("acts", []) if isinstance(next_canvas.get("acts"), list) else []:
+            if isinstance(act, dict):
+                chapter_ids = act.get("chapter_ids")
+                if isinstance(chapter_ids, list):
+                    act["chapter_ids"] = [item for item in chapter_ids if str(item) not in removed_chapter_ids]
+        next_canvas["threads"] = [
+            item for item in next_canvas.get("threads", []) if isinstance(item, dict)
+            and str(item.get("setup_chapter_id") or "") not in removed_chapter_ids
+            and str(item.get("payoff_chapter_id") or "") not in removed_chapter_ids
+        ] if isinstance(next_canvas.get("threads"), list) else []
+        diagnostics = self._json_dict(next_canvas.get("diagnostics"))
+        next_canvas["diagnostics"] = {
+            **diagnostics,
+            "deleted_chapter_order": deleted_order,
+            "deleted_canvas_chapter_ids": [item for item in removed_chapter_ids if item],
+            "cleanup": "chapter_deleted",
+        }
+        storage.update_novel_project(project_id, {"story_canvas": next_canvas, "outline": self._canvas_outline(next_canvas)})
 
     def _mark_following_chapters_affected(self, project_id: str, chapter_order: int) -> None:
         storage = self._require_storage()
@@ -1687,11 +2275,9 @@ class NovelService:
             storage.update_novel_chapter(row["id"], {"status": "affected", "scene_card": scene_card}, "system")
 
     def _novel_state_until(self, project: Any, cutoff_order: int) -> dict[str, Any]:
-        base_state = self._default_novel_state(
-            project["title"],
-            self._json_dict(project["story_bible_json"]),
-            self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}"),
-        )
+        base_state = self._empty_novel_state(project["title"])
+        if cutoff_order <= 0:
+            return base_state
         entries = self._latest_trusted_chapter_state_entries(project["id"], cutoff_order)
         return self._merge_novel_state_entries(base_state, entries)
 
@@ -1707,14 +2293,19 @@ class NovelService:
             if str(row["status"] or "") == "affected":
                 break
             latest_versions = storage.list_novel_versions(row["id"])
-            latest_source = str(latest_versions[0]["source"] if latest_versions else "").strip()
-            if latest_source in {"mock", "manual", "restore", "create", "system"}:
-                break
             if not str(row["body"] or "").strip():
                 break
             scene_card = self._json_dict(row["scene_card_json"] if "scene_card_json" in row.keys() else "{}")
-            handoff = scene_card.get("chapter_handoff") if isinstance(scene_card.get("chapter_handoff"), dict) else {}
-            handoff_source = str(scene_card.get("handoff_source") or "").strip()
+            active_version_id = str(scene_card.get("active_version_id") or "").strip()
+            active_version = storage.get_novel_version(active_version_id) if active_version_id else (latest_versions[0] if latest_versions else None)
+            latest_source = str(active_version["source"] if active_version else "").strip()
+            if latest_source in {"mock", "manual", "restore", "create", "system"}:
+                break
+            state_delta = self._json_dict(active_version["state_delta_json"] if active_version and "state_delta_json" in active_version.keys() else "{}")
+            handoff = state_delta.get("chapter_handoff") if isinstance(state_delta.get("chapter_handoff"), dict) else {}
+            if not handoff:
+                handoff = scene_card.get("chapter_handoff") if isinstance(scene_card.get("chapter_handoff"), dict) else {}
+            handoff_source = str(state_delta.get("handoff_source") or scene_card.get("handoff_source") or "").strip()
             if not handoff or handoff_source in {"skipped_mock", "cleaned_mock"}:
                 break
             entries.append({
@@ -1723,10 +2314,13 @@ class NovelService:
                 "summary": str(row["summary"] or "")[:1200],
                 "latest_source": latest_source,
                 "handoff_source": handoff_source,
+                "chapter_version_id": str(active_version["id"] if active_version else active_version_id),
+                "state_delta": state_delta,
                 "handoff": {
                     **handoff,
                     "chapter_order": order,
                     "chapter_title": str(row["title"] or "")[:120],
+                    "chapter_version_id": str(active_version["id"] if active_version else active_version_id),
                 },
             })
         return entries
@@ -2043,6 +2637,7 @@ class NovelService:
         ) or "无"
         novel_state = self._novel_state_until(project, int(chapter["chapter_order"]) - 1)
         previous_handoff = self._previous_handoff_prompt(novel_state, chapters, chapter, allow_scene_fallback=False)
+        previous_tail = self._previous_chapter_tail(chapters, chapter, novel_state)
         return "\n\n".join([
             "[目标]",
             f"把第{chapter['chapter_order']}章《{chapter['title']}》拆成 5-7 个 Scene Beats，目标约 {target_length} 字。",
@@ -2058,12 +2653,15 @@ class NovelService:
             previous,
             "[上一章交接单]",
             previous_handoff,
+            "[上一章尾段]",
+            previous_tail,
             "[素材]",
             material_lines,
             "[用户生成指令]",
             instruction,
             "[硬约束]",
             "必须按本章场面推进链生成 beats：触发事件 -> 即时反应 -> 阻碍升级 -> 对方反应 -> 人物选择 -> 场景后果 -> 结尾钩子。"
+            "第一拍必须自然承接上一章尾段或上一章交接单的未解决点，不要重演上一章已经完成的动作。"
             "保持一个连续大场景，但可以在场景内部新增一到两个校园日常小事件，例如广播、借书卡、值日生、突来的雨、掉落的物件或路过同学造成的打断。"
             "素材只是熟悉感锚点，不要把全部素材塞进 beats；优先让读者看到具体动作、对白、阻碍和选择。"
             "至少安排两轮自然对白；结尾必须是具体钩子。"
@@ -2527,10 +3125,18 @@ class NovelService:
             self._scene_card_prompt(scene_card),
             "[Scene Beats 可见动作清单]",
             self._scene_beats_prompt(scene_beats),
-            "[本章目标]",
+            "[本章剧情概述]",
             f"章节：第{chapter['chapter_order']}章《{chapter['title']}》",
-            f"目标：{instruction or chapter['goal']}",
-            f"长度：约 {target_length} 字",
+            f"剧情概述：{chapter['goal']}",
+            "[用户写作指令]",
+            instruction or "按本章剧情概述、故事画布和 Scene Beats 写出当前章正文。",
+            "[长度要求]",
+            f"目标长度：约 {target_length} 字",
+            "[信息优先级]",
+            "Novel State、上一章交接单和上一章尾段只用于承接已经发生的事实、情绪余波和未解决点；不得提前使用后续章节信息。"
+            "本章剧情概述决定这一章发生什么，故事画布和 Scene Beats 决定事件推进顺序，Scene Card 决定视角、人物欲望和边界。"
+            "用户写作指令只决定写法、篇幅、节奏和质量补救；不得改写本章剧情概述、画布动作链和已确认事实。"
+            "如果当前章节已有正文，必须承接现有正文末尾继续扩写或精修，不要从头重写为另一章。",
             "[输出硬约束]",
             "必须先遵守 Scene Card 场景卡：正文要写出当前场景、人物欲望、阻碍/张力和结尾落点。"
             "但不得照抄 Scene Card 的抽象说明，必须按 Scene Beats 写成可见动作、对白和停顿。"
@@ -2831,7 +3437,7 @@ class NovelService:
             return ""
         if "�" in clean:
             return ""
-        return clean[:1000]
+        return clean[:4000]
 
     def _chapter_local_check(self, body: str, target_length: int = 0) -> dict[str, list[str]]:
         text = body.strip()
@@ -3065,6 +3671,7 @@ class NovelService:
 
     def _chapter_from_row(self, row: Any, include_versions: bool = False) -> NovelChapter:
         storage = self._require_storage()
+        versions = storage.list_novel_versions(row["id"])
         return NovelChapter(
             id=row["id"],
             project_id=row["project_id"],
@@ -3078,7 +3685,8 @@ class NovelService:
             source_material_ids=self._json_list(row["source_material_ids_json"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
-            versions=[self._version_from_row(item) for item in storage.list_novel_versions(row["id"])] if include_versions else [],
+            version_count=len(versions),
+            versions=[self._version_from_row(item) for item in versions] if include_versions else [],
         )
 
     def _version_from_row(self, row: Any) -> NovelVersion:
@@ -3090,6 +3698,8 @@ class NovelService:
             body=row["body"],
             summary=row["summary"],
             source=row["source"],
+            state_delta=self._json_dict(row["state_delta_json"] if "state_delta_json" in row.keys() else "{}"),
+            planning_snapshot=self._json_dict(row["planning_snapshot_json"] if "planning_snapshot_json" in row.keys() else "{}"),
             created_at=row["created_at"],
         )
 

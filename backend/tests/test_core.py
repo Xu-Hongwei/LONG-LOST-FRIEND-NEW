@@ -595,12 +595,14 @@ class CampusLiteCoreTest(unittest.TestCase):
             rebuilt = self.run_async(service.build_canvas(CanvasFallbackLlm(), project.id))
             self.assertGreaterEqual(len(rebuilt.story_canvas.get("threads", [])), 1)
             self.assertEqual(rebuilt.story_canvas.get("mode"), "story_canvas")
+            self.assertEqual(rebuilt.story_canvas["diagnostics"]["mode"], "initial_rolling")
             canvas_chapters = rebuilt.story_canvas.get("chapters", [])
             self.assertGreaterEqual(len(canvas_chapters), 4)
+            self.assertEqual([item["chapter_order"] for item in canvas_chapters[:4]], [1, 2, 3, 4])
             self.assertEqual(len(rebuilt.chapters), len(canvas_chapters))
             self.assertEqual(rebuilt.chapters[-1].chapter_order, len(canvas_chapters))
 
-    def test_novel_build_canvas_refuses_after_body_exists(self) -> None:
+    def test_novel_build_canvas_lock_depends_on_initial_chapter_versions(self) -> None:
         class CanvasFallbackLlm:
             last_chat_error = None
 
@@ -617,6 +619,11 @@ class CampusLiteCoreTest(unittest.TestCase):
             storage.update_novel_chapter(project.chapters[0].id, {"body": "正文已经开始。"}, "manual")
             with self.assertRaisesRegex(ValueError, "Cannot rebuild initial canvas"):
                 self.run_async(service.build_canvas(CanvasFallbackLlm(), project.id))
+
+            for version in storage.list_novel_versions(project.chapters[0].id):
+                storage.delete_novel_version(version["id"])
+            rebuilt = self.run_async(service.build_canvas(CanvasFallbackLlm(), project.id))
+            self.assertEqual(rebuilt.story_canvas.get("mode"), "story_canvas")
 
     def test_novel_build_canvas_uses_remote_when_configured(self) -> None:
         class CanvasLlm:
@@ -705,6 +712,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertGreaterEqual(llm.timeouts[0], 120000)
             self.assertEqual(llm.response_format, {"type": "json_object"})
             self.assertEqual(rebuilt.story_canvas["diagnostics"]["source"], "remote")
+            self.assertEqual(rebuilt.story_canvas["diagnostics"]["mode"], "initial_rolling")
             self.assertEqual(rebuilt.story_canvas["chapters"][0]["title"], "第1章 远程画布")
             self.assertEqual(rebuilt.story_canvas["chapters"][0]["target_length"], 1800)
             self.assertEqual(rebuilt.chapters[0].title, "第1章 远程画布")
@@ -771,8 +779,14 @@ class CampusLiteCoreTest(unittest.TestCase):
             session_id = storage.create_or_get_session(visitor_id, card.id)
             service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
             project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            raw_project = storage.get_novel_project(project.id)
+            assert raw_project is not None
+            prior_to_first = service._novel_state_until(raw_project, 0)
+            self.assertEqual(prior_to_first["global_summary"], "")
+            self.assertFalse(prior_to_first["chapter_handoffs"])
+            llm = FakeLlm()
             generated, chapter = self.run_async(
-                service.generate_chapter(FakeLlm(), project.id, project.chapters[0].id, "写第一章。", 1000)
+                service.generate_chapter(llm, project.id, project.chapters[0].id, "写第一章。", 1000)
             )
             self.assertEqual(chapter.chapter_order, 1)
             self.assertEqual(generated.novel_state["last_completed_chapter_order"], 1)
@@ -780,6 +794,190 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual([item["chapter_order"] for item in generated.story_canvas["chapters"]], [1, 2, 3])
             self.assertEqual([item.chapter_order for item in generated.chapters], [1, 2, 3])
             self.assertEqual(generated.story_canvas["diagnostics"]["mode"], "rolling_extend")
+            self.assertEqual(llm.calls, 5)
+            raw_project = storage.get_novel_project(project.id)
+            assert raw_project is not None
+            prior_to_second = service._novel_state_until(raw_project, 1)
+            self.assertEqual(prior_to_second["last_completed_chapter_order"], 1)
+            self.assertEqual(len(prior_to_second["chapter_handoffs"]), 1)
+
+    def test_deferred_handoff_updates_bound_version_state_delta(self) -> None:
+        class DeferredLlm:
+            last_chat_error = None
+            calls = 0
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return json.dumps({"beats": [
+                        {"type": "event", "purpose": "start", "visible_action": "林晚栀在走廊停下。", "dialogue": ["“这个是你的？”", "“谢谢。”"], "inner_turn": "她记住了名字。"},
+                        {"type": "choice", "purpose": "choice", "visible_action": "她没有立刻离开。", "dialogue": ["“你叫什么？”", "“许砚清。”"], "inner_turn": "她放慢了脚步。"},
+                    ]}, ensure_ascii=False)
+                if self.calls == 2:
+                    return json.dumps({
+                        "title": "第一章",
+                        "summary": "林晚栀和许砚清在走廊正式说话。",
+                        "body": "傍晚的风穿过走廊时，林晚栀怀里的书页轻轻翻起。她蹲下去捡便签，许砚清先一步把书递过来：“这个是你的？”她接住书，低声说：“谢谢。”两个人都没有急着往前走。楼梯口有人经过，脚步声短促地响了一下，她把便签重新夹回书里，停了半秒，才问：“你叫什么？”许砚清把书脊理正，回答：“许砚清。”她点点头，走到转角时又回头看了一眼，才发现自己已经记住了这个名字。",
+                        "source_material_ids": [],
+                    }, ensure_ascii=False)
+                if self.calls == 3:
+                    return json.dumps({"hard_fail": False, "rewrite_required": False, "checks": {"has_visible_event": True, "has_character_choice": True, "has_dialogue": True, "has_ending_hook": True, "uses_scene_card_terms": False, "has_meta_narration": False, "has_repeated_paragraphs": False, "breaks_confirmed_facts": False, "style_breaks_previous_chapter": False}, "issues": [], "rewrite_brief": ""}, ensure_ascii=False)
+                if self.calls == 4:
+                    return json.dumps({
+                        "happened": ["林晚栀和许砚清在走廊互通姓名。"],
+                        "relationship_delta": ["从路人变成会被记住的人。"],
+                        "ending_hook": ["林晚栀回头确认许砚清的名字。"],
+                        "next_must_continue": ["下一章承接这个名字带来的再次注意。"],
+                        "avoid_repeating": ["不要重复捡书和互通姓名。"],
+                        "open_threads": ["许砚清为什么也停在走廊。"],
+                    }, ensure_ascii=False)
+                if self.calls == 5:
+                    return json.dumps({
+                        "global_summary": "林晚栀和许砚清在走廊互通姓名。",
+                        "confirmed_facts": ["林晚栀和许砚清已经互通姓名。"],
+                        "character_states": [],
+                        "relationship_states": ["从路人变成会被记住的人。"],
+                        "open_threads": ["许砚清为什么也停在走廊。"],
+                        "resolved_threads": [],
+                        "chapter_handoffs": [{"chapter_order": 1, "happened": ["林晚栀和许砚清在走廊互通姓名。"]}],
+                        "last_completed_chapter_order": 1,
+                    }, ensure_ascii=False)
+                return json.dumps({
+                    "version": 1,
+                    "mode": "story_canvas",
+                    "acts": [],
+                    "chapters": [
+                        {"id": "canvas_ch_2", "act_id": "act_1", "chapter_order": 2, "title": "第二章", "goal": "再次注意到对方", "external_event": "社团名单出现误会", "trigger_event": "名单被贴出", "immediate_reaction": "她停下确认", "obstacle_escalation": "同学催她去集合", "counterpart_reaction": "许砚清帮她指认", "character_choice": "她主动道谢", "scene_consequence": "两人有了下一次说话理由", "relationship_shift": "多了一点熟悉", "ending_hook": "名单背面有未写完的备注", "target_length": 1000, "status": "planned", "emotion_curve": "克制", "scene_ids": ["scene_2"]},
+                        {"id": "canvas_ch_3", "act_id": "act_1", "chapter_order": 3, "title": "第三章", "goal": "承接备注", "external_event": "借阅卡被误拿", "trigger_event": "备注被发现", "immediate_reaction": "她迟疑", "obstacle_escalation": "老师叫走许砚清", "counterpart_reaction": "他留下纸条", "character_choice": "她保存纸条", "scene_consequence": "线索延后", "relationship_shift": "信任增加", "ending_hook": "纸条只写了一半", "target_length": 1000, "status": "planned", "emotion_curve": "克制", "scene_ids": ["scene_3"]},
+                    ],
+                    "scenes": [
+                        {"id": "scene_2", "chapter_id": "canvas_ch_2", "scene_order": 1, "current_scene": "公告栏前", "pov": "林晚栀", "present_characters": "林晚栀、许砚清", "surface_event": "社团名单出现误会", "character_desire": "她想确认名单", "tension": "同学催促让她不能马上问清", "required_facts": [], "forbidden_progress": [], "ending_beat": "名单背面有未写完的备注", "linked_material_ids": []},
+                        {"id": "scene_3", "chapter_id": "canvas_ch_3", "scene_order": 1, "current_scene": "图书馆门口", "pov": "林晚栀", "present_characters": "林晚栀、许砚清", "surface_event": "借阅卡被误拿", "character_desire": "她想把卡还回去", "tension": "老师叫走许砚清使事情延后", "required_facts": [], "forbidden_progress": [], "ending_beat": "纸条只写了一半", "linked_material_ids": []},
+                    ],
+                    "threads": [],
+                    "quality_rules": [],
+                    "diagnostics": {"source": "remote", "mode": "rolling_extend"},
+                }, ensure_ascii=False)
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            llm = DeferredLlm()
+            _, chapter = self.run_async(
+                service.generate_chapter(llm, project.id, project.chapters[0].id, "写第一章。", 1000, defer_postprocess=True)
+            )
+            before_delta = json.loads(storage.list_novel_versions(chapter.id)[0]["state_delta_json"])
+            self.assertFalse(before_delta.get("chapter_handoff"))
+
+            self.run_async(service.finalize_chapter_postprocess(llm, project.id, chapter.id))
+            refreshed = storage.get_novel_chapter(chapter.id)
+            assert refreshed is not None
+            scene_card = json.loads(refreshed["scene_card_json"])
+            version_delta = json.loads(storage.list_novel_versions(chapter.id)[0]["state_delta_json"])
+            self.assertEqual(scene_card["active_state_delta"]["chapter_handoff"]["happened"], ["林晚栀和许砚清在走廊互通姓名。"])
+            self.assertEqual(version_delta["chapter_handoff"]["happened"], ["林晚栀和许砚清在走廊互通姓名。"])
+
+    def test_handoff_sanitizer_does_not_copy_required_facts_as_current_happened(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            first = project.chapters[0]
+            first_handoff = {
+                "happened": ["林晚栀和许砚清在图书馆附近相遇并问候。"],
+                "relationship_delta": ["两人从久别后的拘谨开始重新说话。"],
+                "ending_hook": ["林晚栀问许砚清明天是否有时间。"],
+                "next_must_continue": ["承接明天是否有时间的问题。"],
+                "open_threads": ["明天是否能见面。"],
+            }
+            storage.update_novel_chapter(
+                first.id,
+                {
+                    "summary": "林晚栀和许砚清在图书馆附近相遇并问候。",
+                    "body": "林晚栀和许砚清在图书馆附近相遇并问候。",
+                    "scene_card": {"chapter_handoff": first_handoff, "handoff_source": "remote"},
+                },
+                "remote",
+            )
+            second_id = storage.create_novel_chapter(project.id, "第二章", "承接明天的约定", "", "", "draft")
+            project_row = storage.get_novel_project(project.id)
+            second = storage.get_novel_chapter(second_id)
+            assert project_row is not None and second is not None
+            scene_card = {
+                "surface_event": "许砚清回答林晚栀关于明天时间的询问，两人商讨明天的安排。",
+                "character_desire": "许砚清想答应又担心时间冲突。",
+                "ending_beat": "许砚清答应林晚栀明天有空。",
+                "required_facts": ["林晚栀和许砚清在图书馆附近相遇并问候。"],
+            }
+            parsed = {
+                "title": "第二章",
+                "summary": "许砚清在纠结后答应林晚栀明天有空。",
+                "body": "许砚清在纠结后答应林晚栀明天有空。",
+            }
+            stale_remote = {
+                "happened": ["林晚栀和许砚清在图书馆附近相遇并问候。"],
+                "relationship_delta": ["两人从久别后的拘谨开始重新说话。"],
+                "ending_hook": ["明天的约定还需要确认时间。"],
+                "next_must_continue": ["承接明天的具体安排。"],
+                "open_threads": ["明天如何见面。"],
+            }
+            fallback = service._mock_chapter_handoff(second, scene_card, parsed)
+            cleaned = service._sanitize_chapter_handoff(project_row, second, scene_card, parsed, stale_remote, fallback)
+            self.assertEqual(cleaned["chapter_order"], 2)
+            self.assertNotIn("林晚栀和许砚清在图书馆附近相遇并问候。", cleaned["happened"])
+            self.assertIn("许砚清回答林晚栀关于明天时间的询问", cleaned["happened"][0])
+
+    def test_generation_prompts_include_previous_tail_and_split_instruction_roles(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            first = project.chapters[0]
+            previous_tail = "TAIL_SENTINEL: she turned back before the rain."
+            storage.update_novel_chapter(
+                first.id,
+                {
+                    "summary": "chapter one summary",
+                    "body": f"chapter one body. {previous_tail}",
+                    "scene_card": {
+                        "chapter_handoff": {
+                            "happened": ["chapter one happened"],
+                            "next_must_continue": ["continue from rain"],
+                        },
+                        "handoff_source": "remote",
+                    },
+                },
+                "remote",
+            )
+            second_id = storage.create_novel_chapter(project.id, "Chapter 2", "story summary only", "", "", "draft")
+            project_row = storage.get_novel_project(project.id)
+            second = storage.get_novel_chapter(second_id)
+            assert project_row is not None and second is not None
+            chapters = storage.list_novel_chapters(project.id)
+            beat_source = service._beat_source(project_row, second, [], chapters, "write with more dialogue", 1200, {})
+            chapter_source = service._chapter_source(project_row, second, [], chapters, "write with more dialogue", 1200, {}, [])
+
+            self.assertIn(previous_tail, beat_source)
+            self.assertIn(previous_tail, chapter_source)
+            self.assertIn("[上一章尾段]", beat_source)
+            self.assertIn("[本章剧情概述]", chapter_source)
+            self.assertIn("[用户写作指令]", chapter_source)
+            self.assertIn("[信息优先级]", chapter_source)
+            self.assertIn("story summary only", chapter_source)
+            self.assertIn("write with more dialogue", chapter_source)
 
     def test_novel_generation_roll_anchor_ignores_stale_future_drafts(self) -> None:
         class FakeLlm:
@@ -953,6 +1151,354 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertNotIn("旧线索污染", rebuilt["open_threads"])
             self.assertEqual(rebuilt["chapter_handoffs"][0]["happened"], ["新事件"])
 
+    def test_restored_chapter_version_restores_bound_state_delta(self) -> None:
+        class OfflineLlm:
+            last_chat_error = None
+
+            def configured(self) -> bool:
+                return False
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter = storage.get_novel_chapter(project.chapters[0].id)
+            assert chapter is not None
+            chapter2_id = storage.create_novel_chapter(project.id, "Chapter 2", "future goal", "future summary", "future body", "draft", {}, [], 2)
+
+            old_handoff = {
+                "happened": ["old event"],
+                "relationship_delta": ["old relationship"],
+                "ending_hook": ["old hook"],
+                "next_must_continue": ["old carry"],
+                "avoid_repeating": [],
+                "open_threads": ["old thread"],
+            }
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "Chapter 1 old",
+                "summary": "old summary",
+                "body": "old body",
+                "scene_card": {"chapter_handoff": old_handoff, "handoff_source": "remote"},
+            }, "remote")
+            old_version_id = storage.list_novel_versions(chapter["id"])[0]["id"]
+
+            new_handoff = {
+                "happened": ["new event"],
+                "relationship_delta": ["new relationship"],
+                "ending_hook": ["new hook"],
+                "next_must_continue": ["new carry"],
+                "avoid_repeating": [],
+                "open_threads": ["new thread"],
+            }
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "Chapter 1 new",
+                "summary": "new summary",
+                "body": "new body",
+                "scene_card": {"chapter_handoff": new_handoff, "handoff_source": "remote"},
+            }, "remote")
+            self.run_async(service._rebuild_novel_state_from_latest_chapters(project.id, OfflineLlm()))
+            rebuilt = service.project_response(project.id).novel_state
+            self.assertIn("new event", rebuilt["confirmed_facts"])
+            self.assertNotIn("old event", rebuilt["confirmed_facts"])
+
+            self.assertTrue(storage.restore_novel_version(old_version_id))
+            service.mark_chapter_revision_boundary(project.id, 1)
+            restored_chapter = storage.get_novel_chapter(chapter["id"])
+            affected_future = storage.get_novel_chapter(chapter2_id)
+            assert restored_chapter is not None and affected_future is not None
+            restored_card = json.loads(restored_chapter["scene_card_json"])
+            self.assertEqual(restored_card["active_version_id"], old_version_id)
+            self.assertEqual(restored_card["active_state_delta"]["chapter_handoff"]["happened"], ["old event"])
+            self.assertEqual(affected_future["status"], "affected")
+            restored_state = service.project_response(project.id).novel_state
+            self.assertIn("old event", restored_state["confirmed_facts"])
+            self.assertNotIn("new event", restored_state["confirmed_facts"])
+
+    def test_restored_chapter_version_restores_planning_snapshot(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter = storage.get_novel_chapter(project.chapters[0].id)
+            assert chapter is not None
+
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "Chapter old",
+                "goal": "old plot goal",
+                "summary": "old summary",
+                "body": "old body",
+                "status": "draft",
+                "scene_card": {
+                    "current_scene": "old scene",
+                    "generation_instruction": "old instruction",
+                    "chapter_handoff": {"happened": ["old event"]},
+                    "handoff_source": "remote",
+                },
+                "source_material_ids": ["mat-old"],
+            }, "remote")
+            old_version = storage.list_novel_versions(chapter["id"])[0]
+            old_snapshot = json.loads(old_version["planning_snapshot_json"])
+            self.assertEqual(old_snapshot["goal"], "old plot goal")
+            self.assertEqual(old_snapshot["scene_card"]["current_scene"], "old scene")
+
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "Chapter new",
+                "goal": "new plot goal",
+                "summary": "new summary",
+                "body": "new body",
+                "status": "locked",
+                "scene_card": {
+                    "current_scene": "new scene",
+                    "generation_instruction": "new instruction",
+                    "chapter_handoff": {"happened": ["new event"]},
+                    "handoff_source": "remote",
+                },
+                "source_material_ids": ["mat-new"],
+            }, "remote")
+
+            self.assertTrue(storage.restore_novel_version(old_version["id"]))
+            restored = storage.get_novel_chapter(chapter["id"])
+            assert restored is not None
+            restored_card = json.loads(restored["scene_card_json"])
+            self.assertEqual(restored["title"], "Chapter old")
+            self.assertEqual(restored["goal"], "old plot goal")
+            self.assertEqual(restored["summary"], "old summary")
+            self.assertEqual(restored["body"], "old body")
+            self.assertEqual(restored["status"], "draft")
+            self.assertEqual(restored_card["current_scene"], "old scene")
+            self.assertEqual(restored_card["generation_instruction"], "old instruction")
+            self.assertEqual(restored_card["active_version_id"], old_version["id"])
+            self.assertEqual(json.loads(restored["source_material_ids_json"]), ["mat-old"])
+
+    def test_delete_novel_chapter_reorders_and_cascades_versions(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter2_id = storage.create_novel_chapter(project.id, "Chapter 2", "goal", "summary", "body 2", "draft", {}, [], 2)
+            chapter3_id = storage.create_novel_chapter(project.id, "Chapter 3", "goal", "summary", "body 3", "draft", {}, [], 3)
+
+            self.assertTrue(storage.list_novel_versions(chapter2_id))
+            deleted = storage.delete_novel_chapter(chapter2_id)
+            self.assertIsNotNone(deleted)
+            self.assertFalse(storage.list_novel_versions(chapter2_id))
+            chapters = storage.list_novel_chapters(project.id)
+            self.assertEqual([int(item["chapter_order"]) for item in chapters], [1, 2])
+            self.assertEqual(storage.get_novel_chapter(chapter3_id)["chapter_order"], 2)
+            service.mark_chapter_revision_boundary(project.id, 1)
+            self.assertEqual(storage.get_novel_chapter(chapter3_id)["status"], "affected")
+
+    def test_delete_novel_chapter_cleans_story_canvas_nodes(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter2_id = storage.create_novel_chapter(project.id, "Chapter 2", "goal", "summary", "body 2", "draft", {}, [], 2)
+            storage.create_novel_chapter(project.id, "Chapter 3", "goal", "summary", "body 3", "draft", {}, [], 3)
+            canvas = {
+                "mode": "story_canvas",
+                "acts": [{"id": "act1", "order": 1, "title": "Act", "purpose": "test", "chapter_ids": ["c1", "c2", "c3"]}],
+                "chapters": [
+                    {"id": "c1", "chapter_order": 1, "title": "One", "scene_ids": ["s1"]},
+                    {"id": "c2", "chapter_order": 2, "title": "Two", "scene_ids": ["s2"]},
+                    {"id": "c3", "chapter_order": 3, "title": "Three", "scene_ids": ["s3"]},
+                ],
+                "scenes": [
+                    {"id": "s1", "chapter_id": "c1"},
+                    {"id": "s2", "chapter_id": "c2"},
+                    {"id": "s3", "chapter_id": "c3"},
+                ],
+                "threads": [
+                    {"id": "t1", "setup_chapter_id": "c2", "payoff_chapter_id": "c3"},
+                    {"id": "t2", "setup_chapter_id": "c1", "payoff_chapter_id": "c3"},
+                ],
+            }
+            storage.update_novel_project(project.id, {"story_canvas": canvas})
+
+            deleted = storage.delete_novel_chapter(chapter2_id)
+            self.assertIsNotNone(deleted)
+            service.remove_chapter_from_story_canvas(project.id, 2)
+            updated_project = storage.get_novel_project(project.id)
+            assert updated_project is not None
+            updated_canvas = json.loads(updated_project["story_canvas_json"])
+
+            self.assertEqual([item["chapter_order"] for item in updated_canvas["chapters"]], [1, 2])
+            self.assertNotIn("c2", [item["id"] for item in updated_canvas["chapters"]])
+            self.assertNotIn("s2", [item["id"] for item in updated_canvas["scenes"]])
+            self.assertEqual(updated_canvas["acts"][0]["chapter_ids"], ["c1", "c3"])
+            self.assertEqual([item["id"] for item in updated_canvas["threads"]], ["t2"])
+
+    def test_canvas_compaction_dedupes_acts_and_filters_orphans(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            canvas = {
+                "mode": "story_canvas",
+                "acts": [
+                    {"id": "act_1", "order": 1, "title": "old", "chapter_ids": ["c1", "missing"]},
+                    {"id": "act_1", "order": 1, "title": "new", "chapter_ids": ["c1", "c2"]},
+                    {"id": "act_2", "order": 2, "title": "second", "chapter_ids": ["missing"]},
+                ],
+                "chapters": [
+                    {"id": "c1", "chapter_order": 1, "title": "One"},
+                    {"id": "c2", "chapter_order": 2, "title": "Two"},
+                ],
+                "scenes": [
+                    {"id": "s1", "chapter_id": "c1"},
+                    {"id": "orphan", "chapter_id": "missing"},
+                ],
+                "threads": [
+                    {"id": "t1", "setup_chapter_id": "c1", "payoff_chapter_id": "c2"},
+                    {"id": "orphan-thread", "setup_chapter_id": "missing", "payoff_chapter_id": "c2"},
+                ],
+            }
+            compacted = service._compact_story_canvas(canvas)
+
+            self.assertEqual([item["title"] for item in compacted["acts"]], ["new", "second"])
+            self.assertEqual(compacted["acts"][0]["chapter_ids"], ["c1", "c2"])
+            self.assertEqual(compacted["acts"][1]["chapter_ids"], [])
+            self.assertEqual([item["id"] for item in compacted["scenes"]], ["s1"])
+            self.assertEqual([item["id"] for item in compacted["threads"]], ["t1"])
+
+    def test_sync_story_canvas_updates_planning_without_losing_runtime_state(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter = storage.get_novel_chapter(project.chapters[0].id)
+            assert chapter is not None
+            storage.update_novel_chapter(chapter["id"], {
+                "goal": "old goal",
+                "scene_card": {
+                    "current_scene": "old scene",
+                    "chapter_handoff": {"happened": ["kept event"]},
+                    "active_state_delta": {"summary_delta": "kept summary"},
+                    "generation_progress": {"stage": "kept"},
+                },
+            }, "manual")
+            canvas = {
+                "mode": "story_canvas",
+                "acts": [{"id": "act_1", "order": 1, "title": "Act", "chapter_ids": ["c1"]}],
+                "chapters": [{
+                    "id": "c1",
+                    "chapter_order": 1,
+                    "title": "Canvas title",
+                    "goal": "canvas goal",
+                    "trigger_event": "canvas trigger",
+                    "character_choice": "canvas choice",
+                    "ending_hook": "canvas hook",
+                    "scene_ids": ["s1"],
+                }],
+                "scenes": [{
+                    "id": "s1",
+                    "chapter_id": "c1",
+                    "scene_order": 1,
+                    "current_scene": "canvas scene",
+                    "surface_event": "canvas event",
+                    "tension": "canvas tension",
+                }],
+                "threads": [],
+            }
+            storage.update_novel_project(project.id, {"story_canvas": canvas})
+
+            service.sync_story_canvas_to_chapters(project.id)
+            synced = storage.get_novel_chapter(chapter["id"])
+            assert synced is not None
+            synced_card = json.loads(synced["scene_card_json"])
+
+            self.assertEqual(synced["title"], "Canvas title")
+            self.assertEqual(synced["goal"], "canvas goal")
+            self.assertEqual(synced_card["current_scene"], "canvas scene")
+            self.assertEqual(synced_card["surface_event"], "canvas trigger")
+            self.assertEqual(synced_card["canvas_chapter_id"], "c1")
+            self.assertEqual(synced_card["canvas_scene_id"], "s1")
+            self.assertEqual(
+                [(item["label"], item["text"]) for item in synced_card["canvas_action_chain"]],
+                [("触发事件", "canvas trigger"), ("人物选择", "canvas choice"), ("结尾钩子", "canvas hook")],
+            )
+            self.assertEqual(synced_card["chapter_handoff"]["happened"], ["kept event"])
+            self.assertEqual(synced_card["active_state_delta"]["summary_delta"], "kept summary")
+            self.assertEqual(synced_card["generation_progress"]["stage"], "kept")
+
+    def test_completed_chapter_updates_canvas_before_rolling_keeps_it(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter = storage.get_novel_chapter(project.chapters[0].id)
+            assert chapter is not None
+            canvas = {
+                "mode": "story_canvas",
+                "chapters": [{"id": "c1", "chapter_order": 1, "title": "Old", "goal": "old goal", "status": "planned", "scene_ids": ["s1"]}],
+                "scenes": [{"id": "s1", "chapter_id": "c1", "current_scene": "old scene"}],
+                "acts": [],
+                "threads": [],
+            }
+            storage.update_novel_project(project.id, {"story_canvas": canvas})
+            service._update_canvas_from_completed_chapter(
+                project.id,
+                chapter,
+                {"current_scene": "new scene", "surface_event": "new event", "ending_beat": "new hook"},
+                {"title": "New title", "summary": "new summary", "body": "新的正文。"},
+            )
+            updated = storage.get_novel_project(project.id)
+            assert updated is not None
+            updated_canvas = json.loads(updated["story_canvas_json"])
+
+            self.assertEqual(updated_canvas["chapters"][0]["title"], "New title")
+            self.assertEqual(updated_canvas["chapters"][0]["status"], "complete")
+            self.assertEqual(updated_canvas["chapters"][0]["completed_summary"], "new summary")
+            self.assertEqual(updated_canvas["scenes"][0]["current_scene"], "new scene")
+            self.assertEqual(updated_canvas["scenes"][0]["surface_event"], "new event")
+
+    def test_initial_canvas_rebuild_prunes_empty_extra_chapters(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            storage.create_novel_chapter(project.id, "Empty 5", "old", "", "", "planned", {}, [], 5)
+            canvas = {
+                "mode": "story_canvas",
+                "chapters": [
+                    {"id": f"c{index}", "chapter_order": index, "title": f"Chapter {index}", "goal": f"goal {index}", "scene_ids": [f"s{index}"]}
+                    for index in range(1, 5)
+                ],
+                "scenes": [
+                    {"id": f"s{index}", "chapter_id": f"c{index}", "current_scene": f"scene {index}"}
+                    for index in range(1, 5)
+                ],
+                "acts": [],
+                "threads": [],
+            }
+
+            service._prune_empty_chapters_outside_canvas(project.id, canvas)
+            chapters = storage.list_novel_chapters(project.id)
+
+            self.assertEqual([int(item["chapter_order"]) for item in chapters], [1])
+            self.assertFalse(any(item["title"] == "Empty 5" for item in chapters))
+
     def test_latest_mock_version_blocks_chapter_from_novel_state(self) -> None:
         class OfflineLlm:
             last_chat_error = None
@@ -996,6 +1542,52 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(rebuilt["last_completed_chapter_order"], 0)
             self.assertEqual(rebuilt["chapter_handoffs"], [])
             self.assertNotIn("可信事件", rebuilt["confirmed_facts"])
+
+    def test_mock_version_snapshot_drops_stale_remote_state_delta(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter = storage.get_novel_chapter(project.chapters[0].id)
+            assert chapter is not None
+            handoff = {
+                "happened": ["remote happened"],
+                "relationship_delta": ["remote relationship"],
+                "ending_hook": ["remote hook"],
+                "next_must_continue": ["remote next"],
+                "open_threads": ["remote thread"],
+            }
+            storage.update_novel_chapter(chapter["id"], {
+                "summary": "remote summary",
+                "body": "remote body",
+                "scene_card": {"chapter_handoff": handoff, "handoff_source": "remote", "current_scene": "remote scene"},
+            }, "remote")
+            remote_chapter = storage.get_novel_chapter(chapter["id"])
+            assert remote_chapter is not None
+            stale_scene_card = json.loads(remote_chapter["scene_card_json"])
+            self.assertIn("active_state_delta", stale_scene_card)
+
+            storage.update_novel_chapter(chapter["id"], {
+                "summary": "local summary",
+                "body": "local body",
+                "scene_card": {**stale_scene_card, "current_scene": "local scene", "handoff_source": "skipped_mock", "chapter_handoff": {}},
+            }, "mock")
+            mock_version = storage.list_novel_versions(chapter["id"])[0]
+            snapshot = json.loads(mock_version["planning_snapshot_json"])
+            snapshot_card = snapshot["scene_card"]
+            self.assertEqual(mock_version["source"], "mock")
+            self.assertNotIn("active_state_delta", snapshot_card)
+            self.assertNotIn("chapter_handoff", snapshot_card)
+            self.assertNotIn("handoff_source", snapshot_card)
+
+            project_row = storage.get_novel_project(project.id)
+            assert project_row is not None
+            state = service._novel_state_until(project_row, 1)
+            self.assertEqual(state["last_completed_chapter_order"], 0)
+            self.assertNotIn("remote happened", state["confirmed_facts"])
 
     def test_chapter_revision_uses_cutoff_state_and_marks_future_affected(self) -> None:
         card = CharacterStore().get("lin_wanzhi")
@@ -1287,7 +1879,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertTrue(chapter.scene_card["ending_beat"])
             self.assertEqual(chapter.scene_card.get("handoff_source"), "skipped_mock")
             self.assertEqual(generated.novel_state.get("last_completed_chapter_order", 0), 0)
-            self.assertTrue(generated.novel_state.get("global_summary"))
+            self.assertEqual(generated.novel_state.get("global_summary"), "")
             self.assertFalse(generated.novel_state.get("chapter_handoffs"))
             versions = storage.list_novel_versions(chapter.id)
             self.assertGreaterEqual(len(versions), 1)

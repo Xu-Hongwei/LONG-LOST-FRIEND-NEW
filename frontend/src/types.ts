@@ -166,6 +166,7 @@ export interface NovelGenerateResponse {
 export type NovelMaterialSource = "message" | "memory" | "story" | "manual";
 export type NovelMaterialCategory = "fact" | "foreshadowing" | "open_thread" | "relationship" | "boundary" | "inspiration";
 export type NovelChapterStatus = "planned" | "drafting" | "draft" | "revised" | "locked" | "affected";
+export type StoryCanvasChapterStatus = NovelChapterStatus | "not_started" | "in_progress" | "complete";
 
 export interface NovelMaterial {
   id: string;
@@ -186,6 +187,8 @@ export interface NovelVersion {
   body: string;
   summary: string;
   source: string;
+  state_delta?: Record<string, unknown>;
+  planning_snapshot?: Record<string, unknown>;
   created_at: string;
 }
 
@@ -202,6 +205,7 @@ export interface NovelChapter {
   source_material_ids: string[];
   created_at: string;
   updated_at: string;
+  version_count?: number;
   versions?: NovelVersion[];
 }
 
@@ -229,9 +233,12 @@ export interface StoryCanvasChapter {
   relationship_shift: string;
   ending_hook: string;
   target_length: number;
-  status: NovelChapterStatus;
+  status: StoryCanvasChapterStatus;
   emotion_curve: string;
   scene_ids: string[];
+  completed_summary?: string;
+  actual_word_count?: number;
+  completed_at?: string;
 }
 
 export interface StoryCanvasScene {
@@ -324,6 +331,28 @@ export interface NovelChapterUpdateRequest {
   status?: NovelChapterStatus;
   scene_card?: Record<string, unknown>;
   source_material_ids?: string[];
+}
+
+export interface NovelInstructionOptimizeRequest {
+  chapter_id?: string | null;
+  base_instruction: string;
+  title?: string;
+  goal?: string;
+  summary?: string;
+  body?: string;
+  status?: NovelChapterStatus;
+  scene_card?: Record<string, unknown>;
+  canvas_chapter?: Record<string, unknown>;
+  previous_handoff?: Record<string, unknown>;
+  prior_novel_state?: Record<string, unknown>;
+  quality_diagnosis?: Record<string, unknown>;
+  target_length: number;
+}
+
+export interface NovelInstructionOptimizeResponse {
+  instruction: string;
+  source: "remote" | "fallback";
+  diagnostics: Record<string, unknown>;
 }
 
 export interface NovelContinuityReport {

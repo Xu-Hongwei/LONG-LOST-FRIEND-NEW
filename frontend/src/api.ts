@@ -7,6 +7,8 @@ import type {
   NovelContinuityReport,
   NovelGenerateRequest,
   NovelGenerateResponse,
+  NovelInstructionOptimizeRequest,
+  NovelInstructionOptimizeResponse,
   NovelProject,
   NovelProjectCreateRequest,
   NovelProjectUpdateRequest,
@@ -131,10 +133,23 @@ export async function updateNovelChapter(chapterId: string, payload: NovelChapte
   });
 }
 
+export async function deleteNovelChapter(chapterId: string): Promise<NovelProject> {
+  return request(`/api/novel/chapters/${chapterId}`, {
+    method: "DELETE"
+  });
+}
+
 export async function generateProjectChapter(projectId: string, chapterId: string | null, instruction: string, targetLength: number): Promise<NovelProject> {
   return request(`/api/novel/projects/${projectId}/generate-chapter`, {
     method: "POST",
     body: JSON.stringify({ chapter_id: chapterId, instruction, target_length: targetLength, defer_postprocess: true })
+  });
+}
+
+export async function optimizeNovelInstruction(projectId: string, payload: NovelInstructionOptimizeRequest): Promise<NovelInstructionOptimizeResponse> {
+  return request(`/api/novel/projects/${projectId}/optimize-instruction`, {
+    method: "POST",
+    body: JSON.stringify(payload)
   });
 }
 

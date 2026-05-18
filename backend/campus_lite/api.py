@@ -25,6 +25,8 @@ from .schemas import (
     NovelContinuityReport,
     NovelGenerateRequest,
     NovelGenerateResponse,
+    NovelInstructionOptimizeRequest,
+    NovelInstructionOptimizeResponse,
     NovelProjectCreateRequest,
     NovelProjectResponse,
     NovelProjectUpdateRequest,
@@ -357,9 +359,12 @@ def create_app() -> FastAPI:
 
     @app.patch("/api/novel/projects/{project_id}", response_model=NovelProjectResponse)
     def update_novel_project(project_id: str, payload: NovelProjectUpdateRequest) -> NovelProjectResponse:
-        updated = storage.update_novel_project(project_id, payload.model_dump(exclude_unset=True))
+        updates = payload.model_dump(exclude_unset=True)
+        updated = storage.update_novel_project(project_id, updates)
         if not updated:
             raise HTTPException(status_code=404, detail="Novel project not found")
+        if payload.story_canvas is not None:
+            novel.sync_story_canvas_to_chapters(project_id)
         return novel.project_response(project_id)
 
     @app.post("/api/novel/projects/{project_id}/canvas/build", response_model=NovelProjectResponse)
@@ -399,6 +404,15 @@ def create_app() -> FastAPI:
             novel.mark_chapter_revision_boundary(chapter["project_id"], int(chapter["chapter_order"]))
         return novel.project_response(chapter["project_id"])
 
+    @app.delete("/api/novel/chapters/{chapter_id}", response_model=NovelProjectResponse)
+    def delete_novel_chapter(chapter_id: str) -> NovelProjectResponse:
+        chapter = storage.delete_novel_chapter(chapter_id)
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Novel chapter not found")
+        novel.remove_chapter_from_story_canvas(chapter["project_id"], int(chapter["chapter_order"]))
+        novel.mark_chapter_revision_boundary(chapter["project_id"], max(0, int(chapter["chapter_order"]) - 1))
+        return novel.project_response(chapter["project_id"])
+
     @app.post("/api/novel/projects/{project_id}/generate-chapter", response_model=NovelProjectResponse)
     async def generate_novel_chapter(project_id: str, payload: NovelChapterGenerateRequest, background_tasks: BackgroundTasks) -> NovelProjectResponse:
         try:
@@ -413,6 +427,13 @@ def create_app() -> FastAPI:
             if payload.defer_postprocess:
                 background_tasks.add_task(novel.finalize_chapter_postprocess, llm, project_id, _chapter.id)
             return project
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/novel/projects/{project_id}/optimize-instruction", response_model=NovelInstructionOptimizeResponse)
+    async def optimize_novel_instruction(project_id: str, payload: NovelInstructionOptimizeRequest) -> NovelInstructionOptimizeResponse:
+        try:
+            return await novel.optimize_chapter_instruction(llm, project_id, payload)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -437,6 +458,8 @@ def create_app() -> FastAPI:
                 body=row["body"],
                 summary=row["summary"],
                 source=row["source"],
+                state_delta=novel._json_dict(row["state_delta_json"] if "state_delta_json" in row.keys() else "{}"),
+                planning_snapshot=novel._json_dict(row["planning_snapshot_json"] if "planning_snapshot_json" in row.keys() else "{}"),
                 created_at=row["created_at"],
             )
             for row in storage.list_novel_versions(chapter_id)
