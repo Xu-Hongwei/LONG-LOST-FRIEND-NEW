@@ -174,11 +174,22 @@ class NovelChapterUpdateRequest(BaseModel):
     source_material_ids: list[str] | None = None
 
 
+class NovelChapterDraftSaveRequest(BaseModel):
+    project: NovelProjectUpdateRequest | None = None
+    chapter: NovelChapterUpdateRequest
+
+
 class NovelChapterGenerateRequest(BaseModel):
     chapter_id: str | None = None
     instruction: str = Field(default="生成下一章正文", max_length=4000)
     target_length: int = Field(default=1800, ge=400, le=6000)
     defer_postprocess: bool = True
+
+
+class NovelCanvasExtendRequest(BaseModel):
+    from_chapter_order: int = Field(default=0, ge=0, le=999)
+    count: int = Field(default=4, ge=2, le=6)
+    instruction: str = Field(default="", max_length=4000)
 
 
 class NovelInstructionOptimizeRequest(BaseModel):
@@ -327,3 +338,4 @@ class MemoryPaneResponse(BaseModel):
     manual_note: str
     last_recall: list[MemoryItem]
     prompt_slots: list[ContextSlot] = Field(default_factory=list)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)

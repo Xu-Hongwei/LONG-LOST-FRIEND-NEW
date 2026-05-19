@@ -2442,6 +2442,80 @@ textarea::placeholder {
   margin: 8px 0 14px;
 }
 
+.postprocess-diagnostics {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.postprocess-diagnostics div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.postprocess-diagnostics span,
+.postprocess-diagnostics p,
+.postprocess-diagnostics small {
+  color: rgba(244, 241, 232, 0.56);
+  font-size: 0.76rem;
+}
+
+.postprocess-diagnostics strong {
+  color: #e9c46a;
+  font-size: 0.86rem;
+}
+
+.postprocess-diagnostics.succeeded strong {
+  color: #8ab17d;
+}
+
+.postprocess-diagnostics.failed strong {
+  color: #ffb4a2;
+}
+
+.postprocess-diagnostics.partial > div > strong {
+  color: #f4a261;
+}
+
+.postprocess-stages {
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  margin: 4px 0 0;
+  list-style: none;
+}
+
+.postprocess-stages li {
+  display: grid;
+  grid-template-columns: 56px 72px minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+}
+
+.postprocess-stages strong {
+  color: rgba(244, 241, 232, 0.76);
+  font-size: 0.72rem;
+}
+
+.postprocess-stages li.succeeded strong {
+  color: #8ab17d;
+}
+
+.postprocess-stages li.failed strong {
+  color: #ffb4a2;
+}
+
+.postprocess-stages li.running strong,
+.postprocess-stages li.queued strong {
+  color: #e9c46a;
+}
+
 .memory-tabs {
   display: flex;
   flex-wrap: wrap;

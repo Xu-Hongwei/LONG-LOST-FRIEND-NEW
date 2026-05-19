@@ -1,0 +1,242 @@
+import type { NovelChapter, NovelChapterStatus, StoryCanvas, StoryCanvasChapter, StoryCanvasScene } from "../../types";
+import { sceneCardFields } from "./constants";
+
+export type ChapterSceneCardDraft = Record<string, string>;
+
+export function emptyStoryCanvas(): StoryCanvas {
+  return {
+    version: 1,
+    mode: "story_canvas",
+    acts: [],
+    chapters: [],
+    scenes: [],
+    threads: [],
+    quality_rules: []
+  };
+}
+
+export function stringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  const text = String(value || "").trim();
+  return text ? text.split(/[；;]\s*/).map((item) => item.trim()).filter(Boolean) : [];
+}
+
+export function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
+  const raw = (canvas && typeof canvas === "object" ? canvas : {}) as Record<string, unknown>;
+  const acts = Array.isArray(raw.acts) ? raw.acts : [];
+  const chapters = Array.isArray(raw.chapters) ? raw.chapters : [];
+  const scenes = Array.isArray(raw.scenes) ? raw.scenes : [];
+  const threads = Array.isArray(raw.threads) ? raw.threads : [];
+
+  return {
+    version: Number(raw.version || 1),
+    mode: String(raw.mode || "story_canvas"),
+    acts: acts.map((item, index) => {
+      const act = item as Record<string, unknown>;
+      return {
+        id: String(act.id || `act_${index + 1}`),
+        order: Number(act.order || index + 1),
+        title: String(act.title || `阶段 ${index + 1}`),
+        purpose: String(act.purpose || ""),
+        chapter_ids: stringArray(act.chapter_ids)
+      };
+    }),
+    chapters: chapters.map((item, index) => {
+      const chapter = item as Record<string, unknown>;
+      return {
+        id: String(chapter.id || `canvas_ch_${index + 1}`),
+        act_id: String(chapter.act_id || "act_1"),
+        chapter_order: Number(chapter.chapter_order || index + 1),
+        title: String(chapter.title || `第 ${index + 1} 章`),
+        goal: String(chapter.goal || ""),
+        external_event: String(chapter.external_event || ""),
+        trigger_event: String(chapter.trigger_event || chapter.external_event || ""),
+        immediate_reaction: String(chapter.immediate_reaction || ""),
+        obstacle_escalation: String(chapter.obstacle_escalation || ""),
+        counterpart_reaction: String(chapter.counterpart_reaction || ""),
+        character_choice: String(chapter.character_choice || chapter.relationship_shift || ""),
+        scene_consequence: String(chapter.scene_consequence || chapter.relationship_shift || ""),
+        relationship_shift: String(chapter.relationship_shift || ""),
+        ending_hook: String(chapter.ending_hook || ""),
+        target_length: Number(chapter.target_length || 1800),
+        status: String(chapter.status || "planned") as StoryCanvasChapter["status"],
+        emotion_curve: String(chapter.emotion_curve || ""),
+        scene_ids: stringArray(chapter.scene_ids),
+        completed_summary: String(chapter.completed_summary || ""),
+        actual_word_count: Number(chapter.actual_word_count || 0),
+        completed_at: String(chapter.completed_at || "")
+      };
+    }),
+    scenes: scenes.map((item, index) => {
+      const scene = item as Record<string, unknown>;
+      return {
+        id: String(scene.id || `scene_${index + 1}`),
+        chapter_id: String(scene.chapter_id || ""),
+        scene_order: Number(scene.scene_order || index + 1),
+        current_scene: String(scene.current_scene || ""),
+        pov: String(scene.pov || ""),
+        present_characters: String(scene.present_characters || ""),
+        surface_event: String(scene.surface_event || ""),
+        character_desire: String(scene.character_desire || ""),
+        tension: String(scene.tension || ""),
+        required_facts: stringArray(scene.required_facts),
+        forbidden_progress: stringArray(scene.forbidden_progress),
+        ending_beat: String(scene.ending_beat || ""),
+        linked_material_ids: stringArray(scene.linked_material_ids)
+      };
+    }),
+    threads: threads.map((item, index) => {
+      const thread = item as Record<string, unknown>;
+      return {
+        id: String(thread.id || `thread_${index + 1}`),
+        kind: String(thread.kind || "foreshadowing"),
+        label: String(thread.label || ""),
+        setup_chapter_id: String(thread.setup_chapter_id || ""),
+        payoff_chapter_id: String(thread.payoff_chapter_id || ""),
+        status: String(thread.status || "seed"),
+        notes: String(thread.notes || "")
+      };
+    }),
+    quality_rules: stringArray(raw.quality_rules),
+    diagnostics: (raw.diagnostics && typeof raw.diagnostics === "object" ? raw.diagnostics : {}) as Record<string, unknown>
+  };
+}
+
+export function normalizeSceneCardDraft(sceneCard: Record<string, unknown> | null | undefined): ChapterSceneCardDraft {
+  const draft: ChapterSceneCardDraft = {};
+  for (const field of sceneCardFields) {
+    const value = sceneCard?.[field.key];
+    draft[field.key] = Array.isArray(value)
+      ? value.map((item) => String(item).trim()).filter(Boolean).join("；")
+      : String(value || "").trim();
+  }
+  return draft;
+}
+
+export function derivedSceneCardFromCanvasChapter(chapter: StoryCanvasChapter | null | undefined): ChapterSceneCardDraft {
+  if (!chapter) return {};
+  return {
+    surface_event: chapter.trigger_event || chapter.external_event || chapter.goal || "",
+    tension: chapter.obstacle_escalation || "",
+    ending_beat: chapter.ending_hook || ""
+  };
+}
+
+export function sceneCardWithPlanningDefaults(base: ChapterSceneCardDraft, defaults: ChapterSceneCardDraft): ChapterSceneCardDraft {
+  const next = { ...base };
+  for (const [key, value] of Object.entries(defaults)) {
+    if (String(value || "").trim() && !String(next[key] || "").trim()) {
+      next[key] = value;
+    }
+  }
+  return next;
+}
+
+export function sceneCardDraftFromCanvas(
+  scene: Record<string, unknown> | null | undefined,
+  chapter: StoryCanvasChapter | null | undefined
+): ChapterSceneCardDraft {
+  return sceneCardWithPlanningDefaults(normalizeSceneCardDraft(scene), derivedSceneCardFromCanvasChapter(chapter));
+}
+
+export function canvasChapterForOrder(canvas: StoryCanvas, order: number): StoryCanvasChapter | null {
+  return canvas.chapters.find((chapter) => chapter.chapter_order === order) || canvas.chapters[0] || null;
+}
+
+export function canvasScenesForChapter(canvas: StoryCanvas, chapter: StoryCanvasChapter | null): StoryCanvasScene[] {
+  const chapterId = chapter?.id || "";
+  return canvas.scenes.filter((scene) => scene.chapter_id === chapterId);
+}
+
+export function canvasFieldText(value: unknown): string {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean).join("；") || "未设定";
+  return String(value || "").trim() || "未设定";
+}
+
+function splitSceneDraftList(value: string): string[] {
+  return value
+    .split(/[；;\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export function storyCanvasWithChapterDraft(
+  canvas: StoryCanvas,
+  chapter: NovelChapter | null,
+  draft: {
+    title: string;
+    goal: string;
+    status: NovelChapterStatus;
+    scene_card: ChapterSceneCardDraft;
+  },
+  options: { targetLength: number; fallbackChapter?: StoryCanvasChapter | null }
+): StoryCanvas {
+  const nextCanvas = normalizeStoryCanvas(JSON.parse(JSON.stringify(canvas)) as StoryCanvas);
+  const order = chapter?.chapter_order || options.fallbackChapter?.chapter_order || 1;
+  let canvasChapter = canvasChapterForOrder(nextCanvas, order);
+
+  if (!canvasChapter) {
+    canvasChapter = {
+      id: `canvas_ch_${order}`,
+      act_id: nextCanvas.acts[0]?.id || "act_1",
+      chapter_order: order,
+      title: draft.title || `第${order}章`,
+      goal: draft.goal,
+      external_event: "",
+      trigger_event: "",
+      immediate_reaction: "",
+      obstacle_escalation: "",
+      counterpart_reaction: "",
+      character_choice: "",
+      scene_consequence: "",
+      relationship_shift: "",
+      ending_hook: "",
+      target_length: options.targetLength,
+      status: draft.status,
+      emotion_curve: "",
+      scene_ids: []
+    };
+    nextCanvas.chapters.push(canvasChapter);
+  }
+
+  canvasChapter.title = draft.title || canvasChapter.title;
+  canvasChapter.goal = draft.goal || canvasChapter.goal;
+  canvasChapter.target_length = options.targetLength || canvasChapter.target_length;
+  canvasChapter.status = draft.status;
+
+  let scene = canvasScenesForChapter(nextCanvas, canvasChapter)[0];
+  if (!scene) {
+    scene = {
+      id: `scene_${order}`,
+      chapter_id: canvasChapter.id,
+      scene_order: 1,
+      current_scene: "",
+      pov: "",
+      present_characters: "",
+      surface_event: "",
+      character_desire: "",
+      tension: "",
+      required_facts: [],
+      forbidden_progress: [],
+      ending_beat: "",
+      linked_material_ids: []
+    };
+    nextCanvas.scenes.push(scene);
+    canvasChapter.scene_ids = [...new Set([...canvasChapter.scene_ids, scene.id])];
+  }
+
+  scene.current_scene = draft.scene_card.current_scene || scene.current_scene;
+  scene.pov = draft.scene_card.pov || scene.pov;
+  scene.present_characters = draft.scene_card.present_characters || scene.present_characters;
+  scene.surface_event = draft.scene_card.surface_event || canvasChapter.trigger_event || canvasChapter.external_event || draft.goal || scene.surface_event;
+  scene.character_desire = draft.scene_card.character_desire || scene.character_desire;
+  scene.tension = draft.scene_card.tension || canvasChapter.obstacle_escalation || scene.tension;
+
+  const requiredFacts = splitSceneDraftList(draft.scene_card.required_facts || "");
+  const forbiddenProgress = splitSceneDraftList(draft.scene_card.forbidden_progress || "");
+  scene.required_facts = requiredFacts.length ? requiredFacts : scene.required_facts;
+  scene.forbidden_progress = forbiddenProgress.length ? forbiddenProgress : scene.forbidden_progress;
+  scene.ending_beat = draft.scene_card.ending_beat || canvasChapter.ending_hook || scene.ending_beat;
+
+  return nextCanvas;
+}

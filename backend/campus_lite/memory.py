@@ -106,6 +106,12 @@ class MemoryService:
     def build_pane(self, session_id: str, last_recall: list[MemoryItem] | None = None) -> dict[str, Any]:
         session = self.storage.get_session(session_id)
         memories = self.list_memories(session_id)
+        diagnostics = {}
+        if session:
+            try:
+                diagnostics = json.loads(session["postprocess_diagnostics_json"] or "{}")
+            except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+                diagnostics = {}
         return {
             "session_id": session_id,
             "frozen": bool(session["frozen"]) if session else False,
@@ -114,6 +120,7 @@ class MemoryService:
             "memories": [item.model_dump() for item in memories],
             "last_recall": [item.model_dump() for item in (last_recall or [])],
             "prompt_slots": json.loads(session["last_prompt_slots"] or "[]") if session else [],
+            "diagnostics": diagnostics,
         }
 
     def update_recent_summary(self, session_id: str) -> str:

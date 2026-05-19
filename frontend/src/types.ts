@@ -67,6 +67,7 @@ export interface MemoryPane {
   memories: MemoryItem[];
   last_recall: MemoryItem[];
   prompt_slots?: ContextSlot[];
+  diagnostics?: Record<string, unknown>;
 }
 
 export interface MemoryPatch {
@@ -331,6 +332,17 @@ export interface NovelChapterUpdateRequest {
   status?: NovelChapterStatus;
   scene_card?: Record<string, unknown>;
   source_material_ids?: string[];
+}
+
+export interface NovelChapterDraftSaveRequest {
+  project?: NovelProjectUpdateRequest;
+  chapter: NovelChapterUpdateRequest;
+}
+
+export interface NovelCanvasExtendRequest {
+  from_chapter_order: number;
+  count?: number;
+  instruction?: string;
 }
 
 export interface NovelInstructionOptimizeRequest {

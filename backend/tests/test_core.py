@@ -14,7 +14,7 @@ from campus_lite.novel import NovelService
 from campus_lite.schemas import NovelChapterGenerateRequest, NovelGenerateRequest, NovelProjectCreateRequest
 from campus_lite.schemas import MemoryItem
 from campus_lite.state import CharacterStateService
-from campus_lite.storage import Storage
+from campus_lite.storage import Storage, StoragePayloadError
 from campus_lite.story import StoryService
 
 
@@ -185,6 +185,51 @@ class CampusLiteCoreTest(unittest.TestCase):
             )
             self.assertTrue(recalled)
             self.assertIn("图书馆", recalled[0].content)
+
+    def test_text_recall_does_not_fallback_to_unrelated_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, "lin_wanzhi")
+            msg_id = storage.add_message(session_id, visitor_id, "lin_wanzhi", "user", "我喜欢听歌")
+            storage.add_memory(
+                visitor_id,
+                session_id,
+                "lin_wanzhi",
+                "user_preference",
+                "用户喜欢听歌和旅行。",
+                0.9,
+                msg_id,
+                0.8,
+            )
+            storage.add_memory(
+                visitor_id,
+                session_id,
+                "lin_wanzhi",
+                "open_thread",
+                "询问对方是否吃过晚饭并提到自己还没吃。",
+                0.9,
+                None,
+                0.8,
+            )
+            storage.add_memory(
+                visitor_id,
+                session_id,
+                "lin_wanzhi",
+                "open_thread",
+                "询问樱花是否还在开放并提议一同去看樱花。",
+                0.9,
+                None,
+                0.8,
+            )
+
+            memory = MemoryService(storage)
+            dinner = memory.recall(session_id, "晚饭吃了吗")
+            self.assertTrue(any("晚饭" in item.content for item in dinner))
+            self.assertFalse(any("樱花" in item.content for item in dinner if item.memory_type == "open_thread"))
+
+            unrelated = memory.recall(session_id, "火星基地怎么建设")
+            self.assertTrue(all(item.memory_type == "user_preference" for item in unrelated))
 
     def test_memory_item_update_and_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1799,7 +1844,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(canvas["chapters"][0]["target_length"], 1800)
             self.assertEqual(canvas["scenes"][0]["scene_order"], 1)
 
-    def test_novel_versions_dedupe_identical_content(self) -> None:
+    def test_novel_versions_are_immutable_even_for_identical_content(self) -> None:
         card = CharacterStore().get("lin_wanzhi")
         with tempfile.TemporaryDirectory() as tmp:
             storage = Storage(Path(tmp) / "test.db")
@@ -1818,14 +1863,169 @@ class CampusLiteCoreTest(unittest.TestCase):
             chapter_id = project.chapters[0].id
             first = storage.add_novel_version(project.id, chapter_id, "draft", "第一章", "同一版正文。", "同一版摘要。", "mock")
             second = storage.add_novel_version(project.id, chapter_id, "draft", "第一章", "同一版正文。", "同一版摘要。", "restore")
-            self.assertEqual(first, second)
-            self.assertEqual(len(storage.list_novel_versions(chapter_id)), 1)
+            self.assertNotEqual(first, second)
+            self.assertEqual(len(storage.list_novel_versions(chapter_id)), 2)
             third = storage.add_novel_version(project.id, chapter_id, "draft", "第一章", "另一版正文。", "同一版摘要。", "manual")
             self.assertNotEqual(first, third)
-            self.assertEqual(len(storage.list_novel_versions(chapter_id)), 2)
+            self.assertEqual(len(storage.list_novel_versions(chapter_id)), 3)
             self.assertTrue(storage.delete_novel_version(first))
-            self.assertEqual([row["id"] for row in storage.list_novel_versions(chapter_id)], [third])
+            self.assertEqual(
+                {row["id"] for row in storage.list_novel_versions(chapter_id)},
+                {second, third},
+            )
             self.assertFalse(storage.delete_novel_version(first))
+
+    def test_novel_json_payloads_reject_oversize_without_truncating(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(
+                card,
+                visitor_id,
+                session_id,
+                [],
+                [],
+                [],
+                NovelProjectCreateRequest(),
+            )
+            original = storage.get_novel_project(project.id)
+            assert original is not None
+            with self.assertRaises(StoragePayloadError):
+                storage.update_novel_project(project.id, {"story_canvas": {"chapters": [{"title": "长" * 21000}]}})
+            unchanged = storage.get_novel_project(project.id)
+            assert unchanged is not None
+            self.assertEqual(unchanged["story_canvas_json"], original["story_canvas_json"])
+
+    def test_version_planning_snapshot_excludes_runtime_state(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(
+                card,
+                visitor_id,
+                session_id,
+                [],
+                [],
+                [],
+                NovelProjectCreateRequest(),
+            )
+            chapter_id = project.chapters[0].id
+            storage.update_novel_chapter(
+                chapter_id,
+                {
+                    "body": "远程正文。",
+                    "summary": "远程摘要。",
+                    "scene_card": {
+                        "current_scene": "图书馆",
+                        "generation_progress": {"stage": "done"},
+                        "postprocess": {"status": "done"},
+                        "chapter_audit": {"pass": True},
+                        "active_state_delta": {"summary_delta": "旧"},
+                        "chapter_handoff": {"happened": ["互通姓名"]},
+                        "handoff_source": "remote",
+                    },
+                },
+                "remote",
+            )
+            version = storage.list_novel_versions(chapter_id)[0]
+            snapshot = json.loads(version["planning_snapshot_json"])
+            snapshot_card = snapshot["scene_card"]
+            self.assertEqual(snapshot_card["current_scene"], "图书馆")
+            self.assertNotIn("generation_progress", snapshot_card)
+            self.assertNotIn("postprocess", snapshot_card)
+            self.assertNotIn("chapter_audit", snapshot_card)
+            self.assertNotIn("active_state_delta", snapshot_card)
+            self.assertNotIn("chapter_handoff", snapshot_card)
+            delta = json.loads(version["state_delta_json"])
+            self.assertEqual(delta["chapter_handoff"]["happened"], ["互通姓名"])
+
+    def test_atomic_chapter_draft_save_rejects_project_payload_before_chapter_update(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(
+                card,
+                visitor_id,
+                session_id,
+                [],
+                [],
+                [],
+                NovelProjectCreateRequest(),
+            )
+            chapter_id = project.chapters[0].id
+            with self.assertRaises(StoragePayloadError):
+                storage.update_novel_chapter_draft(
+                    project.id,
+                    chapter_id,
+                    {"story_canvas": {"chapters": [{"title": "长" * 21000}]}},
+                    {"body": "不应写入。", "summary": "不应写入。"},
+                )
+            chapter = storage.get_novel_chapter(chapter_id)
+            assert chapter is not None
+            self.assertEqual(chapter["body"], "")
+            self.assertEqual(storage.list_novel_versions(chapter_id), [])
+
+    def test_restore_version_does_not_restore_runtime_progress_fields(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(
+                card,
+                visitor_id,
+                session_id,
+                [],
+                [],
+                [],
+                NovelProjectCreateRequest(),
+            )
+            chapter_id = project.chapters[0].id
+            storage.update_novel_chapter(
+                chapter_id,
+                {
+                    "body": "远程正文。",
+                    "summary": "远程摘要。",
+                    "scene_card": {
+                        "current_scene": "图书馆",
+                        "generation_progress": {"stage": "done"},
+                        "postprocess": {"status": "done"},
+                        "chapter_handoff": {"happened": ["互通姓名"]},
+                        "handoff_source": "remote",
+                    },
+                },
+                "remote",
+            )
+            version_id = storage.list_novel_versions(chapter_id)[0]["id"]
+            storage.update_novel_chapter(
+                chapter_id,
+                {
+                    "body": "手动正文。",
+                    "summary": "手动摘要。",
+                    "scene_card": {"current_scene": "操场", "generation_progress": {"stage": "failed"}},
+                },
+                "manual",
+            )
+            version_count = len(storage.list_novel_versions(chapter_id))
+            self.assertTrue(storage.restore_novel_version(version_id))
+            restored = storage.get_novel_chapter(chapter_id)
+            assert restored is not None
+            restored_card = json.loads(restored["scene_card_json"])
+            self.assertEqual(restored["body"], "远程正文。")
+            self.assertNotIn("generation_progress", restored_card)
+            self.assertNotIn("postprocess", restored_card)
+            self.assertEqual(restored_card["active_version_id"], version_id)
+            self.assertEqual(len(storage.list_novel_versions(chapter_id)), version_count)
 
     def test_novel_chapter_generation_versions_and_restore(self) -> None:
         class FakeLlm:

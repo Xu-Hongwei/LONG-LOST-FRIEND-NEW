@@ -1,35 +1,78 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, ref, nextTick } from "vue";
-import html2canvas from "html2canvas";
+import {
+  createSession,
+  deleteMemoryItem,
+  exportSession,
+  getMemoryPane,
+  getStoryPane,
+  listCharacters,
+  patchMemory,
+  refreshStoryPane,
+  resolveVisitor,
+  sendMessage,
+  updateMemoryItem,
+  waitForMemoryPostprocess
+} from "./features/chat/api";
 import {
   buildStoryCanvas,
   checkNovelContinuity,
   createNovelChapter,
   createNovelProject,
-  createSession,
-  deleteMemoryItem,
   deleteNovelChapter,
   deleteNovelVersion,
-  exportSession,
+  extendStoryCanvas,
   generateNovel,
   generateProjectChapter,
   getNovelProject,
-  getStoryPane,
-  listCharacters,
   listNovelProjects,
   listNovelVersions,
   optimizeNovelInstruction,
-  patchMemory,
-  refreshStoryPane,
-  resolveVisitor,
   restoreNovelVersion,
-  sendMessage,
-  updateMemoryItem,
+  saveNovelChapterDraft,
   updateNovelChapter,
   updateNovelProject
-} from "./api";
-import { loveProfiles, loveQuestions } from "./loveTestData";
-import type { LoveDimension, LoveGender } from "./loveTestData";
+} from "./features/novel/api";
+import {
+  canvasActionChainFields,
+  canvasBuildSteps,
+  DEFAULT_CHAPTER_INSTRUCTION,
+  novelChapterStatusLabels,
+  novelChapterStatusOptions,
+  novelDraftSteps,
+  novelFidelityLabels,
+  novelFormLabels,
+  novelPerspectiveLabels,
+  novelPipelineSteps,
+  novelReviewSteps,
+  novelVersionSourceLabels,
+  sceneCardFields,
+  storyKindLabels,
+  storyStatusLabels
+} from "./features/novel/constants";
+import type { CanvasActionKey, CanvasBuildStage, NovelPipelineStep, NovelProgressStage } from "./features/novel/constants";
+import {
+  canvasChapterForOrder,
+  canvasFieldText,
+  canvasScenesForChapter,
+  derivedSceneCardFromCanvasChapter,
+  emptyStoryCanvas,
+  normalizeStoryCanvas,
+  sceneCardDraftFromCanvas,
+  sceneCardWithPlanningDefaults,
+  storyCanvasWithChapterDraft
+} from "./features/novel/canvas";
+import type { ChapterSceneCardDraft } from "./features/novel/canvas";
+import { saveLoveResultImageToPng } from "./features/personalityTest/resultImage";
+import {
+  loadLoveAnswersForVisitor,
+  loadLoveGenderForVisitor,
+  resetLoveAnswersForVisitor,
+  saveLoveAnswersForVisitor,
+  saveLoveGenderForVisitor
+} from "./features/personalityTest/storage";
+import { loveProfiles, loveQuestions } from "./features/personalityTest/data";
+import type { LoveDimension, LoveGender } from "./features/personalityTest/data";
 import type {
   CharacterBond,
   CharacterCard,
@@ -51,36 +94,18 @@ import type {
   StoryCanvas,
   StoryCanvasChapter,
   StoryCanvasScene,
-  StoryCanvasThread,
   StoryPane
 } from "./types";
 
 const VISITOR_KEY = "campus-pulse-lite-visitor";
 const CHARACTER_KEY = "campus-pulse-lite-character";
-const LOVE_TEST_KEY = "campus-pulse-lite-love-test";
-const LOVE_TEST_VERSION = "love-test-v3-20q-6types-profile-images";
 const STORY_AUTO_REFRESH_USER_INTERVAL = 6;
 
 type PageKey = "chat" | "love-test" | "novel";
 type NovelStudioMode = "select" | "quick" | "project";
 type NovelWorkflowMode = Exclude<NovelStudioMode, "select">;
-type NovelProgressStage = "idle" | "collecting" | "state" | "beats" | "drafting" | "local_check" | "reviewing" | "rewriting" | "fallback" | "handoff" | "replan" | "done" | "failed";
-type NovelPipelineStep = { id: NovelProgressStage; label: string; detail: string };
 type StoryCanvasView = "flow" | "chapters" | "scenes" | "threads";
-type CanvasBuildStage = "idle" | "materials" | "structure" | "chapters" | "scenes" | "threads" | "done" | "failed";
 type StoryRefreshOptions = { silent?: boolean };
-type ChapterSceneCardDraft = Record<string, string>;
-type CanvasActionKey =
-  | "external_event"
-  | "trigger_event"
-  | "immediate_reaction"
-  | "obstacle_escalation"
-  | "counterpart_reaction"
-  | "character_choice"
-  | "scene_consequence"
-  | "relationship_shift"
-  | "ending_hook";
-const DEFAULT_CHAPTER_INSTRUCTION = "承接上一章，写出下一段自然推进，但不制造越界进展。";
 type NovelVersionDisplay = NovelVersion & {
   duplicateCount: number;
   restoreCount: number;
@@ -89,8 +114,8 @@ type NovelVersionDisplay = NovelVersion & {
 const currentPage = ref<PageKey>("chat");
 const novelStudioMode = ref<NovelStudioMode>("select");
 const visitorId = ref(localStorage.getItem(VISITOR_KEY) || "");
-const loveAnswers = ref<Record<string, number>>(loadLoveAnswers(localStorage.getItem(VISITOR_KEY) || ""));
-const loveGender = ref<LoveGender>(loadLoveGender(localStorage.getItem(VISITOR_KEY) || ""));
+const loveAnswers = ref<Record<string, number>>(loadLoveAnswersForVisitor(localStorage.getItem(VISITOR_KEY) || ""));
+const loveGender = ref<LoveGender>(loadLoveGenderForVisitor(localStorage.getItem(VISITOR_KEY) || ""));
 const showLoveResultModal = ref(false);
 const messageListRef = ref<HTMLElement | null>(null);
 const characters = ref<CharacterCard[]>([]);
@@ -128,7 +153,7 @@ const novelProgressPercent = ref(0);
 const novelProgressVisible = ref(false);
 const novelProgressWaitingSeconds = ref(0);
 const novelProgressDetail = ref("");
-const lastAutoStoryRefreshUserCount = ref(0);
+const storyRefreshCountsBySession = ref<Record<string, number>>({});
 const novelProjects = ref<NovelProject[]>([]);
 const activeNovelProjectId = ref("");
 const activeNovelChapterId = ref("");
@@ -172,91 +197,6 @@ let novelProgressTicker: number | null = null;
 let novelGenerationRunId = 0;
 let canvasBuildTimers: number[] = [];
 let canvasBuildTicker: number | null = null;
-
-const novelDraftSteps: NovelPipelineStep[] = [
-  { id: "collecting", label: "读取", detail: "读取章节、画布、素材和上一章尾段" },
-  { id: "state", label: "本地状态", detail: "本地重建截至上一章的 Novel State" },
-  { id: "beats", label: "远程场景", detail: "远程拆出 Scene Beats 和可见动作链" },
-  { id: "drafting", label: "远程正文/本地正文", detail: "远程生成当前章；远程失败时返回本地正文草稿" }
-];
-const novelReviewSteps: NovelPipelineStep[] = [
-  { id: "local_check", label: "本地检查", detail: "只拦截内部字段、ID、空正文和重复段落" },
-  { id: "reviewing", label: "远程审稿", detail: "用 checklist 判断事件、对白、选择和钩子" },
-  { id: "rewriting", label: "远程重写/通过", detail: "需要时远程重写一次，否则直接通过" },
-  { id: "handoff", label: "后台交接", detail: "正文已返回，后台生成交接单并本地增量更新 Novel State" },
-  { id: "replan", label: "后台滚动", detail: "后台重规划后续两章画布和场景卡" }
-];
-const novelPipelineSteps = [...novelDraftSteps, ...novelReviewSteps];
-
-const canvasBuildSteps: { id: Exclude<CanvasBuildStage, "idle" | "done" | "failed">; label: string; detail: string }[] = [
-  { id: "materials", label: "取材", detail: "读取会话片段、记忆和剧情标签" },
-  { id: "structure", label: "组装", detail: "整理作品阶段和章节骨架" },
-  { id: "chapters", label: "章节", detail: "生成每章目标、事件和结尾钩子" },
-  { id: "scenes", label: "场景", detail: "拆出具体场景卡和约束" },
-  { id: "threads", label: "线索", detail: "标记伏笔、回收点和规则" }
-];
-
-const novelChapterStatusOptions: { value: NovelChapterStatus; label: string }[] = [
-  { value: "planned", label: "计划中" },
-  { value: "draft", label: "草稿" },
-  { value: "revised", label: "已修订" },
-  { value: "affected", label: "受影响" },
-  { value: "locked", label: "已锁定" }
-];
-
-const novelChapterStatusLabels: Record<NovelChapterStatus, string> = {
-  planned: "计划中",
-  drafting: "生成中",
-  draft: "草稿",
-  revised: "已修订",
-  affected: "受影响",
-  locked: "已锁定"
-};
-
-const novelVersionSourceLabels: Record<string, string> = {
-  mock: "本地生成",
-  remote: "AI 生成",
-  manual: "手动保存",
-  restore: "版本恢复",
-  snapshot: "历史快照"
-};
-const sceneCardFields: { key: string; label: string; rows: number }[] = [
-  { key: "current_scene", label: "当前场景", rows: 2 },
-  { key: "pov", label: "视角", rows: 2 },
-  { key: "present_characters", label: "在场人物", rows: 1 },
-  { key: "character_desire", label: "人物欲望", rows: 2 },
-  { key: "required_facts", label: "必须保留事实", rows: 2 },
-  { key: "forbidden_progress", label: "禁止推进", rows: 2 }
-];
-const canvasActionChainFields: { key: CanvasActionKey; label: string }[] = [
-  { key: "external_event", label: "外部事件" },
-  { key: "trigger_event", label: "触发事件" },
-  { key: "immediate_reaction", label: "即时反应" },
-  { key: "obstacle_escalation", label: "阻碍升级" },
-  { key: "counterpart_reaction", label: "对方反应" },
-  { key: "character_choice", label: "人物选择" },
-  { key: "scene_consequence", label: "场景后果" },
-  { key: "relationship_shift", label: "关系变化" },
-  { key: "ending_hook", label: "结尾钩子" }
-];
-const novelFormLabels: Record<NovelForm, string> = {
-  daily_short: "日常短篇",
-  campus_romance: "校园恋爱短篇",
-  vignette: "片段随笔",
-  chapter_one: "第一章",
-  side_story: "番外"
-};
-const novelPerspectiveLabels: Record<NovelPerspective, string> = {
-  third_person: "第三人称",
-  user_view: "用户视角",
-  character_view: "角色视角",
-  dual_view: "双视角"
-};
-const novelFidelityLabels: Record<NovelFidelity, string> = {
-  faithful: "忠实记录",
-  polished: "轻度润色",
-  literary: "文学化扩写"
-};
 
 const includedSlots = computed(() => promptSlots.value.filter((slot) => slot.included));
 const excludedSlots = computed(() => promptSlots.value.filter((slot) => !slot.included));
@@ -386,19 +326,61 @@ const memoryCounts = computed(() => {
     recall: recallCount.value
   };
 });
-const storyKindLabels: Record<string, string> = {
-  motif: "意象",
-  story_beat: "瞬间",
-  open_thread: "伏笔",
-  relationship_texture: "质感",
-  boundary: "边界"
-};
-const storyStatusLabels: Record<string, string> = {
-  active: "活跃",
-  seed: "种子",
-  developed: "已发展",
-  archived: "归档"
-};
+const memoryDiagnostics = computed(() => memoryPane.value?.diagnostics || {});
+const postprocessStatus = computed(() => String(memoryDiagnostics.value.status || "idle"));
+const postprocessStatusLabel = computed(() => {
+  const labels: Record<string, string> = {
+    idle: "idle",
+    queued: "queued",
+    running: "running",
+    succeeded: "succeeded",
+    failed: "failed",
+    skipped: "skipped",
+    partial: "partial"
+  };
+  return labels[postprocessStatus.value] || postprocessStatus.value;
+});
+const postprocessStages = computed(() => {
+  const stages = memoryDiagnostics.value.stages;
+  if (!stages || typeof stages !== "object") return [];
+  return ["memory", "state", "bond"].map((key) => {
+    const stage = ((stages as Record<string, unknown>)[key] || {}) as Record<string, unknown>;
+    return {
+      key,
+      status: String(stage.status || "idle"),
+      detail: stage.error_type
+        ? String(stage.error_type)
+        : stage.reason
+          ? String(stage.reason)
+          : key === "memory" && stage.status === "succeeded"
+            ? `${Number(stage.stored_count || 0)} saved`
+            : stage.updated !== undefined
+              ? `updated ${stage.updated ? "yes" : "no"}`
+              : stage.duration_ms !== undefined
+                ? `${Number(stage.duration_ms)}ms`
+                : ""
+    };
+  });
+});
+const postprocessDetail = computed(() => {
+  const diagnostics = memoryDiagnostics.value;
+  if (postprocessStatus.value === "failed") {
+    return String(diagnostics.error_type || diagnostics.error_message || "unknown error");
+  }
+  if (postprocessStatus.value === "skipped") {
+    return String(diagnostics.reason || "not available");
+  }
+  if (postprocessStatus.value === "succeeded") {
+    return `${Number(diagnostics.stored_count || 0)} saved / ${Number(diagnostics.extracted_count || 0)} extracted`;
+  }
+  if (postprocessStatus.value === "partial") {
+    return `${Number(diagnostics.stored_count || 0)} saved, some stages failed`;
+  }
+  if (postprocessStatus.value === "queued" || postprocessStatus.value === "running") {
+    return String(diagnostics.user_message_id || "");
+  }
+  return "no recent analysis";
+});
 const activeNovelStepIndex = computed(() => {
   if (novelProgressStage.value === "done") return novelPipelineSteps.length;
   if (novelProgressStage.value === "fallback") {
@@ -657,7 +639,7 @@ function setPage(page: PageKey) {
 function answerLoveQuestion(questionId: string, optionIndex: number) {
   const wasComplete = hasCompleteLoveTest.value;
   loveAnswers.value = { ...loveAnswers.value, [questionId]: optionIndex };
-  saveLoveAnswers();
+  saveLoveAnswersForVisitor(visitorId.value, loveAnswers.value);
   if (!wasComplete && Object.keys(loveAnswers.value).length === loveQuestions.length) {
     showLoveResultModal.value = true;
   }
@@ -666,120 +648,28 @@ function answerLoveQuestion(questionId: string, optionIndex: number) {
 function resetLoveTest() {
   loveAnswers.value = {};
   showLoveResultModal.value = false;
-  localStorage.removeItem(loveStorageKey(visitorId.value));
+  resetLoveAnswersForVisitor(visitorId.value);
 }
 
 function setLoveGender(gender: LoveGender) {
   loveGender.value = gender;
-  localStorage.setItem(loveGenderStorageKey(visitorId.value), gender);
-}
-
-function loveStorageKey(id: string) {
-  return `${LOVE_TEST_KEY}:${id || "anonymous"}`;
-}
-
-function loveGenderStorageKey(id: string) {
-  return `${LOVE_TEST_KEY}:gender:${id || "anonymous"}`;
+  saveLoveGenderForVisitor(visitorId.value, gender);
 }
 
 function characterStorageKey(id: string) {
   return `${CHARACTER_KEY}:${id || "anonymous"}`;
 }
 
-function saveLoveAnswers() {
-  localStorage.setItem(loveStorageKey(visitorId.value), JSON.stringify({ version: LOVE_TEST_VERSION, answers: loveAnswers.value }));
-}
-
-function loadLoveAnswers(id: string) {
-  try {
-    const raw = localStorage.getItem(loveStorageKey(id));
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as { version?: string; answers?: Record<string, number> };
-    if (parsed.version !== LOVE_TEST_VERSION || !parsed.answers) return {};
-    return Object.fromEntries(Object.entries(parsed.answers).filter(([questionId]) => loveQuestions.some((question) => question.id === questionId)));
-  } catch {
-    return {};
-  }
-}
-
-function loadLoveGender(id: string): LoveGender {
-  return localStorage.getItem(loveGenderStorageKey(id)) === "male" ? "male" : "female";
-}
-
 function refreshLoveTestForVisitor(id: string) {
-  loveAnswers.value = loadLoveAnswers(id);
-  loveGender.value = loadLoveGender(id);
+  loveAnswers.value = loadLoveAnswersForVisitor(id);
+  loveGender.value = loadLoveGenderForVisitor(id);
   showLoveResultModal.value = false;
-}
-
-function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number, maxLines = 8) {
-  let line = "";
-  let lines = 0;
-  for (const char of text) {
-    const testLine = line + char;
-    if (ctx.measureText(testLine).width > maxWidth && line) {
-      ctx.fillText(line, x, y);
-      y += lineHeight;
-      lines += 1;
-      line = char;
-      if (lines >= maxLines) return y;
-    } else {
-      line = testLine;
-    }
-  }
-  if (line && lines < maxLines) {
-    ctx.fillText(line, x, y);
-    y += lineHeight;
-  }
-  return y;
-}
-
-function loadImage(src: string) {
-  return new Promise<HTMLImageElement>((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = reject;
-    image.src = src;
-  });
 }
 
 async function saveLoveResultImage() {
   if (!loveResult.value) return;
-  const profile = loveResult.value;
   try {
-    const modalElement = document.querySelector('.love-modal') as HTMLElement | null;
-    if (!modalElement) return;
-
-    // 隐藏不想出现在截图里的按钮
-    const actionsBlock = document.querySelector('.modal-actions') as HTMLElement | null;
-    const closeBtn = document.querySelector('.modal-close') as HTMLElement | null;
-    if (actionsBlock) actionsBlock.style.display = 'none';
-    if (closeBtn) closeBtn.style.display = 'none';
-
-    // 提升截屏区域样式保证完整度
-    // 强制去除滚动条等会导致截图尺寸被截断的问题
-    const oldMaxHeight = modalElement.style.maxHeight;
-    const oldOverflow = modalElement.style.overflow;
-    modalElement.style.maxHeight = 'none';
-    modalElement.style.overflow = 'visible';
-
-    const canvas = await html2canvas(modalElement, {
-      backgroundColor: '#121511',
-      scale: 2, // 高清渲染
-      useCORS: true,
-      logging: false
-    });
-
-    // 恢复原有样式
-    modalElement.style.maxHeight = oldMaxHeight;
-    modalElement.style.overflow = oldOverflow;
-    if (actionsBlock) actionsBlock.style.display = '';
-    if (closeBtn) closeBtn.style.display = '';
-
-    const anchor = document.createElement("a");
-    anchor.href = canvas.toDataURL("image/png");
-    anchor.download = `${profile.name}-${loveGender.value === "female" ? "女" : "男"}-恋爱人格结果.png`;
-    anchor.click();
+    await saveLoveResultImageToPng(loveResult.value, loveGender.value);
   } catch(e) {
     console.error("生成图片失败: ", e);
   }
@@ -874,104 +764,6 @@ function selectCharacter(characterId: string) {
   void openSession();
 }
 
-function emptyStoryCanvas(): StoryCanvas {
-  return {
-    version: 1,
-    mode: "story_canvas",
-    acts: [],
-    chapters: [],
-    scenes: [],
-    threads: [],
-    quality_rules: []
-  };
-}
-
-function stringArray(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
-  const text = String(value || "").trim();
-  return text ? text.split(/[；;]\s*/).map((item) => item.trim()).filter(Boolean) : [];
-}
-
-function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
-  const raw = (canvas && typeof canvas === "object" ? canvas : {}) as Record<string, unknown>;
-  const acts = Array.isArray(raw.acts) ? raw.acts : [];
-  const chapters = Array.isArray(raw.chapters) ? raw.chapters : [];
-  const scenes = Array.isArray(raw.scenes) ? raw.scenes : [];
-  const threads = Array.isArray(raw.threads) ? raw.threads : [];
-  return {
-    version: Number(raw.version || 1),
-    mode: String(raw.mode || "story_canvas"),
-    acts: acts.map((item, index) => {
-      const act = item as Record<string, unknown>;
-      return {
-        id: String(act.id || `act_${index + 1}`),
-        order: Number(act.order || index + 1),
-        title: String(act.title || `阶段 ${index + 1}`),
-        purpose: String(act.purpose || ""),
-        chapter_ids: stringArray(act.chapter_ids)
-      };
-    }),
-    chapters: chapters.map((item, index) => {
-      const chapter = item as Record<string, unknown>;
-      return {
-        id: String(chapter.id || `canvas_ch_${index + 1}`),
-        act_id: String(chapter.act_id || "act_1"),
-        chapter_order: Number(chapter.chapter_order || index + 1),
-        title: String(chapter.title || `第 ${index + 1} 章`),
-        goal: String(chapter.goal || ""),
-        external_event: String(chapter.external_event || ""),
-        trigger_event: String(chapter.trigger_event || chapter.external_event || ""),
-        immediate_reaction: String(chapter.immediate_reaction || ""),
-        obstacle_escalation: String(chapter.obstacle_escalation || ""),
-        counterpart_reaction: String(chapter.counterpart_reaction || ""),
-        character_choice: String(chapter.character_choice || chapter.relationship_shift || ""),
-        scene_consequence: String(chapter.scene_consequence || chapter.relationship_shift || ""),
-        relationship_shift: String(chapter.relationship_shift || ""),
-        ending_hook: String(chapter.ending_hook || ""),
-        target_length: Number(chapter.target_length || 1800),
-        status: String(chapter.status || "planned") as StoryCanvasChapter["status"],
-        emotion_curve: String(chapter.emotion_curve || ""),
-        scene_ids: stringArray(chapter.scene_ids),
-        completed_summary: String(chapter.completed_summary || ""),
-        actual_word_count: Number(chapter.actual_word_count || 0),
-        completed_at: String(chapter.completed_at || "")
-      };
-    }),
-    scenes: scenes.map((item, index) => {
-      const scene = item as Record<string, unknown>;
-      return {
-        id: String(scene.id || `scene_${index + 1}`),
-        chapter_id: String(scene.chapter_id || ""),
-        scene_order: Number(scene.scene_order || index + 1),
-        current_scene: String(scene.current_scene || ""),
-        pov: String(scene.pov || ""),
-        present_characters: String(scene.present_characters || ""),
-        surface_event: String(scene.surface_event || ""),
-        character_desire: String(scene.character_desire || ""),
-        tension: String(scene.tension || ""),
-        required_facts: stringArray(scene.required_facts),
-        forbidden_progress: stringArray(scene.forbidden_progress),
-        ending_beat: String(scene.ending_beat || ""),
-        linked_material_ids: stringArray(scene.linked_material_ids)
-      };
-    }),
-    threads: threads.map((item, index) => {
-      const thread = item as Record<string, unknown>;
-      return {
-        id: String(thread.id || `thread_${index + 1}`),
-        kind: String(thread.kind || "foreshadowing"),
-        label: String(thread.label || ""),
-        setup_chapter_id: String(thread.setup_chapter_id || ""),
-        payoff_chapter_id: String(thread.payoff_chapter_id || ""),
-        status: String(thread.status || "seed"),
-        notes: String(thread.notes || "")
-      };
-    }),
-    quality_rules: stringArray(raw.quality_rules),
-    diagnostics: (raw.diagnostics && typeof raw.diagnostics === "object" ? raw.diagnostics : {}) as Record<string, unknown>
-  };
-}
-
 function syncStoryCanvasDraft(project: NovelProject | null) {
   storyCanvasDraft.value = normalizeStoryCanvas(project?.story_canvas);
 }
@@ -989,127 +781,11 @@ function syncProjectDraft(project: NovelProject | null) {
   syncStoryCanvasDraft(project);
 }
 
-function normalizeSceneCardDraft(sceneCard: Record<string, unknown> | null | undefined): ChapterSceneCardDraft {
-  const draft: ChapterSceneCardDraft = {};
-  for (const field of sceneCardFields) {
-    const value = sceneCard?.[field.key];
-    draft[field.key] = Array.isArray(value)
-      ? value.map((item) => String(item).trim()).filter(Boolean).join("；")
-      : String(value || "").trim();
-  }
-  return draft;
-}
-
-function derivedSceneCardFromCanvasChapter(chapter: StoryCanvasChapter | null | undefined): ChapterSceneCardDraft {
-  if (!chapter) return {};
-  return {
-    surface_event: chapter.trigger_event || chapter.external_event || chapter.goal || "",
-    tension: chapter.obstacle_escalation || "",
-    ending_beat: chapter.ending_hook || ""
-  };
-}
-
-function sceneCardDraftFromCanvas(scene: Record<string, unknown> | null | undefined, chapter: StoryCanvasChapter | null | undefined): ChapterSceneCardDraft {
-  return {
-    ...normalizeSceneCardDraft(scene),
-    ...derivedSceneCardFromCanvasChapter(chapter)
-  };
-}
-
 function currentSceneCardForSave(): ChapterSceneCardDraft {
-  return {
-    ...chapterDraft.value.scene_card,
-    ...derivedSceneCardFromCanvasChapter(activeCanvasChapter.value)
-  };
-}
-
-function canvasChapterForOrder(canvas: StoryCanvas, order: number) {
-  return canvas.chapters.find((chapter) => chapter.chapter_order === order) || canvas.chapters[0] || null;
-}
-
-function canvasScenesForChapter(canvas: StoryCanvas, chapter: StoryCanvasChapter | null) {
-  const chapterId = chapter?.id || "";
-  return canvas.scenes.filter((scene) => scene.chapter_id === chapterId);
-}
-
-function canvasFieldText(value: unknown) {
-  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean).join("；") || "未设定";
-  return String(value || "").trim() || "未设定";
-}
-
-function splitSceneDraftList(value: string) {
-  return value
-    .split(/[；;\n]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function storyCanvasWithChapterDraft(canvas: StoryCanvas, chapter: NovelChapter | null, draft: typeof chapterDraft.value) {
-  const nextCanvas = normalizeStoryCanvas(JSON.parse(JSON.stringify(canvas)) as StoryCanvas);
-  const order = chapter?.chapter_order || activeCanvasChapter.value?.chapter_order || 1;
-  let canvasChapter = canvasChapterForOrder(nextCanvas, order);
-  if (!canvasChapter) {
-    canvasChapter = {
-      id: `canvas_ch_${order}`,
-      act_id: nextCanvas.acts[0]?.id || "act_1",
-      chapter_order: order,
-      title: draft.title || `第${order}章`,
-      goal: draft.goal,
-      external_event: "",
-      trigger_event: "",
-      immediate_reaction: "",
-      obstacle_escalation: "",
-      counterpart_reaction: "",
-      character_choice: "",
-      scene_consequence: "",
-      relationship_shift: "",
-      ending_hook: "",
-      target_length: projectChapterTargetLength.value,
-      status: draft.status,
-      emotion_curve: "",
-      scene_ids: []
-    };
-    nextCanvas.chapters.push(canvasChapter);
-  }
-  canvasChapter.title = draft.title || canvasChapter.title;
-  canvasChapter.goal = draft.goal || canvasChapter.goal;
-  canvasChapter.target_length = projectChapterTargetLength.value || canvasChapter.target_length;
-  canvasChapter.status = draft.status;
-
-  let scene = canvasScenesForChapter(nextCanvas, canvasChapter)[0];
-  if (!scene) {
-    scene = {
-      id: `scene_${order}`,
-      chapter_id: canvasChapter.id,
-      scene_order: 1,
-      current_scene: "",
-      pov: "",
-      present_characters: "",
-      surface_event: "",
-      character_desire: "",
-      tension: "",
-      required_facts: [],
-      forbidden_progress: [],
-      ending_beat: "",
-      linked_material_ids: []
-    };
-    nextCanvas.scenes.push(scene);
-    canvasChapter.scene_ids = [...new Set([...canvasChapter.scene_ids, scene.id])];
-  }
-  scene.current_scene = draft.scene_card.current_scene || scene.current_scene;
-  scene.pov = draft.scene_card.pov || scene.pov;
-  scene.present_characters = draft.scene_card.present_characters || scene.present_characters;
-  scene.surface_event = canvasChapter.trigger_event || canvasChapter.external_event || draft.goal || scene.surface_event;
-  scene.character_desire = draft.scene_card.character_desire || scene.character_desire;
-  scene.tension = canvasChapter.obstacle_escalation || scene.tension;
-  scene.required_facts = splitSceneDraftList(draft.scene_card.required_facts || "").length
-    ? splitSceneDraftList(draft.scene_card.required_facts || "")
-    : scene.required_facts;
-  scene.forbidden_progress = splitSceneDraftList(draft.scene_card.forbidden_progress || "").length
-    ? splitSceneDraftList(draft.scene_card.forbidden_progress || "")
-    : scene.forbidden_progress;
-  scene.ending_beat = canvasChapter.ending_hook || scene.ending_beat;
-  return nextCanvas;
+  return sceneCardWithPlanningDefaults(
+    chapterDraft.value.scene_card,
+    derivedSceneCardFromCanvasChapter(activeCanvasChapter.value)
+  );
 }
 
 async function activeSceneToChapterDraft() {
@@ -1118,15 +794,9 @@ async function activeSceneToChapterDraft() {
   error.value = "";
   try {
     const activeOrder = activeNovelChapter.value?.chapter_order || activeCanvasChapter.value?.chapter_order || 1;
-    const savedProject = await updateNovelProject(activeNovelProject.value.id, {
-      ...projectDraft.value,
-      story_canvas: storyCanvasDraft.value
-    });
-    replaceNovelProject(savedProject);
-    syncStoryCanvasDraft(savedProject);
-    const savedCanvas = normalizeStoryCanvas(savedProject.story_canvas);
-    const canvasChapter = canvasChapterForOrder(savedCanvas, activeOrder);
-    const scene = canvasScenesForChapter(savedCanvas, canvasChapter)[0];
+    const canvasDraft = normalizeStoryCanvas(storyCanvasDraft.value);
+    const canvasChapter = canvasChapterForOrder(canvasDraft, activeOrder);
+    const scene = canvasScenesForChapter(canvasDraft, canvasChapter)[0];
     if (!scene || !canvasChapter) return;
     const nextDraft = {
       ...chapterDraft.value,
@@ -1137,15 +807,28 @@ async function activeSceneToChapterDraft() {
     chapterDraft.value = nextDraft;
     projectChapterTargetLength.value = canvasChapter.target_length || projectChapterTargetLength.value;
     if (activeNovelChapter.value) {
-      const project = await updateNovelChapter(activeNovelChapter.value.id, {
-        title: nextDraft.title,
-        goal: nextDraft.goal,
-        scene_card: nextDraft.scene_card
+      const project = await saveNovelChapterDraft(activeNovelChapter.value.id, {
+        project: {
+          ...projectDraft.value,
+          story_canvas: storyCanvasDraft.value
+        },
+        chapter: {
+          title: nextDraft.title,
+          goal: nextDraft.goal,
+          scene_card: nextDraft.scene_card
+        }
       });
       replaceNovelProject(project);
       syncStoryCanvasDraft(project);
       syncChapterDraft(activeNovelChapter.value);
       await loadChapterVersions();
+    } else {
+      const project = await updateNovelProject(activeNovelProject.value.id, {
+        ...projectDraft.value,
+        story_canvas: storyCanvasDraft.value
+      });
+      replaceNovelProject(project);
+      syncStoryCanvasDraft(project);
     }
   } catch (err) {
     error.value = readableError(err);
@@ -1626,6 +1309,26 @@ async function deleteActiveNovelChapter() {
     const nextChapter = project.chapters.find((item) => item.chapter_order >= deletedOrder) || project.chapters[project.chapters.length - 1] || null;
     activeNovelChapterId.value = nextChapter?.id || "";
     syncChapterDraft(activeNovelChapter.value);
+    if (window.confirm("是否从删除位置前一章开始滚动重规划后续画布？已有正文会保留，后续章节仍会标记为受影响，方便你逐章确认。")) {
+      beginCanvasBuildFlow();
+      try {
+        const replanned = await extendStoryCanvas(project.id, {
+          from_chapter_order: Math.max(0, deletedOrder - 1),
+          count: 4,
+          instruction: `第 ${deletedOrder} 章已删除。请从第 ${deletedOrder} 章开始重新接上后续规划，保持已保留正文不被直接覆盖。`
+        });
+        replaceNovelProject(replanned);
+        syncProjectDraft(replanned);
+        const refreshedChapter = replanned.chapters.find((item) => item.chapter_order >= deletedOrder) || replanned.chapters[replanned.chapters.length - 1] || null;
+        activeNovelChapterId.value = refreshedChapter?.id || "";
+        syncChapterDraft(activeNovelChapter.value);
+        finishCanvasBuildFlow();
+      } catch (err) {
+        clearCanvasBuildTimers();
+        canvasBuildStage.value = "failed";
+        error.value = readableError(err);
+      }
+    }
     await loadChapterVersions();
   } catch (err) {
     error.value = readableError(err);
@@ -1639,13 +1342,18 @@ async function saveNovelChapter() {
   novelProjectBusy.value = true;
   error.value = "";
   try {
-    const syncedCanvas = storyCanvasWithChapterDraft(storyCanvasDraft.value, activeNovelChapter.value, chapterDraft.value);
-    storyCanvasDraft.value = syncedCanvas;
-    await updateNovelProject(activeNovelProject.value.id, {
-      ...projectDraft.value,
-      story_canvas: syncedCanvas
+    const syncedCanvas = storyCanvasWithChapterDraft(storyCanvasDraft.value, activeNovelChapter.value, chapterDraft.value, {
+      targetLength: projectChapterTargetLength.value,
+      fallbackChapter: activeCanvasChapter.value
     });
-    const project = await updateNovelChapter(activeNovelChapter.value.id, chapterDraftForApi());
+    storyCanvasDraft.value = syncedCanvas;
+    const project = await saveNovelChapterDraft(activeNovelChapter.value.id, {
+      project: {
+        ...projectDraft.value,
+        story_canvas: syncedCanvas
+      },
+      chapter: chapterDraftForApi()
+    });
     replaceNovelProject(project);
     syncStoryCanvasDraft(project);
     await loadChapterVersions();
@@ -1665,16 +1373,23 @@ async function generateActiveChapter() {
   beginNovelProgress("project");
   try {
     const generatingChapterId = activeNovelChapter.value?.id || "";
-    const savedProject = await updateNovelProject(activeNovelProject.value.id, {
-      ...projectDraft.value,
-      story_canvas: storyCanvasDraft.value
-    });
-    if (runId !== novelGenerationRunId) return;
-    replaceNovelProject(savedProject);
     if (activeNovelChapter.value) {
-      const syncedProject = await updateNovelChapter(activeNovelChapter.value.id, chapterDraftForApi());
+      const syncedProject = await saveNovelChapterDraft(activeNovelChapter.value.id, {
+        project: {
+          ...projectDraft.value,
+          story_canvas: storyCanvasDraft.value
+        },
+        chapter: chapterDraftForApi()
+      });
       if (runId !== novelGenerationRunId) return;
       replaceNovelProject(syncedProject);
+    } else {
+      const savedProject = await updateNovelProject(activeNovelProject.value.id, {
+        ...projectDraft.value,
+        story_canvas: storyCanvasDraft.value
+      });
+      if (runId !== novelGenerationRunId) return;
+      replaceNovelProject(savedProject);
     }
     const liveChapterId = activeNovelChapter.value?.id || generatingChapterId;
     if (liveChapterId) {
@@ -1842,6 +1557,11 @@ async function submit() {
     memoryPane.value = response.memory_pane;
     manualNoteDraft.value = response.memory_pane.manual_note || "";
     promptSlots.value = response.prompt_slots;
+    const postprocess = response.diagnostics?.postprocess;
+    const userMessageId = postprocess && typeof postprocess === "object"
+      ? String((postprocess as Record<string, unknown>).user_message_id || "")
+      : "";
+    void refreshMemoryPaneAfterPostprocess(sessionId.value, userMessageId);
     void maybeAutoRefreshStoryTags();
 
     await nextTick();
@@ -1852,6 +1572,19 @@ async function submit() {
     error.value = readableError(err);
   } finally {
     busy.value = false;
+  }
+}
+
+async function refreshMemoryPaneAfterPostprocess(targetSessionId: string, userMessageId: string) {
+  if (!userMessageId) return;
+  try {
+    const pane = await waitForMemoryPostprocess(targetSessionId, userMessageId, 60);
+    if (sessionId.value !== targetSessionId) return;
+    memoryPane.value = pane;
+    manualNoteDraft.value = pane.manual_note || "";
+    promptSlots.value = pane.prompt_slots || [];
+  } catch (err) {
+    console.warn("memory diagnostics wait failed", err);
   }
 }
 
@@ -2121,13 +1854,25 @@ function currentUserMessageCount() {
   return messages.value.filter((message) => message.role === "user").length;
 }
 
+function lastStoryRefreshCountForSession() {
+  return storyRefreshCountsBySession.value[sessionId.value] || 0;
+}
+
+function rememberStoryRefreshCountForSession(count: number) {
+  if (!sessionId.value) return;
+  storyRefreshCountsBySession.value = {
+    ...storyRefreshCountsBySession.value,
+    [sessionId.value]: count
+  };
+}
+
 async function maybeAutoRefreshStoryTags() {
   if (!sessionId.value || storyBusy.value) return;
   const userMessageCount = currentUserMessageCount();
   if (userMessageCount < STORY_AUTO_REFRESH_USER_INTERVAL) return;
   if (userMessageCount % STORY_AUTO_REFRESH_USER_INTERVAL !== 0) return;
-  if (lastAutoStoryRefreshUserCount.value === userMessageCount) return;
-  lastAutoStoryRefreshUserCount.value = userMessageCount;
+  if (lastStoryRefreshCountForSession() === userMessageCount) return;
+  rememberStoryRefreshCountForSession(userMessageCount);
   await refreshStoryTags({ silent: true });
 }
 
@@ -2139,7 +1884,7 @@ async function refreshStoryTags(options: StoryRefreshOptions = {}) {
   }
   try {
     storyPane.value = await refreshStoryPane(sessionId.value);
-    lastAutoStoryRefreshUserCount.value = currentUserMessageCount();
+    rememberStoryRefreshCountForSession(currentUserMessageCount());
   } catch (err) {
     if (!options.silent) {
       error.value = readableError(err);
@@ -3206,6 +2951,22 @@ function downloadNovelProjectMarkdown() {
 
         <textarea v-model="manualNoteDraft" class="note" rows="4" placeholder="手动记忆" />
         <button class="wide" @click="saveMemoryNote">Save note</button>
+
+        <div class="postprocess-diagnostics" :class="postprocessStatus">
+          <div>
+            <span>Analysis</span>
+            <strong>{{ postprocessStatusLabel }}</strong>
+          </div>
+          <p>{{ postprocessDetail }}</p>
+          <ul v-if="postprocessStages.length" class="postprocess-stages">
+            <li v-for="stage in postprocessStages" :key="stage.key" :class="stage.status">
+              <span>{{ stage.key }}</span>
+              <strong>{{ stage.status }}</strong>
+              <small v-if="stage.detail">{{ stage.detail }}</small>
+            </li>
+          </ul>
+          <small v-if="memoryDiagnostics.finished_at">{{ memoryDiagnostics.finished_at }}</small>
+        </div>
 
         <div class="memory-tabs">
           <button :class="{ active: memoryFilter === 'all' }" @click="memoryFilter = 'all'">All {{ memoryCounts.all }}</button>
