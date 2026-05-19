@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from .schemas import MemoryItem
 from .storage import Storage
+
+
+PROFILE_MEMORY_TYPES = {"stable_user_info", "user_preference", "relationship_progress"}
+SEMANTIC_RECALL_THRESHOLD = 0.28
+KEYWORD_RECALL_THRESHOLD = 0.25
 
 
 class MemoryService:
@@ -34,6 +40,20 @@ class MemoryService:
             for row in self.storage.list_memories(session["visitor_id"], session["character_id"], session_id)
         ]
 
+    def profile(self, session_id: str, limit: int = 10) -> list[MemoryItem]:
+        session = self.storage.get_session(session_id)
+        if not session:
+            return []
+        return [
+            self.row_to_memory(row)
+            for row in self.storage.profile_memories(
+                session["visitor_id"],
+                session["character_id"],
+                session_id,
+                limit,
+            )
+        ]
+
     def recall(
         self,
         session_id: str,
@@ -45,7 +65,6 @@ class MemoryService:
         session = self.storage.get_session(session_id)
         if not session:
             return []
-        profile_rows = self.storage.profile_memories(session["visitor_id"], session["character_id"], session_id, 10)
         recall_rows = self.storage.search_memories(
             session["visitor_id"],
             session["character_id"],
@@ -64,7 +83,7 @@ class MemoryService:
             )
             semantic_scores = self._semantic_scores(semantic_rows, query_vector)
             semantic_rows = [row for row in semantic_rows if semantic_scores.get(row["id"], 0) >= 0.18]
-        memories = self._dedupe([self.row_to_memory(row) for row in [*profile_rows, *recall_rows, *semantic_rows]])
+        memories = self._dedupe([self.row_to_memory(row) for row in [*recall_rows, *semantic_rows]])
         return self._rank_hybrid(memories, user_message, semantic_scores)[:limit]
 
     def add_extracted(
@@ -102,6 +121,9 @@ class MemoryService:
             return
         for (memory_id, _), vector in zip(memory_records, vectors):
             self.storage.upsert_embedding("memory", memory_id, provider, vector)
+
+    def merge_for_prompt(self, profile_memories: list[MemoryItem], recall_memories: list[MemoryItem]) -> list[MemoryItem]:
+        return self._dedupe([*profile_memories, *recall_memories])
 
     def build_pane(self, session_id: str, last_recall: list[MemoryItem] | None = None) -> dict[str, Any]:
         session = self.storage.get_session(session_id)
@@ -141,31 +163,47 @@ class MemoryService:
         query: str,
         semantic_scores: dict[str, float] | None = None,
     ) -> list[MemoryItem]:
-        compact = set(self._terms(query))
+        query_terms = set(self._terms(query))
+        query_compact = self._compact_text(query)
         semantic_scores = semantic_scores or {}
+        has_semantic = bool(semantic_scores)
 
-        def score(item: MemoryItem) -> float:
+        def score(item: MemoryItem) -> tuple[float, float, float, str]:
             content_terms = set(self._terms(item.content))
-            overlap = len(compact & content_terms)
-            type_boost = {
-                "stable_user_info": 4,
-                "user_preference": 3,
-                "relationship_progress": 2,
-                "open_thread": 2,
-                "recent_emotion": 1,
+            keyword_score = self._keyword_score(query_terms, query_compact, content_terms, item.content)
+            semantic_score = max(0.0, min(1.0, semantic_scores.get(item.id, 0.0)))
+            is_profile = item.memory_type in PROFILE_MEMORY_TYPES
+            if not is_profile and semantic_score < SEMANTIC_RECALL_THRESHOLD and keyword_score < KEYWORD_RECALL_THRESHOLD:
+                return (-1.0, item.importance, item.confidence, item.updated_at)
+            type_score = {
+                "stable_user_info": 1.0,
+                "user_preference": 0.85,
+                "relationship_progress": 0.7,
+                "open_thread": 0.6,
+                "recent_emotion": 0.4,
             }.get(item.memory_type, 0)
-            scope_boost = {"global": 3, "character": 2, "session": 1}.get(item.memory_scope, 0)
-            semantic = semantic_scores.get(item.id, 0.0)
-            return (
-                semantic * 12
-                + overlap * 10
-                + type_boost
-                + scope_boost
-                + item.importance * 4
-                + item.confidence * 2
-            )
+            scope_score = {"global": 1.0, "character": 0.75, "session": 0.5}.get(item.memory_scope, 0)
+            if has_semantic:
+                final_score = (
+                    semantic_score * 0.42
+                    + keyword_score * 0.32
+                    + item.importance * 0.14
+                    + item.confidence * 0.07
+                    + type_score * 0.03
+                    + scope_score * 0.02
+                )
+            else:
+                final_score = (
+                    keyword_score * 0.55
+                    + item.importance * 0.22
+                    + item.confidence * 0.10
+                    + type_score * 0.08
+                    + scope_score * 0.05
+                )
+            return (final_score, item.importance, item.confidence, item.updated_at)
 
-        return sorted(memories, key=score, reverse=True)
+        ranked = sorted(memories, key=score, reverse=True)
+        return [item for item in ranked if score(item)[0] >= 0]
 
     def _semantic_scores(self, rows: list[Any], query_vector: list[float]) -> dict[str, float]:
         scores: dict[str, float] = {}
@@ -201,8 +239,32 @@ class MemoryService:
         return result
 
     def _terms(self, text: str) -> list[str]:
-        text = (text or "").strip().lower()
-        pieces = [part for part in text.replace("，", " ").replace("。", " ").replace("？", " ").split() if len(part) >= 2]
-        if pieces:
-            return pieces
-        return [text[i : i + 2] for i in range(max(0, len(text) - 1)) if text[i : i + 2].strip()]
+        value = (text or "").lower()
+        terms: list[str] = []
+        for chunk in re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", value):
+            if len(chunk) < 2:
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fff]+", chunk):
+                terms.append(chunk)
+                terms.extend(chunk[index : index + 2] for index in range(len(chunk) - 1))
+            else:
+                terms.append(chunk)
+        return [term for term in terms if len(term) >= 2]
+
+    def _keyword_score(
+        self,
+        query_terms: set[str],
+        query_compact: str,
+        content_terms: set[str],
+        content: str,
+    ) -> float:
+        if not query_terms or not content_terms:
+            return 0.0
+        overlap = len(query_terms & content_terms)
+        overlap_score = min(overlap / 3.0, 1.0)
+        content_compact = self._compact_text(content)
+        phrase_score = 0.35 if query_compact and content_compact and (query_compact in content_compact or content_compact in query_compact) else 0.0
+        return min(overlap_score + phrase_score, 1.0)
+
+    def _compact_text(self, text: str) -> str:
+        return re.sub(r"[^\w\u4e00-\u9fff]+", "", (text or "").lower())

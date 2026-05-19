@@ -301,6 +301,8 @@ class ChatService:
             query_vector=query_vectors[0] if query_vectors else None,
             embedding_provider=embedding_provider,
         )
+        profile_memories = self.memory.profile(payload.session_id, 10)
+        prompt_memories = self.memory.merge_for_prompt(profile_memories, recall)
         recent = self.storage.recent_messages(payload.session_id, 12)
         session = self.storage.get_session(payload.session_id)
         summary = session["recent_summary"] if session else ""
@@ -310,7 +312,9 @@ class ChatService:
             character=card,
             recent_messages=recent,
             user_message=user_text,
-            memories=recall,
+            memories=prompt_memories,
+            profile_memories=profile_memories,
+            recall_memories=recall,
             recent_summary=summary,
             manual_note=session["manual_note"] if session else "",
             live_state=self.character_state.state_to_prompt(current_state),
@@ -327,7 +331,7 @@ class ChatService:
         except Exception as exc:
             self.llm.last_chat_error = type(exc).__name__
             logger.warning("reply generation failed, using mock reply: %s", exc)
-            reply = self.llm.mock_reply(card, user_text, [item.content for item in recall])
+            reply = self.llm.mock_reply(card, user_text, [item.content for item in prompt_memories])
             reply_source = "mock"
             reply_error = type(exc).__name__
 
@@ -354,7 +358,7 @@ class ChatService:
             card.id,
             user_text,
             reply,
-            recall,
+            prompt_memories,
             recent,
             current_state,
             current_bond,

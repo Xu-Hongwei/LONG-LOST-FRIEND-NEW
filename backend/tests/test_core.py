@@ -185,6 +185,38 @@ class CampusLiteCoreTest(unittest.TestCase):
             )
             self.assertTrue(recalled)
             self.assertIn("图书馆", recalled[0].content)
+            self.assertFalse(any("运动场" in item.content for item in recalled))
+
+    def test_memory_hybrid_rank_normalizes_keyword_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            memory = MemoryService(storage)
+            high_quality = MemoryItem(
+                id="mem_high",
+                memory_type="user_preference",
+                memory_scope="global",
+                content="user likes quiet library spaces",
+                confidence=1.0,
+                importance=1.0,
+                source_message_id=None,
+                created_at="2026-01-01",
+                updated_at="2026-01-01",
+            )
+            low_quality = MemoryItem(
+                id="mem_low",
+                memory_type="open_thread",
+                memory_scope="session",
+                content="quiet library meetup",
+                confidence=0.1,
+                importance=0.1,
+                source_message_id=None,
+                created_at="2026-01-01",
+                updated_at="2026-01-02",
+            )
+
+            ranked = memory._rank_hybrid([low_quality, high_quality], "quiet library meetup")
+
+            self.assertEqual(ranked[0].id, "mem_high")
 
     def test_text_recall_does_not_fallback_to_unrelated_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,7 +261,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertFalse(any("樱花" in item.content for item in dinner if item.memory_type == "open_thread"))
 
             unrelated = memory.recall(session_id, "火星基地怎么建设")
-            self.assertTrue(all(item.memory_type == "user_preference" for item in unrelated))
+            self.assertFalse(unrelated)
 
     def test_memory_item_update_and_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -76,7 +76,16 @@ coverage.xml
 .pytest_cache/
 .tmp-edge-canvas-test/
 cover/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # Data / Runtime
-# runtime/
-# *.sqlite3
+*.log
+.tmp*/
+runtime/
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite3
+data/novel_state_backups/

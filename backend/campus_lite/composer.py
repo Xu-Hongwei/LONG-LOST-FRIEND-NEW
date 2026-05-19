@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .schemas import CharacterCard, ContextSlot, MemoryItem
 
@@ -16,6 +16,8 @@ class ComposeInput:
     user_message: str
     memories: list[MemoryItem]
     recent_summary: str
+    profile_memories: list[MemoryItem] = field(default_factory=list)
+    recall_memories: list[MemoryItem] = field(default_factory=list)
     manual_note: str = ""
     live_state: str = ""
     relationship_memory: str = ""
@@ -23,6 +25,8 @@ class ComposeInput:
 
 class ContextComposer:
     def compose(self, request: ComposeInput) -> list[ContextSlot]:
+        profile_memories = request.profile_memories or request.memories
+        recall_memories = request.recall_memories or request.memories
         slots = [
             self._slot("persona.identity", self._persona_identity(request.character), 100),
             self._slot("persona.personality", self._persona_personality(request.character), 99),
@@ -33,8 +37,8 @@ class ContextComposer:
             self._slot("persona.speech_style", self._persona_voice(request.character), 98),
             self._slot("persona.boundaries", self._persona_boundaries(request.character), 97),
             self._slot("persona.examples", self._persona_examples(request.character), 84),
-            self._slot("memory.profile", self._memory_profile(request.memories), 88),
-            self._slot("memory.recall", self._memory_recall(request.memories), 86),
+            self._slot("memory.profile", self._memory_profile(profile_memories), 88),
+            self._slot("memory.recall", self._memory_recall(recall_memories), 86),
             self._slot("memory.recent_summary", request.recent_summary or "暂无会话摘要。", 82),
             self._slot("memory.manual_note", request.manual_note, 90),
             self._slot("chat.recent_messages", self._recent_messages(request.recent_messages), 78),
