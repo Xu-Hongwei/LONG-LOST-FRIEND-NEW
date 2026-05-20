@@ -35,44 +35,47 @@ import {
 } from "./features/novel/api";
 import {
   canvasActionChainFields,
-  canvasBuildSteps,
   DEFAULT_CHAPTER_INSTRUCTION,
   novelChapterStatusLabels,
   novelChapterStatusOptions,
-  novelDraftSteps,
   novelFidelityLabels,
   novelFormLabels,
   novelPerspectiveLabels,
-  novelPipelineSteps,
-  novelReviewSteps,
-  novelVersionSourceLabels,
-  sceneCardFields,
-  storyKindLabels,
-  storyStatusLabels
+  sceneCardFields
 } from "./features/novel/constants";
-import type { CanvasActionKey, CanvasBuildStage, NovelPipelineStep, NovelProgressStage } from "./features/novel/constants";
+import type { CanvasActionKey } from "./features/novel/constants";
 import {
   canvasChapterForOrder,
   canvasFieldText,
   canvasScenesForChapter,
   derivedSceneCardFromCanvasChapter,
-  emptyStoryCanvas,
   normalizeStoryCanvas,
   sceneCardDraftFromCanvas,
   sceneCardWithPlanningDefaults,
   storyCanvasWithChapterDraft
 } from "./features/novel/canvas";
 import type { ChapterSceneCardDraft } from "./features/novel/canvas";
-import { saveLoveResultImageToPng } from "./features/personalityTest/resultImage";
-import {
-  loadLoveAnswersForVisitor,
-  loadLoveGenderForVisitor,
-  resetLoveAnswersForVisitor,
-  saveLoveAnswersForVisitor,
-  saveLoveGenderForVisitor
-} from "./features/personalityTest/storage";
-import { loveProfiles, loveQuestions } from "./features/personalityTest/data";
-import type { LoveDimension, LoveGender } from "./features/personalityTest/data";
+import { useStoryCanvas } from "./features/novel/useStoryCanvas";
+import type { StoryCanvasView } from "./features/novel/useStoryCanvas";
+import { useNovelProgress } from "./features/novel/useNovelProgress";
+import ContextBrief from "./components/ContextBrief.vue";
+import ChatPanel from "./features/chat/ChatPanel.vue";
+import ChatMemoryPanel from "./features/chat/ChatMemoryPanel.vue";
+import CharacterInsightsPanel from "./features/chat/CharacterInsightsPanel.vue";
+import CanvasChaptersView from "./features/novel/CanvasChaptersView.vue";
+import CanvasFlowView from "./features/novel/CanvasFlowView.vue";
+import CanvasScenesView from "./features/novel/CanvasScenesView.vue";
+import CanvasThreadsView from "./features/novel/CanvasThreadsView.vue";
+import NovelRail from "./features/novel/NovelRail.vue";
+import ProjectChapterEditor from "./features/novel/ProjectChapterEditor.vue";
+import ProjectChapterProgress from "./features/novel/ProjectChapterProgress.vue";
+import ProjectEmptyState from "./features/novel/ProjectEmptyState.vue";
+import ProjectSettingsDrawer from "./features/novel/ProjectSettingsDrawer.vue";
+import QuickDraftPanel from "./features/novel/QuickDraftPanel.vue";
+import StoryCanvasHeader from "./features/novel/StoryCanvasHeader.vue";
+import StoryBiblePanel from "./features/novel/StoryBiblePanel.vue";
+import LoveTestPanel from "./features/personalityTest/LoveTestPanel.vue";
+import { useLoveTest } from "./features/personalityTest/useLoveTest";
 import type {
   CharacterBond,
   CharacterCard,
@@ -91,9 +94,7 @@ import type {
   NovelPerspective,
   NovelProject,
   NovelVersion,
-  StoryCanvas,
   StoryCanvasChapter,
-  StoryCanvasScene,
   StoryPane
 } from "./types";
 
@@ -103,8 +104,6 @@ const STORY_AUTO_REFRESH_USER_INTERVAL = 6;
 
 type PageKey = "chat" | "love-test" | "novel";
 type NovelStudioMode = "select" | "quick" | "project";
-type NovelWorkflowMode = Exclude<NovelStudioMode, "select">;
-type StoryCanvasView = "flow" | "chapters" | "scenes" | "threads";
 type StoryRefreshOptions = { silent?: boolean };
 type NovelVersionDisplay = NovelVersion & {
   duplicateCount: number;
@@ -113,11 +112,41 @@ type NovelVersionDisplay = NovelVersion & {
 };
 const currentPage = ref<PageKey>("chat");
 const novelStudioMode = ref<NovelStudioMode>("select");
+const {
+  novelProgressStage,
+  novelProgressPercent,
+  novelProgressDetail,
+  showActiveNovelProgress,
+  novelProgressLabel,
+  novelStepClass,
+  clearNovelProgressTimers,
+  setNovelProgress,
+  applyChapterGenerationProgress,
+  chapterUsedLocalFallback,
+  chapterPostprocessStatus,
+  chapterHasBackgroundPostprocess,
+  beginNovelProgress
+} = useNovelProgress(novelStudioMode);
 const visitorId = ref(localStorage.getItem(VISITOR_KEY) || "");
-const loveAnswers = ref<Record<string, number>>(loadLoveAnswersForVisitor(localStorage.getItem(VISITOR_KEY) || ""));
-const loveGender = ref<LoveGender>(loadLoveGenderForVisitor(localStorage.getItem(VISITOR_KEY) || ""));
-const showLoveResultModal = ref(false);
-const messageListRef = ref<HTMLElement | null>(null);
+const {
+  loveAnswers,
+  loveGender,
+  showLoveResultModal,
+  loveProgress,
+  loveProgressPercent,
+  loveDimensionEntries,
+  loveResult,
+  selectedLoveDetail,
+  loveProfileImageUrl,
+  hasCompleteLoveTest,
+  loveBarWidth,
+  answerLoveQuestion,
+  resetLoveTest,
+  setLoveGender,
+  refreshLoveTestForVisitor,
+  saveLoveResultImage
+} = useLoveTest(visitorId.value);
+const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null);
 const characters = ref<CharacterCard[]>([]);
 const selectedCharacterId = ref("");
 const activeCharacter = computed(() => characters.value.find((item) => item.id === selectedCharacterId.value) || null);
@@ -147,12 +176,6 @@ const novelAtmosphere = ref("温柔、克制、日常");
 const novelResult = ref<NovelGenerateResponse | null>(null);
 const storyPane = ref<StoryPane | null>(null);
 const storyBusy = ref(false);
-const activeNovelWorkflowMode = ref<NovelWorkflowMode | null>(null);
-const novelProgressStage = ref<NovelProgressStage>("idle");
-const novelProgressPercent = ref(0);
-const novelProgressVisible = ref(false);
-const novelProgressWaitingSeconds = ref(0);
-const novelProgressDetail = ref("");
 const storyRefreshCountsBySession = ref<Record<string, number>>({});
 const novelProjects = ref<NovelProject[]>([]);
 const activeNovelProjectId = ref("");
@@ -167,13 +190,38 @@ const projectDraft = ref({
   relationship_setup: "",
   outline: ""
 });
-const storyCanvasView = ref<StoryCanvasView>("flow");
-const storyCanvasDraft = ref<StoryCanvas>(emptyStoryCanvas());
-const canvasBuildStage = ref<CanvasBuildStage>("idle");
-const canvasBuildPercent = ref(0);
-const canvasBuildWaitingSeconds = ref(0);
-const canvasBuildRunCount = ref(0);
-const canvasBuildLastLabel = ref("");
+const activeNovelProject = computed(() =>
+  novelProjects.value.find((project) => project.id === activeNovelProjectId.value) || null
+);
+const activeNovelChapter = computed(() =>
+  activeNovelProject.value?.chapters.find((chapter) => chapter.id === activeNovelChapterId.value) || activeNovelProject.value?.chapters[0] || null
+);
+const {
+  storyCanvasView,
+  storyCanvasDraft,
+  canvasBuildStage,
+  canvasBuildPercent,
+  canvasBuildActionLabel,
+  canvasFlowMetrics,
+  canvasSourceLabel,
+  canvasBuildSummary,
+  canvasBuildProgressLabel,
+  isInitialCanvasRebuildLocked,
+  activeCanvasChapter,
+  activeCanvasScenes,
+  activeCanvasActionChain,
+  activeNovelPriorStateEntries,
+  novelStateSummary,
+  novelStateOpenThreads,
+  novelStateLastHandoff,
+  novelStateLastHandoffText,
+  syncStoryCanvasDraft,
+  canvasChapterTitle,
+  canvasBuildStepClass,
+  clearCanvasBuildTimers,
+  beginCanvasBuildFlow,
+  finishCanvasBuildFlow
+} = useStoryCanvas(activeNovelProject, activeNovelChapter);
 const chapterDraft = ref({
   title: "",
   goal: "",
@@ -192,11 +240,7 @@ const continuityReport = ref<NovelContinuityReport | null>(null);
 const chapterVersions = ref<NovelVersion[]>([]);
 const novelFocusMode = ref(false);
 const novelEditorFont = ref<"serif" | "sans">("serif");
-let novelProgressTimers: number[] = [];
-let novelProgressTicker: number | null = null;
 let novelGenerationRunId = 0;
-let canvasBuildTimers: number[] = [];
-let canvasBuildTicker: number | null = null;
 
 const includedSlots = computed(() => promptSlots.value.filter((slot) => slot.included));
 const excludedSlots = computed(() => promptSlots.value.filter((slot) => !slot.included));
@@ -257,65 +301,6 @@ const recallCount = computed(() => memoryPane.value?.last_recall?.length || 0);
 const energyPercent = computed(() => Math.round((characterState.value?.energy || 0) * 100));
 const resonancePercent = computed(() => Math.round((characterState.value?.resonance || 0) * 100));
 const bondPercent = computed(() => Math.round((characterBond.value?.resonance_base || 0) * 100));
-const loveProgress = computed(() => Object.keys(loveAnswers.value).length);
-const loveProgressPercent = computed(() => Math.round((loveProgress.value / loveQuestions.length) * 100));
-const loveDimensionLabels: Record<LoveDimension, string> = {
-  warmth: "情绪温度",
-  space: "边界留白",
-  initiative: "主动推进",
-  security: "安全确认",
-  depth: "深度连接",
-  playfulness: "轻盈火花"
-};
-const loveScores = computed<Record<LoveDimension, number>>(() => {
-  const scores: Record<LoveDimension, number> = { warmth: 0, space: 0, initiative: 0, security: 0, depth: 0, playfulness: 0 };
-  for (const question of loveQuestions) {
-    const answerIndex = loveAnswers.value[question.id];
-    const option = question.options[answerIndex];
-    if (!option) continue;
-    for (const [key, value] of Object.entries(option.scores)) {
-      scores[key as LoveDimension] += value || 0;
-    }
-  }
-  return scores;
-});
-const loveDimensionEntries = computed(() => Object.entries(loveScores.value) as [LoveDimension, number][]);
-const loveDimensionMax = computed<Record<LoveDimension, number>>(() => {
-  const maxScores: Record<LoveDimension, number> = { warmth: 0, space: 0, initiative: 0, security: 0, depth: 0, playfulness: 0 };
-  for (const question of loveQuestions) {
-    for (const dimension of Object.keys(maxScores) as LoveDimension[]) {
-      maxScores[dimension] += Math.max(...question.options.map((option) => option.scores[dimension] || 0));
-    }
-  }
-  return maxScores;
-});
-const profileRanks = computed(() => {
-  const scores = loveScores.value;
-  const ranks = [
-    { id: "harbor", score: scores.security * 1.35 + scores.warmth * 0.7 + scores.depth * 0.35 },
-    { id: "spark", score: scores.playfulness * 1.25 + scores.initiative * 1.05 + scores.warmth * 0.25 },
-    { id: "garden", score: scores.space * 1.45 + scores.security * 0.35 + scores.depth * 0.25 },
-    { id: "lantern", score: scores.warmth * 1.25 + scores.depth * 0.8 + scores.security * 0.25 },
-    { id: "compass", score: scores.security * 0.85 + scores.initiative * 0.65 + scores.depth * 0.55 + scores.space * 0.25 },
-    { id: "tide", score: scores.depth * 1.45 + scores.space * 0.5 + scores.warmth * 0.35 }
-  ];
-  return ranks.sort((left, right) => right.score - left.score);
-});
-const loveResult = computed(() => {
-  if (loveProgress.value < loveQuestions.length) return null;
-  const top = profileRanks.value[0]?.id || "harbor";
-  return loveProfiles.find((profile) => profile.id === top) || loveProfiles[0];
-});
-const selectedLoveDetail = computed(() => {
-  if (!loveResult.value) return "";
-  return loveGender.value === "female" ? loveResult.value.femaleDetail : loveResult.value.maleDetail;
-});
-const loveProfileImageUrl = computed(() => {
-  if (!loveResult.value) return "";
-  const suffix = loveGender.value === "female" ? "女" : "男";
-  return `/personality/${encodeURIComponent(`${loveResult.value.name}${suffix}.png`)}`;
-});
-const hasCompleteLoveTest = computed(() => loveProgress.value === loveQuestions.length);
 const memoryCounts = computed(() => {
   const memories = memoryPane.value?.memories || [];
   return {
@@ -380,179 +365,6 @@ const postprocessDetail = computed(() => {
     return String(diagnostics.user_message_id || "");
   }
   return "no recent analysis";
-});
-const activeNovelStepIndex = computed(() => {
-  if (novelProgressStage.value === "done") return novelPipelineSteps.length;
-  if (novelProgressStage.value === "fallback") {
-    return Math.max(0, novelPipelineSteps.findIndex((step) => step.id === "drafting"));
-  }
-  if (novelProgressStage.value === "failed") {
-    return Math.max(0, novelPipelineSteps.findIndex((step) => step.id === "drafting"));
-  }
-  return novelPipelineSteps.findIndex((step) => step.id === novelProgressStage.value);
-});
-function novelStepClass(step: NovelPipelineStep) {
-  const index = novelPipelineSteps.findIndex((item) => item.id === step.id);
-  const activeIndex = activeNovelStepIndex.value;
-  return {
-    active: step.id === novelProgressStage.value || (novelProgressStage.value === "fallback" && step.id === "drafting"),
-    done: novelProgressStage.value === "done" || (index >= 0 && index < activeIndex),
-    failed: novelProgressStage.value === "failed" && index === activeIndex
-  };
-}
-const activeCanvasBuildStepIndex = computed(() => {
-  if (canvasBuildStage.value === "done") return canvasBuildSteps.length;
-  if (canvasBuildStage.value === "failed") return Math.max(0, canvasBuildSteps.length - 1);
-  return canvasBuildSteps.findIndex((step) => step.id === canvasBuildStage.value);
-});
-const initialCanvasVersionedChapterCount = computed(() =>
-  activeNovelProject.value?.chapters
-    .filter((chapter) => chapter.chapter_order <= 4 && Number(chapter.version_count || 0) > 0)
-    .length || 0
-);
-const isInitialCanvasRebuildLocked = computed(() =>
-  storyCanvasDraft.value.chapters.length > 0 && initialCanvasVersionedChapterCount.value > 0
-);
-const canvasBuildActionLabel = computed(() =>
-  storyCanvasDraft.value.chapters.length ? "重建初版画布" : "生成初版画布"
-);
-const canvasFlowMetrics = computed(() => ({
-  acts: storyCanvasDraft.value.acts.length,
-  chapters: storyCanvasDraft.value.chapters.length,
-  scenes: storyCanvasDraft.value.scenes.length,
-  threads: storyCanvasDraft.value.threads.length,
-  materials: activeNovelProject.value?.materials.length || 0
-}));
-const canvasSourceLabel = computed(() => {
-  const source = String(storyCanvasDraft.value.diagnostics?.source || "");
-  if (source === "remote") return "AI 生成";
-  if (source === "local") return "本地生成";
-  return "未生成";
-});
-const canvasBuildSummary = computed(() => {
-  if (canvasBuildStage.value === "failed") return "画布生成失败，当前编辑内容已保留。";
-  if (canvasBuildStage.value === "done") return `画布已生成 ${canvasBuildRunCount.value} 次${canvasBuildLastLabel.value ? ` · ${canvasBuildLastLabel.value}` : ""}`;
-  if (canvasBuildStage.value !== "idle") return `${canvasBuildSteps[activeCanvasBuildStepIndex.value]?.detail || "正在生成画布"} · 已等待 ${canvasBuildWaitingSeconds.value}s`;
-  if (isInitialCanvasRebuildLocked.value) return `前四章仍有 ${initialCanvasVersionedChapterCount.value} 章版本记录，初版画布已锁定；删除这些章节版本后可重建。`;
-  if (storyCanvasDraft.value.chapters.length) return "画布会随章节生成自动滚动更新后续两章；这里可手动微调或大改重建。";
-  return "还没有画布，先从素材生成章节、场景和线索。";
-});
-const isCanvasBuilding = computed(() => !["idle", "done", "failed"].includes(canvasBuildStage.value));
-const canvasBuildProgressLabel = computed(() => {
-  if (canvasBuildStage.value === "failed") return "生成失败";
-  if (canvasBuildStage.value === "done") return "生成完成";
-  if (isCanvasBuilding.value) return canvasBuildWaitingSeconds.value > 20
-    ? "远程模型仍在规划画布，长篇结构通常需要 1-2 分钟"
-    : "正在生成故事画布";
-  return "等待生成";
-});
-const isNovelGenerating = computed(() =>
-  !["idle", "done", "failed", "fallback"].includes(novelProgressStage.value)
-);
-const showActiveNovelProgress = computed(() =>
-  activeNovelWorkflowMode.value === novelStudioMode.value
-  && (novelProgressVisible.value || novelProgressStage.value === "failed")
-);
-const novelProgressLabel = computed(() => {
-  if (novelProgressStage.value === "failed") return "生成失败";
-  if (novelProgressStage.value === "fallback") return "远程正文未返回，已保存本地正文草稿";
-  if (novelProgressStage.value === "done") return "正文、状态和后续画布已更新";
-  const detail = novelProgressDetail.value || novelPipelineSteps[activeNovelStepIndex.value]?.detail || "等待开始";
-  if (isNovelGenerating.value && novelProgressWaitingSeconds.value >= 8) {
-    return `${detail} · 已等待 ${novelProgressWaitingSeconds.value}s`;
-  }
-  return detail;
-});
-function isTrustedNovelStateDelta(delta: Record<string, unknown> | undefined | null) {
-  const source = String(delta?.source || "").trim();
-  return !["mock", "manual", "create", "system", "canvas"].includes(source);
-}
-
-function chapterBoundHandoff(chapter: NovelChapter): Record<string, unknown> | null {
-  const delta = chapter.scene_card?.active_state_delta;
-  if (delta && typeof delta === "object" && isTrustedNovelStateDelta(delta as Record<string, unknown>)) {
-    const source = String((delta as Record<string, unknown>).handoff_source || chapter.scene_card?.handoff_source || "");
-    const handoff = (delta as Record<string, unknown>).chapter_handoff;
-    if (handoff && typeof handoff === "object" && !["pending", "skipped_mock", "cleaned_mock"].includes(source)) {
-      return handoff as Record<string, unknown>;
-    }
-  }
-  const source = String(chapter.scene_card?.handoff_source || "");
-  const handoff = chapter.scene_card?.chapter_handoff;
-  if (handoff && typeof handoff === "object" && !["pending", "skipped_mock", "cleaned_mock"].includes(source)) {
-    return handoff as Record<string, unknown>;
-  }
-  return null;
-}
-const activeNovelPriorStateEntries = computed(() => {
-  const project = activeNovelProject.value;
-  const currentOrder = activeNovelChapter.value?.chapter_order || 0;
-  if (!project || currentOrder <= 1) return [];
-  const entries: Array<{ chapter: NovelChapter; handoff: Record<string, unknown> }> = [];
-  const chapters = [...project.chapters].sort((a, b) => a.chapter_order - b.chapter_order);
-  for (const chapter of chapters) {
-    if (chapter.chapter_order >= currentOrder) break;
-    if (chapter.chapter_order !== entries.length + 1) break;
-    const handoff = chapterBoundHandoff(chapter);
-    if (!handoff || !chapter.body.trim() || chapter.status === "affected") break;
-    entries.push({ chapter, handoff });
-  }
-  return entries;
-});
-const novelStateSummary = computed(() => {
-  const entries = activeNovelPriorStateEntries.value;
-  if (!entries.length) return "当前章节之前还没有全局摘要。";
-  return entries
-    .map(({ chapter, handoff }) => {
-      const delta = chapter.scene_card?.active_state_delta as Record<string, unknown> | undefined;
-      const summary = isTrustedNovelStateDelta(delta) ? String(delta?.summary_delta || chapter.summary || "") : "";
-      const happened = Array.isArray(handoff.happened) ? handoff.happened.map((item) => String(item)).filter(Boolean).join("；") : "";
-      return `第${chapter.chapter_order}章：${summary || happened}`;
-    })
-    .filter(Boolean)
-    .join(" ");
-});
-const novelStateOpenThreads = computed(() => {
-  const threads: string[] = [];
-  for (const { handoff } of activeNovelPriorStateEntries.value) {
-    if (Array.isArray(handoff.open_threads)) threads.push(...handoff.open_threads.map((item) => String(item)).filter(Boolean));
-    if (Array.isArray(handoff.next_must_continue)) threads.push(...handoff.next_must_continue.map((item) => String(item)).filter(Boolean));
-  }
-  return [...new Set(threads)].slice(0, 5);
-});
-const novelStateLastHandoff = computed(() => {
-  const entries = activeNovelPriorStateEntries.value;
-  return entries.length ? entries[entries.length - 1].handoff : null;
-});
-const novelStateLastHandoffText = computed(() => {
-  const handoff = novelStateLastHandoff.value;
-  if (!handoff) return "还没有上一章交接单。";
-  const parts = [
-    ...(Array.isArray(handoff.happened) ? handoff.happened.map((item) => `已发生：${item}`) : []),
-    ...(Array.isArray(handoff.next_must_continue) ? handoff.next_must_continue.map((item) => `下章承接：${item}`) : []),
-    ...(Array.isArray(handoff.ending_hook) ? handoff.ending_hook.map((item) => `钩子：${item}`) : [])
-  ];
-  return parts.map((item) => String(item)).filter(Boolean).slice(0, 4).join("；") || "交接单为空。";
-});
-const activeNovelProject = computed(() =>
-  novelProjects.value.find((project) => project.id === activeNovelProjectId.value) || null
-);
-const activeNovelChapter = computed(() =>
-  activeNovelProject.value?.chapters.find((chapter) => chapter.id === activeNovelChapterId.value) || activeNovelProject.value?.chapters[0] || null
-);
-const activeCanvasChapter = computed<StoryCanvasChapter | null>(() => {
-  const activeOrder = activeNovelChapter.value?.chapter_order || 1;
-  return storyCanvasDraft.value.chapters.find((chapter) => chapter.chapter_order === activeOrder) || storyCanvasDraft.value.chapters[0] || null;
-});
-const activeCanvasScenes = computed<StoryCanvasScene[]>(() => {
-  const chapterId = activeCanvasChapter.value?.id || "";
-  return storyCanvasDraft.value.scenes.filter((scene) => scene.chapter_id === chapterId);
-});
-const activeCanvasActionChain = computed(() => {
-  const chapter = activeCanvasChapter.value;
-  if (!chapter) return [];
-  return canvasActionChainFields
-    .map((field) => ({ key: field.key, label: field.label, text: String(chapter[field.key] || "").trim() }));
 });
 const storyBibleEntries = computed(() => {
   const bible = activeNovelProject.value?.story_bible || {};
@@ -627,52 +439,17 @@ const editorUpdatedLabel = computed(() => {
   return updated ? `已保存于 ${updated}` : "等待创建项目";
 });
 
-function loveBarWidth(dimension: LoveDimension, value: number) {
-  const max = loveDimensionMax.value[dimension] || 1;
-  return Math.min(100, Math.round((value / max) * 100));
-}
-
 function setPage(page: PageKey) {
   currentPage.value = page;
-}
-
-function answerLoveQuestion(questionId: string, optionIndex: number) {
-  const wasComplete = hasCompleteLoveTest.value;
-  loveAnswers.value = { ...loveAnswers.value, [questionId]: optionIndex };
-  saveLoveAnswersForVisitor(visitorId.value, loveAnswers.value);
-  if (!wasComplete && Object.keys(loveAnswers.value).length === loveQuestions.length) {
-    showLoveResultModal.value = true;
-  }
-}
-
-function resetLoveTest() {
-  loveAnswers.value = {};
-  showLoveResultModal.value = false;
-  resetLoveAnswersForVisitor(visitorId.value);
-}
-
-function setLoveGender(gender: LoveGender) {
-  loveGender.value = gender;
-  saveLoveGenderForVisitor(visitorId.value, gender);
 }
 
 function characterStorageKey(id: string) {
   return `${CHARACTER_KEY}:${id || "anonymous"}`;
 }
 
-function refreshLoveTestForVisitor(id: string) {
-  loveAnswers.value = loadLoveAnswersForVisitor(id);
-  loveGender.value = loadLoveGenderForVisitor(id);
-  showLoveResultModal.value = false;
-}
-
-async function saveLoveResultImage() {
-  if (!loveResult.value) return;
-  try {
-    await saveLoveResultImageToPng(loveResult.value, loveGender.value);
-  } catch(e) {
-    console.error("生成图片失败: ", e);
-  }
+async function scrollChatToBottom() {
+  await nextTick();
+  chatPanelRef.value?.scrollToBottom();
 }
 
 async function applyLoveProfileToMemory() {
@@ -745,10 +522,7 @@ async function openSession() {
     }
     await loadNovelProjects();
 
-    await nextTick();
-    if (messageListRef.value) {
-      messageListRef.value.scrollTop = messageListRef.value.scrollHeight;
-    }
+    await scrollChatToBottom();
   } catch (err) {
     error.value = readableError(err);
   } finally {
@@ -762,10 +536,6 @@ function selectCharacter(characterId: string) {
     localStorage.setItem(characterStorageKey(visitorId.value), characterId);
   }
   void openSession();
-}
-
-function syncStoryCanvasDraft(project: NovelProject | null) {
-  storyCanvasDraft.value = normalizeStoryCanvas(project?.story_canvas);
 }
 
 function syncProjectDraft(project: NovelProject | null) {
@@ -835,10 +605,6 @@ async function activeSceneToChapterDraft() {
   } finally {
     novelProjectBusy.value = false;
   }
-}
-
-function canvasChapterTitle(chapterId: string) {
-  return storyCanvasDraft.value.chapters.find((chapter) => chapter.id === chapterId)?.title || chapterId || "未绑定章节";
 }
 
 function isInstructionLikeGoal(text: string) {
@@ -973,28 +739,6 @@ function selectNovelChapter(chapterId: string) {
 
 function novelChapterStatusLabel(status?: NovelChapterStatus | string) {
   return status ? novelChapterStatusLabels[status as NovelChapterStatus] || status : "计划中";
-}
-
-function novelVersionSourceLabel(version: NovelVersion | NovelVersionDisplay) {
-  const keys = "sourceKeys" in version && version.sourceKeys.length
-    ? version.sourceKeys
-    : [version.source || version.version_type || ""].filter(Boolean);
-  const preferred = keys.find((key) => key !== "restore") || keys[0] || "";
-  return novelVersionSourceLabels[preferred] || preferred || "历史版本";
-}
-
-function novelVersionFoldLabel(version: NovelVersionDisplay) {
-  if (version.duplicateCount <= 1) return "";
-  const restorePart = version.restoreCount ? `，含 ${version.restoreCount} 次恢复` : "";
-  return `折叠 ${version.duplicateCount} 条${restorePart}`;
-}
-
-function canvasBuildStepClass(index: number) {
-  return {
-    active: index === activeCanvasBuildStepIndex.value && !["done", "failed", "idle"].includes(canvasBuildStage.value),
-    done: canvasBuildStage.value === "done" || index < activeCanvasBuildStepIndex.value,
-    failed: canvasBuildStage.value === "failed" && index === activeCanvasBuildStepIndex.value
-  };
 }
 
 function compactInstructionText(text: string) {
@@ -1544,10 +1288,7 @@ async function submit() {
   busy.value = true;
   error.value = "";
 
-  await nextTick();
-  if (messageListRef.value) {
-    messageListRef.value.scrollTop = messageListRef.value.scrollHeight;
-  }
+  await scrollChatToBottom();
 
   try {
     const response = await sendMessage(visitorId.value, sessionId.value, text);
@@ -1564,10 +1305,7 @@ async function submit() {
     void refreshMemoryPaneAfterPostprocess(sessionId.value, userMessageId);
     void maybeAutoRefreshStoryTags();
 
-    await nextTick();
-    if (messageListRef.value) {
-      messageListRef.value.scrollTop = messageListRef.value.scrollHeight;
-    }
+    await scrollChatToBottom();
   } catch (err) {
     error.value = readableError(err);
   } finally {
@@ -1616,42 +1354,6 @@ function readableError(err: unknown) {
   return err instanceof Error ? err.message : String(err);
 }
 
-function clearNovelProgressTimers() {
-  for (const timer of novelProgressTimers) {
-    window.clearTimeout(timer);
-  }
-  novelProgressTimers = [];
-  if (novelProgressTicker !== null) {
-    window.clearInterval(novelProgressTicker);
-    novelProgressTicker = null;
-  }
-}
-
-function setNovelProgress(stage: NovelProgressStage, percent: number, detail = "") {
-  novelProgressStage.value = stage;
-  novelProgressPercent.value = percent;
-  novelProgressDetail.value = detail;
-}
-
-function asNovelProgressStage(value: unknown): NovelProgressStage | null {
-  const stage = String(value || "");
-  return novelPipelineSteps.some((step) => step.id === stage) || ["idle", "fallback", "done", "failed"].includes(stage)
-    ? stage as NovelProgressStage
-    : null;
-}
-
-function applyChapterGenerationProgress(chapter: NovelChapter | null | undefined) {
-  const progress = chapter?.scene_card?.generation_progress;
-  if (!progress || typeof progress !== "object") return false;
-  const raw = progress as Record<string, unknown>;
-  const stage = asNovelProgressStage(raw.stage);
-  if (!stage) return false;
-  const percent = Number(raw.percent);
-  const detail = typeof raw.detail === "string" ? raw.detail : "";
-  setNovelProgress(stage, Number.isFinite(percent) ? Math.max(0, Math.min(100, Math.round(percent))) : novelProgressPercent.value, detail);
-  return true;
-}
-
 async function pollLiveNovelProgress(runId: number, projectId: string, chapterId: string) {
   for (let attempt = 0; attempt < 180; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 1200));
@@ -1669,86 +1371,12 @@ async function pollLiveNovelProgress(runId: number, projectId: string, chapterId
   }
 }
 
-function chapterUsedLocalFallback(chapter: NovelChapter | null | undefined) {
-  const audit = chapter?.scene_card?.chapter_audit;
-  return Boolean(
-    audit
-    && typeof audit === "object"
-    && "global_state_skipped" in audit
-    && (audit as Record<string, unknown>).global_state_skipped
-  );
-}
-
-function chapterPostprocessStatus(chapter: NovelChapter | null | undefined) {
-  const postprocess = chapter?.scene_card?.postprocess;
-  if (!postprocess || typeof postprocess !== "object") return "";
-  return String((postprocess as Record<string, unknown>).status || "");
-}
-
-function chapterHasBackgroundPostprocess(chapter: NovelChapter | null | undefined) {
-  return ["pending", "running", "handoff_done"].includes(chapterPostprocessStatus(chapter));
-}
-
-function beginNovelProgress(mode: NovelWorkflowMode) {
-  clearNovelProgressTimers();
-  activeNovelWorkflowMode.value = mode;
-  novelProgressVisible.value = true;
-  novelProgressWaitingSeconds.value = 0;
-  setNovelProgress("collecting", 12, mode === "project" ? "等待后端返回真实阶段" : "");
-  if (mode === "quick") {
-    novelProgressTimers.push(window.setTimeout(() => setNovelProgress("state", 22), 180));
-    novelProgressTimers.push(window.setTimeout(() => setNovelProgress("drafting", 58), 520));
-    novelProgressTimers.push(window.setTimeout(() => setNovelProgress("local_check", 78), 1200));
-  }
-  novelProgressTicker = window.setInterval(() => {
-    novelProgressWaitingSeconds.value += 1;
-  }, 1000);
-}
-
 function unlockNovelProgress() {
   novelGenerationRunId += 1;
   novelProjectBusy.value = false;
   clearNovelProgressTimers();
   setNovelProgress("failed", 100);
   error.value = "已解除前端生成锁定。如果后端稍后完成，刷新项目即可查看最新章节。";
-}
-
-function clearCanvasBuildTimers() {
-  for (const timer of canvasBuildTimers) {
-    window.clearTimeout(timer);
-  }
-  canvasBuildTimers = [];
-  if (canvasBuildTicker !== null) {
-    window.clearInterval(canvasBuildTicker);
-    canvasBuildTicker = null;
-  }
-}
-
-function beginCanvasBuildFlow() {
-  clearCanvasBuildTimers();
-  storyCanvasView.value = "flow";
-  canvasBuildPercent.value = 8;
-  canvasBuildWaitingSeconds.value = 0;
-  canvasBuildStage.value = "materials";
-  canvasBuildTimers.push(window.setTimeout(() => { canvasBuildStage.value = "structure"; canvasBuildPercent.value = 22; }, 220));
-  canvasBuildTimers.push(window.setTimeout(() => { canvasBuildStage.value = "chapters"; canvasBuildPercent.value = 42; }, 700));
-  canvasBuildTimers.push(window.setTimeout(() => { canvasBuildStage.value = "scenes"; canvasBuildPercent.value = 62; }, 1500));
-  canvasBuildTimers.push(window.setTimeout(() => { canvasBuildStage.value = "threads"; canvasBuildPercent.value = 78; }, 2600));
-  canvasBuildTicker = window.setInterval(() => {
-    canvasBuildWaitingSeconds.value += 1;
-    if (canvasBuildPercent.value < 94) {
-      const step = canvasBuildWaitingSeconds.value < 20 ? 1.2 : 0.35;
-      canvasBuildPercent.value = Math.min(94, Math.round((canvasBuildPercent.value + step) * 10) / 10);
-    }
-  }, 1000);
-}
-
-function finishCanvasBuildFlow() {
-  clearCanvasBuildTimers();
-  canvasBuildStage.value = "done";
-  canvasBuildPercent.value = 100;
-  canvasBuildRunCount.value += 1;
-  canvasBuildLastLabel.value = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
 function startEditMemory(memory: MemoryItem) {
@@ -1994,157 +1622,54 @@ function downloadNovelProjectMarkdown() {
         </button>
       </section>
 
-      <section v-if="currentPage === 'chat' && activeCharacter" class="character-brief">
-        <p class="eyebrow">Character Card</p>
-        <h3>{{ activeCharacter.name }}</h3>
-        <p>{{ activeCharacter.personality || activeCharacter.bio }}</p>
-        <dl>
-          <div>
-            <dt>Scenario</dt>
-            <dd>{{ activeCharacter.scenario || "校园轻陪伴聊天" }}</dd>
-          </div>
-          <div>
-            <dt>Rhythm</dt>
-            <dd>{{ activeCharacter.voice?.sentence_rhythm || activeCharacter.speech_style }}</dd>
-          </div>
-          <div>
-            <dt>Dynamic Action</dt>
-            <dd>{{ activeCharacter.interaction_policy?.action_style || "按当前语境动态生成，低密度，不抢话" }}</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section v-if="currentPage === 'love-test'" class="character-brief">
-        <p class="eyebrow">Love Type</p>
-        <h3>相处风格校准</h3>
-        <p>这不是严肃诊断，也不会替角色推进剧情。它只把你的偏好转成可解释的互动建议。</p>
-        <div class="gender-toggle">
-          <button :class="{ active: loveGender === 'female' }" @click="setLoveGender('female')">女性画像</button>
-          <button :class="{ active: loveGender === 'male' }" @click="setLoveGender('male')">男性画像</button>
-        </div>
-        <div v-if="loveResult" class="love-type-art" :style="{ backgroundImage: `url('${loveProfileImageUrl}')` }">
-          <span>{{ loveResult.name }}</span>
-        </div>
-        <div v-else class="love-type-art pending">
-          <span>答完后生成画像</span>
-        </div>
-        <dl>
-          <div>
-            <dt>Progress</dt>
-            <dd>{{ loveProgress }} / {{ loveQuestions.length }}</dd>
-          </div>
-          <div>
-            <dt>Apply</dt>
-            <dd>完成后可写入手动记忆，让当前角色知道怎样靠近你更舒服。</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section v-if="currentPage === 'novel' && activeCharacter" class="character-brief">
-        <p class="eyebrow">Novel Studio</p>
-        <h3>{{ activeCharacter.name }} · 会话改编</h3>
-        <p>把当前角色会话改编成短篇、番外或章节开头。生成会参考角色卡、会话记录、记忆和关系档案。</p>
-        <dl>
-          <div>
-            <dt>Source</dt>
-            <dd>{{ messages.length }} 条消息 · {{ memoryPane?.memories.length || 0 }} 条记忆</dd>
-          </div>
-          <div>
-            <dt>Boundary</dt>
-            <dd>允许文学化氛围，不制造原会话没有发生的重大关系进展。</dd>
-          </div>
-        </dl>
-      </section>
+      <ContextBrief
+        :current-page="currentPage"
+        :active-character="activeCharacter"
+        :love-gender="loveGender"
+        :love-result="loveResult"
+        :love-profile-image-url="loveProfileImageUrl"
+        :love-progress="loveProgress"
+        :message-count="messages.length"
+        :memory-pane="memoryPane"
+        @set-love-gender="setLoveGender"
+      />
     </aside>
 
-    <section v-if="currentPage === 'chat'" class="chat-panel">
-      <header class="chat-header" v-if="activeCharacter">
-        <div>
-          <p class="eyebrow">{{ activeCharacter.archetype }}</p>
-          <h2>{{ activeCharacter.name }}</h2>
-          <span>{{ activeCharacter.tagline }}</span>
-          <div v-if="characterBond" class="header-growth">
-            <small>{{ characterBond.familiarity_stage }}</small>
-            <small>Resonance {{ bondPercent }}%</small>
-          </div>
-        </div>
-        <div class="header-actions">
-          <button class="ghost muted" @click="exportDebugBundle">Export</button>
-          <div class="status" :class="{ busy }">{{ busy ? "thinking" : "ready" }}</div>
-        </div>
-      </header>
+    <ChatPanel
+      v-if="currentPage === 'chat'"
+      ref="chatPanelRef"
+      v-model:draft="draft"
+      :active-character="activeCharacter"
+      :character-bond="characterBond"
+      :bond-percent="bondPercent"
+      :busy="busy"
+      :messages="messages"
+      :error="error"
+      @submit="submit"
+      @export="exportDebugBundle"
+    />
 
-      <div class="message-list" ref="messageListRef">
-        <article v-for="message in messages" :key="message.id" class="message" :class="message.role">
-          <span>{{ message.role === "user" ? "你" : activeCharacter?.name || "角色" }}</span>
-          <p>{{ message.content }}</p>
-        </article>
-      </div>
-
-      <form class="composer" @submit.prevent="submit">
-        <textarea
-          v-model="draft"
-          :disabled="busy"
-          rows="3"
-          placeholder="输入这一轮想说的话"
-          @keydown.enter.exact.prevent="submit"
-        />
-        <button :disabled="busy || !draft.trim()">Send</button>
-      </form>
-
-      <p v-if="error" class="error">{{ error }}</p>
-    </section>
-
-    <section v-else-if="currentPage === 'love-test'" class="love-test-panel">
-      <header class="love-hero" :class="{ 'no-progress': true }">
-        <div>
-          <p class="eyebrow">Love Type Calibration</p>
-          <h2>恋爱人格测试</h2>
-          <p>用 20 道轻量选择题，把“我希望怎样被靠近”变成角色能使用的相处偏好。</p>
-        </div>
-      </header>
-
-      <section class="love-layout">
-        <div class="love-questions">
-          <article v-for="(question, index) in loveQuestions" :key="question.id" class="love-question">
-            <div class="question-title">
-              <span>{{ String(index + 1).padStart(2, "0") }}</span>
-              <h3>{{ question.title }}</h3>
-            </div>
-            <div class="love-options">
-              <button
-                v-for="(option, optionIndex) in question.options"
-                :key="option.label"
-                :class="{ selected: loveAnswers[question.id] === optionIndex }"
-                @click="answerLoveQuestion(question.id, optionIndex)"
-              >
-                <strong>{{ option.label }}</strong>
-                <small>{{ option.text }}</small>
-              </button>
-            </div>
-          </article>
-        </div>
-
-        <aside class="love-result">
-          <div class="love-progress">
-            <span>{{ loveProgressPercent }}%</span>
-            <i><b :style="{ width: `${loveProgressPercent}%` }"></b></i>
-          </div>
-          <p class="eyebrow">Progress</p>
-          <h3>{{ hasCompleteLoveTest ? "测试完成" : `还差 ${loveQuestions.length - loveProgress} 题` }}</h3>
-          <p>结果会在全部答完后以弹窗展示，避免提前暴露类型影响选择。</p>
-          <div class="dimension-bars">
-            <label v-for="[dimension, value] in loveDimensionEntries" :key="dimension">
-              <span>{{ loveDimensionLabels[dimension] }} {{ value }}</span>
-              <i><b :style="{ width: `${loveBarWidth(dimension, value)}%` }"></b></i>
-            </label>
-          </div>
-          <button v-if="hasCompleteLoveTest" class="wide" @click="showLoveResultModal = true">查看结果</button>
-          <button class="ghost muted" @click="resetLoveTest">重新测试</button>
-          <p v-if="error" class="error">{{ error }}</p>
-        </aside>
-      </section>
-    </section>
+    <LoveTestPanel
+      v-else-if="currentPage === 'love-test'"
+      v-model:show-result-modal="showLoveResultModal"
+      :love-answers="loveAnswers"
+      :love-progress="loveProgress"
+      :love-progress-percent="loveProgressPercent"
+      :has-complete-love-test="hasCompleteLoveTest"
+      :love-dimension-entries="loveDimensionEntries"
+      :love-result="loveResult"
+      :love-gender="loveGender"
+      :selected-love-detail="selectedLoveDetail"
+      :love-profile-image-url="loveProfileImageUrl"
+      :error="error"
+      :busy="busy"
+      :session-id="sessionId"
+      :love-bar-width="loveBarWidth"
+      @answer="answerLoveQuestion"
+      @reset="resetLoveTest"
+      @save-result-image="saveLoveResultImage"
+      @apply-profile="applyLoveProfileToMemory"
+    />
 
     <section v-else class="novel-panel project-mode">
       <header class="novel-header">
@@ -2190,897 +1715,212 @@ function downloadNovelProjectMarkdown() {
       </section>
 
       <section v-else class="novel-layout novel-project-layout" :class="`mode-${novelStudioMode}`">
-        <aside class="novel-rail">
-          <section v-if="novelStudioMode === 'quick'" class="quick-novel-block">
-            <div class="story-pane-head">
-              <div>
-                <p class="eyebrow">Quick Draft</p>
-                <h3>短篇生成</h3>
-              </div>
-              <button class="ghost muted" type="button" :disabled="busy || !sessionId || messages.length < 2" @click="generateNovelDraft">生成</button>
-            </div>
-            <label>
-              <span>形式</span>
-              <select v-model="novelForm">
-                <option value="daily_short">日常短篇</option>
-                <option value="campus_romance">校园恋爱短篇</option>
-                <option value="vignette">片段随笔</option>
-                <option value="chapter_one">第一章</option>
-                <option value="side_story">番外</option>
-              </select>
-            </label>
-            <label>
-              <span>视角</span>
-              <select v-model="novelPerspective">
-                <option value="third_person">第三人称</option>
-                <option value="user_view">用户视角</option>
-                <option value="character_view">角色视角</option>
-                <option value="dual_view">双视角</option>
-              </select>
-            </label>
-            <label>
-              <span>改编强度</span>
-              <select v-model="novelFidelity">
-                <option value="faithful">忠实记录</option>
-                <option value="polished">轻度润色</option>
-                <option value="literary">文学化扩写</option>
-              </select>
-            </label>
-            <label>
-              <span>氛围</span>
-              <input v-model="novelAtmosphere" maxlength="80" />
-            </label>
-          </section>
-
-          <section v-if="novelStudioMode === 'project'" class="project-list-block">
-            <div class="story-pane-head">
-              <div>
-                <p class="eyebrow">Projects</p>
-                <h3>长篇项目</h3>
-              </div>
-              <button class="ghost muted" type="button" :disabled="novelProjectBusy || !sessionId" @click="createLongNovelProject">新建</button>
-            </div>
-            <div class="project-list">
-              <button
-                v-for="project in novelProjects"
-                :key="project.id"
-                type="button"
-                :class="{ active: project.id === activeNovelProjectId }"
-                @click="selectNovelProject(project.id)"
-              >
-                <strong>{{ project.title }}</strong>
-                <span>{{ project.genre }} · {{ project.chapters.length }} 章</span>
-              </button>
-              <p v-if="!novelProjects.length" class="empty">还没有长篇项目。会从当前会话、记忆和剧情标签生成初始 Story Bible。</p>
-            </div>
-          </section>
-
-          <section v-if="novelStudioMode === 'project'" class="project-list-block">
-            <div class="story-pane-head">
-              <div>
-                <p class="eyebrow">Chapters</p>
-                <h3>章节</h3>
-              </div>
-              <button class="ghost muted" type="button" :disabled="novelProjectBusy || !activeNovelProject" @click="addNovelChapter">新增</button>
-            </div>
-            <div class="chapter-list">
-              <button
-                v-for="chapter in activeNovelProject?.chapters || []"
-                :key="chapter.id"
-                type="button"
-                :class="{ active: chapter.id === activeNovelChapterId }"
-                @click="selectNovelChapter(chapter.id)"
-              >
-                <b>{{ chapter.chapter_order }}</b>
-                <span>{{ chapter.title }}</span>
-                <small>{{ novelChapterStatusLabel(chapter.status) }}</small>
-              </button>
-            </div>
-          </section>
-
-        </aside>
+        <NovelRail
+          v-model:novel-form="novelForm"
+          v-model:novel-perspective="novelPerspective"
+          v-model:novel-fidelity="novelFidelity"
+          v-model:novel-atmosphere="novelAtmosphere"
+          :novel-studio-mode="novelStudioMode"
+          :busy="busy"
+          :session-id="sessionId"
+          :message-count="messages.length"
+          :novel-project-busy="novelProjectBusy"
+          :novel-projects="novelProjects"
+          :active-novel-project="activeNovelProject"
+          :active-novel-project-id="activeNovelProjectId"
+          :active-novel-chapter-id="activeNovelChapterId"
+          :novel-chapter-status-label="novelChapterStatusLabel"
+          @generate-quick="generateNovelDraft"
+          @create-project="createLongNovelProject"
+          @select-project="selectNovelProject"
+          @add-chapter="addNovelChapter"
+          @select-chapter="selectNovelChapter"
+        />
 
         <article class="novel-desk" :class="{ 'quick-desk': novelStudioMode === 'quick' }">
-          <section v-if="showActiveNovelProgress && novelStudioMode === 'quick'" class="novel-progress-card inline-progress">
-            <div class="novel-progress-meter">
-              <span>{{ novelProgressLabel }}</span>
-              <strong>{{ novelProgressPercent }}%</strong>
-              <i><b :style="{ width: `${novelProgressPercent}%` }"></b></i>
-              <button v-if="novelProjectBusy" type="button" class="ghost muted progress-unlock" @click="unlockNovelProgress">解除卡住</button>
-            </div>
-            <div class="novel-step-list">
-              <span
-                v-for="(step, index) in novelPipelineSteps"
-                :key="step.id"
-                :class="novelStepClass(step)"
-              >
-                <b>{{ index + 1 }}</b>
-                <em>{{ step.label }}</em>
-              </span>
-            </div>
-          </section>
+          <QuickDraftPanel
+            v-if="novelStudioMode === 'quick'"
+            :show-progress="showActiveNovelProgress"
+            :novel-progress-label="novelProgressLabel"
+            :novel-progress-percent="novelProgressPercent"
+            :novel-project-busy="novelProjectBusy"
+            :novel-step-class="novelStepClass"
+            :novel-result="novelResult"
+            :novel-result-source-label="novelResultSourceLabel"
+            :novel-result-control-label="novelResultControlLabel"
+            :busy="busy"
+            :session-id="sessionId"
+            :message-count="messages.length"
+            @unlock-progress="unlockNovelProgress"
+            @download-markdown="downloadNovelMarkdown"
+            @clear-result="novelResult = null"
+            @generate-quick="generateNovelDraft"
+          />
 
-          <section v-if="novelStudioMode === 'quick' && novelResult" class="novel-preview compact-preview quick-result-panel">
-            <div class="novel-title-row">
-              <div>
-                <p class="eyebrow">Quick Draft</p>
-                <h3>{{ novelResult.title }}</h3>
-                <div class="novel-result-meta">
-                  <span>{{ novelResultSourceLabel }}</span>
-                  <span>{{ novelResultControlLabel }}</span>
-                </div>
-              </div>
-              <div class="chapter-actions">
-                <button class="ghost muted" type="button" @click="downloadNovelMarkdown">Markdown</button>
-                <button class="ghost muted" type="button" @click="novelResult = null">收起</button>
-              </div>
-            </div>
-            <p class="novel-synopsis">{{ novelResult.synopsis }}</p>
-            <div class="novel-body">{{ novelResult.body }}</div>
-          </section>
+          <ProjectEmptyState
+            v-if="novelStudioMode === 'project' && !activeNovelProject"
+            v-model:project-draft="projectDraft"
+            :novel-project-busy="novelProjectBusy"
+            :story-busy="storyBusy"
+            :session-id="sessionId"
+            @create-project="createLongNovelProject"
+            @refresh-story-tags="refreshStoryTags()"
+          />
 
-          <section v-if="novelStudioMode === 'quick' && !novelResult && !showActiveNovelProgress" class="quick-empty-state">
-            <p class="eyebrow">短篇工作台</p>
-            <h3>左侧选择形式和语气，然后生成成稿</h3>
-            <p>短篇模式不会加载长篇章节编辑器，生成结果会直接显示在这里，方便预览和导出 Markdown。</p>
-            <div class="quick-empty-actions">
-              <button type="button" :disabled="busy || !sessionId || messages.length < 2" @click="generateNovelDraft">
-                生成短篇
-              </button>
-              <small>{{ messages.length < 2 ? "当前会话消息太少，先聊几轮再生成。" : "会使用当前会话、记忆和剧情标签作为素材。" }}</small>
-            </div>
-          </section>
-
-          <div v-if="novelStudioMode === 'project' && !activeNovelProject" class="project-empty">
-            <div class="project-empty-copy">
-              <div>
-                <p class="eyebrow">Project Mode</p>
-                <h3>从长篇项目开始</h3>
-                <p>先给作品一个方向，项目创建后再展开世界观、关系设定和章节大纲。</p>
-              </div>
-              <div class="project-empty-actions">
-                <button type="button" :disabled="novelProjectBusy || !sessionId" @click="createLongNovelProject">新建项目</button>
-                <button class="ghost muted" type="button" :disabled="storyBusy || !sessionId" @click="refreshStoryTags()">刷新剧情标签</button>
-              </div>
-            </div>
-            <div class="project-seed-grid">
-              <label>
-                <span>作品标题</span>
-                <input v-model="projectDraft.title" placeholder="新小说项目" />
-              </label>
-              <label>
-                <span>类型</span>
-                <input v-model="projectDraft.genre" />
-              </label>
-              <label>
-                <span>基调</span>
-                <input v-model="projectDraft.tone" />
-              </label>
-            </div>
-          </div>
-
-          <details v-if="novelStudioMode === 'project' && activeNovelProject" class="project-settings-drawer">
-            <summary>
-              <span>项目设定</span>
-              <small>{{ projectDraft.genre }} · {{ projectDraft.tone }}</small>
-            </summary>
-            <section class="project-fields">
-              <div class="project-title-row">
-                <label>
-                  <span>作品标题</span>
-                  <input v-model="projectDraft.title" placeholder="新小说项目" />
-                </label>
-                <label>
-                  <span>类型</span>
-                  <input v-model="projectDraft.genre" />
-                </label>
-                <label>
-                  <span>基调</span>
-                  <input v-model="projectDraft.tone" />
-                </label>
-                <button type="button" :disabled="novelProjectBusy || !activeNovelProject" @click="saveNovelProject">保存设定</button>
-              </div>
-              <label>
-                <span>世界观</span>
-                <textarea v-model="projectDraft.worldview" rows="3" placeholder="项目创建后会自动从素材生成" />
-              </label>
-              <label>
-                <span>关系设定</span>
-                <textarea v-model="projectDraft.relationship_setup" rows="3" />
-              </label>
-              <label>
-                <span>章节大纲</span>
-                <textarea v-model="projectDraft.outline" rows="4" />
-              </label>
-            </section>
-          </details>
+          <ProjectSettingsDrawer
+            v-if="novelStudioMode === 'project' && activeNovelProject"
+            v-model:project-draft="projectDraft"
+            :novel-project-busy="novelProjectBusy"
+            :has-active-project="Boolean(activeNovelProject)"
+            @save-project="saveNovelProject"
+          />
 
           <section v-if="novelStudioMode === 'project' && activeNovelProject" class="story-canvas-panel">
-            <div class="story-canvas-head">
-              <div>
-                <p class="eyebrow">Story Canvas</p>
-                <h3>故事画布</h3>
-                <small>{{ canvasBuildSummary }}</small>
-              </div>
-              <div class="story-canvas-actions">
-                <button class="ghost muted" type="button" :disabled="novelProjectBusy || isInitialCanvasRebuildLocked" @click="rebuildStoryCanvas">{{ canvasBuildActionLabel }}</button>
-                <button class="ghost muted" type="button" :disabled="novelProjectBusy" @click="saveStoryCanvas">保存画布</button>
-                <button type="button" :disabled="novelProjectBusy || !activeCanvasScenes.length" @click="activeSceneToChapterDraft">应用到章节</button>
-              </div>
-            </div>
-            <div class="story-canvas-tabs">
-              <button type="button" :class="{ active: storyCanvasView === 'flow' }" @click="storyCanvasView = 'flow'">流程视图</button>
-              <button type="button" :class="{ active: storyCanvasView === 'chapters' }" @click="storyCanvasView = 'chapters'">章节看板</button>
-              <button type="button" :class="{ active: storyCanvasView === 'scenes' }" @click="storyCanvasView = 'scenes'">场景列表</button>
-              <button type="button" :class="{ active: storyCanvasView === 'threads' }" @click="storyCanvasView = 'threads'">线索视图</button>
-            </div>
-            <div v-if="storyCanvasView === 'flow'" class="canvas-flow-view">
-              <div class="canvas-flow-summary">
-                <div>
-                  <p class="eyebrow">Canvas Run</p>
-                  <strong>{{ canvasBuildSummary }}</strong>
-                </div>
-                <div class="canvas-flow-metrics">
-                  <span>{{ canvasFlowMetrics.materials }} 素材</span>
-                  <span>{{ canvasFlowMetrics.acts }} 阶段</span>
-                  <span>{{ canvasFlowMetrics.chapters }} 章</span>
-                  <span>{{ canvasFlowMetrics.scenes }} 场景</span>
-                  <span>{{ canvasFlowMetrics.threads }} 线索</span>
-                  <span>{{ canvasSourceLabel }}</span>
-                </div>
-              </div>
-              <div
-                v-if="canvasBuildStage !== 'idle'"
-                class="canvas-build-progress"
-                :class="{ complete: canvasBuildStage === 'done', failed: canvasBuildStage === 'failed' }"
-              >
-                <div>
-                  <span>{{ canvasBuildProgressLabel }}</span>
-                  <strong>{{ Math.round(canvasBuildPercent) }}%</strong>
-                </div>
-                <i aria-hidden="true">
-                  <b :style="{ width: `${canvasBuildPercent}%` }"></b>
-                </i>
-              </div>
-              <ol class="canvas-flow-steps">
-                <li
-                  v-for="(step, index) in canvasBuildSteps"
-                  :key="step.id"
-                  :class="canvasBuildStepClass(index)"
-                >
-                  <i>{{ index + 1 }}</i>
-                  <div>
-                    <strong>{{ step.label }}</strong>
-                    <span>{{ step.detail }}</span>
-                  </div>
-                </li>
-              </ol>
-              <div class="canvas-flow-note">
-                <strong>自动滚动</strong>
-                <span>每章生成后会整理交接单、更新 Novel State，并重规划后续两章；“重新生成画布”只适合开局大改。</span>
-              </div>
-              <div class="novel-state-panel">
-                <article>
-                  <p class="eyebrow">Novel State</p>
-                  <strong>截至上一章摘要</strong>
-                  <span>{{ novelStateSummary }}</span>
-                </article>
-                <article>
-                  <p class="eyebrow">Last Handoff</p>
-                  <strong>上一章交接单</strong>
-                  <span>{{ novelStateLastHandoffText }}</span>
-                </article>
-                <article>
-                  <p class="eyebrow">Open Threads</p>
-                  <strong>未解决线索</strong>
-                  <span v-if="!novelStateOpenThreads.length">暂无未解决线索。</span>
-                  <span v-else>{{ novelStateOpenThreads.join("；") }}</span>
-                </article>
-              </div>
-            </div>
-            <div v-else-if="storyCanvasView === 'chapters'" class="canvas-card-grid">
-              <article
-                v-for="chapter in storyCanvasDraft.chapters"
-                :key="chapter.id"
-                class="canvas-card"
-                :class="{ active: activeCanvasChapter?.id === chapter.id }"
-                @click="selectCanvasChapter(chapter)"
-              >
-                <div class="canvas-card-title">
-                  <strong>{{ chapter.chapter_order }}. {{ chapter.title }}</strong>
-                  <span>{{ novelChapterStatusLabel(chapter.status) }} · {{ chapter.target_length }} 字</span>
-                </div>
-                <div class="canvas-read-grid">
-                  <article>
-                    <span>剧情概述</span>
-                    <p>{{ canvasFieldText(chapter.goal) }}</p>
-                  </article>
-                  <article v-for="field in canvasActionChainFields" :key="field.key">
-                    <span>{{ field.label }}</span>
-                    <p>{{ canvasFieldText(chapter[field.key]) }}</p>
-                  </article>
-                </div>
-              </article>
-            </div>
-            <div v-else-if="storyCanvasView === 'scenes'" class="canvas-scene-list">
-              <article v-for="scene in storyCanvasDraft.scenes" :key="scene.id" class="canvas-card">
-                <div class="canvas-card-title">
-                  <strong>{{ canvasChapterTitle(scene.chapter_id) }} · 场景 {{ scene.scene_order }}</strong>
-                  <span>{{ scene.linked_material_ids.length }} 条素材</span>
-                </div>
-                <div class="canvas-field-grid">
-                  <article>
-                    <span>当前场景</span>
-                    <p>{{ canvasFieldText(scene.current_scene) }}</p>
-                  </article>
-                  <article>
-                    <span>表层事件</span>
-                    <p>{{ canvasFieldText(scene.surface_event) }}</p>
-                  </article>
-                  <article>
-                    <span>人物欲望</span>
-                    <p>{{ canvasFieldText(scene.character_desire) }}</p>
-                  </article>
-                  <article>
-                    <span>阻碍 / 张力</span>
-                    <p>{{ canvasFieldText(scene.tension) }}</p>
-                  </article>
-                  <article>
-                    <span>禁止推进</span>
-                    <p>{{ canvasFieldText(scene.forbidden_progress) }}</p>
-                  </article>
-                  <article>
-                    <span>结尾落点</span>
-                    <p>{{ canvasFieldText(scene.ending_beat) }}</p>
-                  </article>
-                </div>
-              </article>
-            </div>
-            <div v-else-if="storyCanvasView === 'threads'" class="canvas-card-grid">
-              <article v-for="thread in storyCanvasDraft.threads" :key="thread.id" class="canvas-card">
-                <div class="canvas-card-title">
-                  <strong>{{ thread.label || "未命名线索" }}</strong>
-                  <span>{{ thread.kind }} · {{ thread.status }}</span>
-                </div>
-                <label>
-                  <span>线索说明</span>
-                  <textarea v-model="thread.notes" rows="3" />
-                </label>
-                <div class="canvas-thread-route">
-                  <span>{{ canvasChapterTitle(thread.setup_chapter_id) }}</span>
-                  <span>→</span>
-                  <span>{{ canvasChapterTitle(thread.payoff_chapter_id) }}</span>
-                </div>
-              </article>
-            </div>
+            <StoryCanvasHeader
+              v-model:story-canvas-view="storyCanvasView"
+              :canvas-build-summary="canvasBuildSummary"
+              :canvas-build-action-label="canvasBuildActionLabel"
+              :novel-project-busy="novelProjectBusy"
+              :is-initial-canvas-rebuild-locked="isInitialCanvasRebuildLocked"
+              :has-active-canvas-scenes="Boolean(activeCanvasScenes.length)"
+              @rebuild-canvas="rebuildStoryCanvas"
+              @save-canvas="saveStoryCanvas"
+              @apply-to-chapter="activeSceneToChapterDraft"
+            />
+            <CanvasFlowView
+              v-if="storyCanvasView === 'flow'"
+              :canvas-build-summary="canvasBuildSummary"
+              :canvas-flow-metrics="canvasFlowMetrics"
+              :canvas-source-label="canvasSourceLabel"
+              :canvas-build-stage="canvasBuildStage"
+              :canvas-build-progress-label="canvasBuildProgressLabel"
+              :canvas-build-percent="canvasBuildPercent"
+              :canvas-build-step-class="canvasBuildStepClass"
+              :novel-state-summary="novelStateSummary"
+              :novel-state-last-handoff-text="novelStateLastHandoffText"
+              :novel-state-open-threads="novelStateOpenThreads"
+            />
+            <CanvasChaptersView
+              v-else-if="storyCanvasView === 'chapters'"
+              :chapters="storyCanvasDraft.chapters"
+              :active-canvas-chapter-id="activeCanvasChapter?.id || ''"
+              :canvas-action-chain-fields="canvasActionChainFields"
+              :novel-chapter-status-label="novelChapterStatusLabel"
+              :canvas-field-text="canvasFieldText"
+              @select-chapter="selectCanvasChapter"
+            />
+            <CanvasScenesView
+              v-else-if="storyCanvasView === 'scenes'"
+              :scenes="storyCanvasDraft.scenes"
+              :canvas-chapter-title="canvasChapterTitle"
+              :canvas-field-text="canvasFieldText"
+            />
+            <CanvasThreadsView
+              v-else-if="storyCanvasView === 'threads'"
+              :threads="storyCanvasDraft.threads"
+              :canvas-chapter-title="canvasChapterTitle"
+            />
           </section>
 
-          <section v-if="showActiveNovelProgress && novelStudioMode === 'project'" class="novel-progress-card inline-progress chapter-progress-card">
-            <div class="novel-progress-meter">
-              <span>{{ novelProgressLabel }}</span>
-              <strong>{{ novelProgressPercent }}%</strong>
-              <i><b :style="{ width: `${novelProgressPercent}%` }"></b></i>
-              <button v-if="novelProjectBusy" type="button" class="ghost muted progress-unlock" @click="unlockNovelProgress">解除卡住</button>
-            </div>
-            <div class="novel-step-groups">
-              <div class="novel-step-group">
-                <div class="novel-step-group-title">
-                  <span>正文生成</span>
-                  <small>决定这一章从远程正文还是本地草稿返回</small>
-                </div>
-                <div class="novel-step-list detailed">
-                  <span
-                    v-for="(step, index) in novelDraftSteps"
-                    :key="step.id"
-                    :class="novelStepClass(step)"
-                  >
-                    <b>{{ index + 1 }}</b>
-                    <em>{{ step.label }}</em>
-                    <small>{{ step.detail }}</small>
-                  </span>
-                </div>
-              </div>
-              <div class="novel-step-group">
-                <div class="novel-step-group-title">
-                  <span>质检与续写状态</span>
-                  <small>正文返回后再审稿、必要时重写，并更新交接和滚动画布</small>
-                </div>
-                <div class="novel-step-list detailed review">
-                  <span
-                    v-for="(step, index) in novelReviewSteps"
-                    :key="step.id"
-                    :class="novelStepClass(step)"
-                  >
-                    <b>{{ novelDraftSteps.length + index + 1 }}</b>
-                    <em>{{ step.label }}</em>
-                    <small>{{ step.detail }}</small>
-                  </span>
-                </div>
-              </div>
-            </div>
-            <p v-if="novelProgressStage === 'fallback'" class="progress-note warning">
-              远程正文没有成功返回，本次只保留本地正文草稿；不会写入全局摘要、交接单或滚动画布。
-            </p>
-          </section>
+          <ProjectChapterProgress
+            v-if="showActiveNovelProgress && novelStudioMode === 'project'"
+            :novel-progress-label="novelProgressLabel"
+            :novel-progress-percent="novelProgressPercent"
+            :novel-project-busy="novelProjectBusy"
+            :novel-progress-stage="novelProgressStage"
+            :novel-step-class="novelStepClass"
+            @unlock-progress="unlockNovelProgress"
+          />
 
-          <section v-if="novelStudioMode === 'project' && activeNovelChapter" class="chapter-editor">
-            <div class="chapter-editor-head">
-              <div>
-                <p class="eyebrow">Chapter {{ activeNovelChapter.chapter_order }}</p>
-                <h3>{{ chapterDraft.title || "未命名章节" }}</h3>
-              </div>
-              <div class="chapter-actions">
-                <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="checkActiveContinuity">检查</button>
-                <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="saveNovelChapter">保存</button>
-                <button type="button" class="ghost muted danger" :disabled="novelProjectBusy" @click="deleteActiveNovelChapter">删除</button>
-                <button type="button" :disabled="novelProjectBusy" @click="generateActiveChapter">生成/续写</button>
-              </div>
-            </div>
-            <div class="chapter-grid">
-              <label>
-                <span>章节名</span>
-                <input v-model="chapterDraft.title" />
-              </label>
-              <label>
-                <span>状态</span>
-                <select v-model="chapterDraft.status">
-                  <option v-for="option in novelChapterStatusOptions" :key="option.value" :value="option.value">
-                    {{ option.label }}
-                  </option>
-                </select>
-              </label>
-            </div>
-            <label>
-              <span>本章剧情概述</span>
-              <textarea v-model="chapterDraft.goal" rows="3" />
-            </label>
-            <section class="scene-card-editor">
-              <div class="scene-card-head">
-                <div>
-                  <p class="eyebrow">Scene Card</p>
-                  <h4>场景卡</h4>
-                </div>
-                <small>生成前先约束场景、人物欲望、张力和结尾落点。</small>
-              </div>
-              <div v-if="activeCanvasChapter" class="canvas-link-editor">
-                <div>
-                  <p class="eyebrow">Canvas Link</p>
-                  <strong>对应画布动作链</strong>
-                  <small>剧情推进以这里为准，保存后会反向写回故事画布。</small>
-                </div>
-                <div class="canvas-action-grid">
-                  <label v-for="item in activeCanvasActionChain" :key="item.label">
-                    <span>{{ item.label }}</span>
-                    <textarea v-model="activeCanvasChapter[item.key]" rows="3" />
-                  </label>
-                </div>
-              </div>
-              <div class="scene-card-grid">
-                <label v-for="field in sceneCardFields" :key="field.key">
-                  <span>{{ field.label }}</span>
-                  <textarea v-model="chapterDraft.scene_card[field.key]" :rows="field.rows" />
-                </label>
-              </div>
-            </section>
-            <label>
-              <span>生成指令</span>
-              <textarea v-model="chapterInstruction" rows="10" />
-            </label>
-            <label class="range-field">
-              <span>项目章节目标长度 {{ projectChapterTargetLength }} 字</span>
-              <input v-model.number="projectChapterTargetLength" type="range" min="400" max="6000" step="200" />
-            </label>
-            <div class="chapter-length-panel" :class="`tone-${chapterLengthGuide.tone}`">
-              <div>
-              <strong>{{ activeChapterWordCount }} / {{ projectChapterTargetLength }} 字</strong>
-              <span>{{ chapterLengthGuide.label }} · {{ chapterLengthRatio }}%</span>
-            </div>
-            <p>{{ chapterLengthGuide.detail }}</p>
-              <button class="ghost muted" type="button" :disabled="novelProjectBusy || isOptimizingInstruction" @click="applyOptimizedChapterInstruction">
-                {{ isOptimizingInstruction ? "远程优化中" : "优化生成指令" }}
-              </button>
-            </div>
-            <p v-if="instructionOptimizationNote" class="instruction-optimization-note">{{ instructionOptimizationNote }}</p>
-            <div class="writing-surface" :class="`font-${novelEditorFont}`">
-              <label>
-                <span>章节摘要</span>
-                <textarea v-model="chapterDraft.summary" rows="3" />
-              </label>
-              <label class="chapter-body-label">
-                <span>正文</span>
-                <textarea
-                  v-model="chapterDraft.body"
-                  class="chapter-body-input"
-                  rows="18"
-                  placeholder="从这里开始写正文。AI 生成、续写和手动编辑都会落在这张写作纸面上。"
-                />
-              </label>
-              <div class="editor-status-bar">
-                <span>{{ activeChapterWordCount }} 字</span>
-                <span>{{ novelChapterStatusLabel(activeNovelChapter?.status) }}</span>
-                <span>{{ editorUpdatedLabel }}</span>
-              </div>
-            </div>
-          </section>
+          <ProjectChapterEditor
+            v-if="novelStudioMode === 'project' && activeNovelChapter"
+            v-model:chapter-draft="chapterDraft"
+            v-model:chapter-instruction="chapterInstruction"
+            v-model:project-chapter-target-length="projectChapterTargetLength"
+            :active-novel-chapter="activeNovelChapter"
+            :active-canvas-chapter="activeCanvasChapter"
+            :active-canvas-action-chain="activeCanvasActionChain"
+            :scene-card-fields="sceneCardFields"
+            :novel-chapter-status-options="novelChapterStatusOptions"
+            :novel-project-busy="novelProjectBusy"
+            :is-optimizing-instruction="isOptimizingInstruction"
+            :chapter-length-guide="chapterLengthGuide"
+            :chapter-length-ratio="chapterLengthRatio"
+            :active-chapter-word-count="activeChapterWordCount"
+            :instruction-optimization-note="instructionOptimizationNote"
+            :novel-editor-font="novelEditorFont"
+            :active-chapter-status-label="novelChapterStatusLabel(activeNovelChapter?.status)"
+            :editor-updated-label="editorUpdatedLabel"
+            @check-continuity="checkActiveContinuity"
+            @save-chapter="saveNovelChapter"
+            @delete-chapter="deleteActiveNovelChapter"
+            @generate-chapter="generateActiveChapter"
+            @optimize-instruction="applyOptimizedChapterInstruction"
+          />
 
           <p v-if="novelStudioMode === 'quick' && messages.length < 2" class="empty">当前会话消息太少，先聊几轮再生成。</p>
           <p v-if="error" class="error">{{ error }}</p>
         </article>
 
-        <aside v-if="novelStudioMode === 'project'" class="story-bible-panel">
-          <section class="story-pane-card">
-            <div class="story-pane-head">
-              <div>
-                <p class="eyebrow">Story Pane</p>
-                <h3>剧情标签 {{ storyPane?.items.length || 0 }}</h3>
-                <small>每 {{ STORY_AUTO_REFRESH_USER_INTERVAL }} 条用户消息后台更新一次</small>
-              </div>
-              <button class="ghost muted" type="button" :disabled="storyBusy || !sessionId" @click="refreshStoryTags()">
-                {{ storyBusy ? "更新中" : "刷新" }}
-              </button>
-            </div>
-            <div v-if="storyPane?.items.length" class="story-tag-list">
-              <article v-for="item in storyPane.items" :key="item.id" class="story-tag">
-                <div>
-                  <span>{{ storyKindLabels[item.kind] || item.kind }}</span>
-                  <small>{{ storyStatusLabels[item.status] || item.status }} · {{ item.evidence_level }}</small>
-                </div>
-                <strong>{{ item.label }}</strong>
-                <p>{{ item.content }}</p>
-              </article>
-            </div>
-            <p v-else class="empty">还没有剧情标签。可以先刷新一次，项目创建会把它们转成 Story Bible。</p>
-          </section>
-
-          <section class="story-pane-card">
-            <div class="story-pane-head">
-              <div>
-                <p class="eyebrow">Story Bible</p>
-                <h3>项目规则</h3>
-              </div>
-              <button class="ghost muted" type="button" :disabled="!activeNovelProject" @click="downloadNovelProjectMarkdown">导出</button>
-            </div>
-            <div v-if="storyBibleEntries.length" class="bible-list">
-              <article v-for="[key, items] in storyBibleEntries" :key="key">
-                <strong>{{ key }}</strong>
-                <p v-for="item in items.slice(0, 5)" :key="item">{{ item }}</p>
-              </article>
-            </div>
-            <p v-else class="empty">创建项目后会出现事实、伏笔、关系、边界和灵感。</p>
-          </section>
-
-          <section class="story-pane-card">
-            <p class="eyebrow">Materials</p>
-            <div v-if="projectMaterialGroups.length" class="material-list">
-              <article v-for="[category, materials] in projectMaterialGroups" :key="category">
-                <strong>{{ category }} · {{ materials.length }}</strong>
-                <p v-for="material in materials.slice(0, 4)" :key="material.id">{{ material.label }}：{{ material.content }}</p>
-              </article>
-            </div>
-            <p v-else class="empty">素材库为空。</p>
-          </section>
-
-          <section class="story-pane-card">
-            <p class="eyebrow">Continuity</p>
-            <div v-if="continuityReport" class="continuity-list">
-              <article v-for="issue in continuityReport.issues" :key="`${issue.severity}-${issue.label}`" :class="issue.severity">
-                <strong>{{ issue.label }}</strong>
-                <p>{{ issue.detail }}</p>
-              </article>
-            </div>
-            <p v-else class="empty">点击“检查”后会显示连续性、边界和内部措辞风险。</p>
-          </section>
-
-          <section class="story-pane-card">
-            <p class="eyebrow">Versions</p>
-            <div v-if="displayedChapterVersions.length" class="version-list">
-              <article v-for="version in displayedChapterVersions.slice(0, 8)" :key="version.id">
-                <strong>{{ version.title }}</strong>
-                <small>
-                  {{ novelVersionSourceLabel(version) }} · {{ version.created_at }}
-                  <span v-if="novelVersionFoldLabel(version)" class="version-fold">{{ novelVersionFoldLabel(version) }}</span>
-                </small>
-                <div class="version-actions">
-                  <button class="ghost muted" type="button" :disabled="novelProjectBusy" @click="restoreVersion(version.id)">恢复</button>
-                  <button class="ghost muted danger" type="button" :disabled="novelProjectBusy" @click="deleteVersion(version.id)">删除</button>
-                </div>
-              </article>
-            </div>
-            <p v-else class="empty">保存或生成正文后会保留版本。</p>
-          </section>
-
-          <p v-if="messages.length < 2" class="empty">当前会话消息太少，先聊几轮再生成。</p>
-          <p v-if="error" class="error">{{ error }}</p>
-        </aside>
+        <StoryBiblePanel
+          v-if="novelStudioMode === 'project'"
+          :story-pane="storyPane"
+          :story-busy="storyBusy"
+          :session-id="sessionId"
+          :story-auto-refresh-user-interval="STORY_AUTO_REFRESH_USER_INTERVAL"
+          :has-active-novel-project="Boolean(activeNovelProject)"
+          :story-bible-entries="storyBibleEntries"
+          :project-material-groups="projectMaterialGroups"
+          :continuity-report="continuityReport"
+          :displayed-chapter-versions="displayedChapterVersions"
+          :novel-project-busy="novelProjectBusy"
+          :message-count="messages.length"
+          :error="error"
+          @refresh-story-tags="refreshStoryTags()"
+          @download-project="downloadNovelProjectMarkdown"
+          @restore-version="restoreVersion"
+          @delete-version="deleteVersion"
+        />
       </section>
     </section>
 
-    <div v-if="showLoveResultModal && loveResult" class="modal-backdrop" @click.self="showLoveResultModal = false">
-      <section class="love-modal">
-        <button class="modal-close" @click="showLoveResultModal = false">Close</button>
-        <div class="modal-art" :style="{ backgroundImage: `url('${loveProfileImageUrl}')` }"></div>
-        <div class="modal-copy">
-          <p class="eyebrow">Love Type Result</p>
-          <h3>{{ loveResult.name }}</h3>
-          <strong>{{ loveGender === "female" ? "女性画像" : "男性画像" }} · {{ loveResult.subtitle }}</strong>
-          <p>{{ loveResult.description }}</p>
-          <p>{{ selectedLoveDetail }}</p>
-          <div class="result-cue">
-            <span>恋爱核心需求</span>
-            <p>{{ loveResult.relationshipNeed }}</p>
-          </div>
-          <div class="result-cue">
-            <span>容易踩雷</span>
-            <p>{{ loveResult.blindSpot }}</p>
-          </div>
-          <div class="result-cue">
-            <span>理想关系动态</span>
-            <p>{{ loveResult.idealDynamic }}</p>
-          </div>
-          <div class="result-cue">
-            <span>角色互动建议</span>
-            <p>{{ loveResult.partnerCue }}</p>
-          </div>
-          <div class="dimension-bars">
-            <label v-for="[dimension, value] in loveDimensionEntries" :key="dimension">
-              <span>{{ loveDimensionLabels[dimension] }} {{ value }}</span>
-              <i><b :style="{ width: `${loveBarWidth(dimension, value)}%` }"></b></i>
-            </label>
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="wide" @click="saveLoveResultImage">保存结果图片</button>
-          <button class="wide ghost" :disabled="busy || !sessionId" @click="applyLoveProfileToMemory">写入当前角色记忆</button>
-        </div>
-      </section>
-    </div>
-
     <aside v-if="currentPage === 'chat'" class="right-panel">
-      <section class="memory-section">
-        <div class="section-title">
-          <div>
-            <p class="eyebrow">State</p>
-            <h3>{{ characterState?.mood || "No state" }}</h3>
-          </div>
-          <button class="ghost muted" @click="stateExpanded = !stateExpanded">{{ stateExpanded ? "Hide" : "Detail" }}</button>
-        </div>
+      <CharacterInsightsPanel
+        v-model:state-expanded="stateExpanded"
+        v-model:bond-expanded="bondExpanded"
+        :character-state="characterState"
+        :character-bond="characterBond"
+        :energy-percent="energyPercent"
+        :resonance-percent="resonancePercent"
+        :bond-percent="bondPercent"
+      />
 
-        <section v-if="characterState" class="state-strip side-strip">
-          <button class="state-summary" type="button" @click="stateExpanded = !stateExpanded">
-            <span>
-              <small>Tone</small>
-              <strong>{{ characterState.tone }}</strong>
-            </span>
-            <span>
-              <small>Distance</small>
-              <strong>{{ characterState.distance }}</strong>
-            </span>
-            <span class="state-focus">
-              <small>Focus</small>
-              <strong>{{ characterState.focus }}</strong>
-            </span>
-          </button>
-          <div class="state-bars">
-            <label>
-              <span>Energy {{ energyPercent }}%</span>
-              <i><b :style="{ width: `${energyPercent}%` }"></b></i>
-            </label>
-            <label>
-              <span>Resonance {{ resonancePercent }}%</span>
-              <i><b :style="{ width: `${resonancePercent}%` }"></b></i>
-            </label>
-          </div>
-          <dl v-if="stateExpanded" class="state-detail">
-            <div>
-              <dt>Pace</dt>
-              <dd>{{ characterState.behavior.pace }}</dd>
-            </div>
-            <div>
-              <dt>Initiative</dt>
-              <dd>{{ characterState.behavior.initiative }}</dd>
-            </div>
-            <div>
-              <dt>Warmth</dt>
-              <dd>{{ characterState.behavior.warmth }}</dd>
-            </div>
-            <div>
-              <dt>Memory Use</dt>
-              <dd>{{ characterState.behavior.memory_use }}</dd>
-            </div>
-            <div>
-              <dt>Avoid</dt>
-              <dd>{{ characterState.behavior.avoid }}</dd>
-            </div>
-            <div>
-              <dt>Evidence</dt>
-              <dd>{{ characterState.last_shift || characterState.evidence }}</dd>
-            </div>
-          </dl>
-        </section>
-      </section>
-
-      <section class="memory-section">
-        <div class="section-title">
-          <div>
-            <p class="eyebrow">Bond</p>
-            <h3>{{ characterBond?.familiarity_stage || "No bond" }}</h3>
-          </div>
-          <button class="ghost muted" @click="bondExpanded = !bondExpanded">{{ bondExpanded ? "Hide" : "Detail" }}</button>
-        </div>
-
-        <section v-if="characterBond" class="bond-strip side-strip">
-          <button class="bond-summary" type="button" @click="bondExpanded = !bondExpanded">
-            <span>
-              <small>Base Resonance</small>
-              <strong>{{ bondPercent }}%</strong>
-            </span>
-            <span class="bond-preference">
-              <small>Preference</small>
-              <strong>{{ characterBond.interaction_preferences }}</strong>
-            </span>
-          </button>
-          <dl v-if="bondExpanded" class="bond-detail">
-            <div>
-              <dt>Trust</dt>
-              <dd>{{ characterBond.trust_notes }}</dd>
-            </div>
-            <div>
-              <dt>Boundary</dt>
-              <dd>{{ characterBond.boundary_notes }}</dd>
-            </div>
-            <div>
-              <dt>Milestones</dt>
-              <dd>{{ characterBond.milestones.length ? characterBond.milestones.join(" / ") : "暂无关键节点" }}</dd>
-            </div>
-            <div>
-              <dt>Evidence</dt>
-              <dd>{{ characterBond.evidence }}</dd>
-            </div>
-          </dl>
-        </section>
-      </section>
-
-      <section class="memory-section">
-        <div class="section-title">
-          <div>
-            <p class="eyebrow">Memory</p>
-            <h3>{{ memoryPane?.frozen ? "Frozen" : "Live" }}</h3>
-          </div>
-          <button class="ghost" @click="toggleFreeze">{{ memoryPane?.frozen ? "Unfreeze" : "Freeze" }}</button>
-        </div>
-
-        <textarea v-model="manualNoteDraft" class="note" rows="4" placeholder="手动记忆" />
-        <button class="wide" @click="saveMemoryNote">Save note</button>
-
-        <div class="postprocess-diagnostics" :class="postprocessStatus">
-          <div>
-            <span>Analysis</span>
-            <strong>{{ postprocessStatusLabel }}</strong>
-          </div>
-          <p>{{ postprocessDetail }}</p>
-          <ul v-if="postprocessStages.length" class="postprocess-stages">
-            <li v-for="stage in postprocessStages" :key="stage.key" :class="stage.status">
-              <span>{{ stage.key }}</span>
-              <strong>{{ stage.status }}</strong>
-              <small v-if="stage.detail">{{ stage.detail }}</small>
-            </li>
-          </ul>
-          <small v-if="memoryDiagnostics.finished_at">{{ memoryDiagnostics.finished_at }}</small>
-        </div>
-
-        <div class="memory-tabs">
-          <button :class="{ active: memoryFilter === 'all' }" @click="memoryFilter = 'all'">All {{ memoryCounts.all }}</button>
-          <button :class="{ active: memoryFilter === 'global' }" @click="memoryFilter = 'global'">Global {{ memoryCounts.global }}</button>
-          <button :class="{ active: memoryFilter === 'character' }" @click="memoryFilter = 'character'">Role {{ memoryCounts.character }}</button>
-          <button :class="{ active: memoryFilter === 'session' }" @click="memoryFilter = 'session'">Session {{ memoryCounts.session }}</button>
-          <button :class="{ active: memoryFilter === 'recall' }" @click="memoryFilter = 'recall'">Recall {{ memoryCounts.recall }}</button>
-        </div>
-
-        <div class="memory-list">
-          <div v-for="memory in filteredMemories" :key="memory.id" class="memory-item">
-            <template v-if="editingMemoryId === memory.id">
-              <div class="memory-edit-grid">
-                <label>
-                  <span>Scope</span>
-                  <select v-model="memoryDraft.memory_scope">
-                    <option value="global">global</option>
-                    <option value="character">character</option>
-                    <option value="session">session</option>
-                  </select>
-                </label>
-                <label>
-                  <span>Type</span>
-                  <select v-model="memoryDraft.memory_type">
-                    <option value="stable_user_info">stable_user_info</option>
-                    <option value="user_preference">user_preference</option>
-                    <option value="relationship_progress">relationship_progress</option>
-                    <option value="open_thread">open_thread</option>
-                    <option value="recent_emotion">recent_emotion</option>
-                  </select>
-                </label>
-              </div>
-              <textarea v-model="memoryDraft.content" class="note compact" rows="3" />
-              <label class="range-field">
-                <span>Importance {{ Math.round(Number(memoryDraft.importance || 0) * 100) }}%</span>
-                <input v-model.number="memoryDraft.importance" type="range" min="0" max="1" step="0.05" />
-              </label>
-              <div class="memory-actions">
-                <button class="ghost" @click="saveMemoryItem(memory.id)">Save</button>
-                <button class="ghost muted" @click="cancelEditMemory">Cancel</button>
-              </div>
-            </template>
-            <template v-else>
-              <div class="memory-meta">
-                <button class="memory-title" @click="toggleMemoryDetails(memory.id)">
-                  {{ memory.memory_scope }} / {{ memory.memory_type }}
-                </button>
-                <div class="memory-actions">
-                  <button @click="startEditMemory(memory)">Edit</button>
-                  <button @click="removeMemoryItem(memory.id)">Delete</button>
-                </div>
-              </div>
-              <div class="score-row">
-                <span>importance {{ Math.round(memory.importance * 100) }}%</span>
-                <span>confidence {{ Math.round(memory.confidence * 100) }}%</span>
-              </div>
-              <p>{{ memory.content }}</p>
-              <dl v-if="expandedMemoryId === memory.id" class="detail-grid">
-                <div>
-                  <dt>ID</dt>
-                  <dd>{{ memory.id }}</dd>
-                </div>
-                <div>
-                  <dt>Source</dt>
-                  <dd>{{ memory.source_message_id || "manual / unknown" }}</dd>
-                </div>
-                <div>
-                  <dt>Created</dt>
-                  <dd>{{ memory.created_at }}</dd>
-                </div>
-                <div>
-                  <dt>Updated</dt>
-                  <dd>{{ memory.updated_at }}</dd>
-                </div>
-              </dl>
-            </template>
-          </div>
-          <div v-if="!filteredMemories.length" class="empty">No memory in this view.</div>
-        </div>
-      </section>
-
-      <section class="memory-section">
-        <div class="section-title">
-          <div>
-            <p class="eyebrow">Prompt Stack</p>
-            <h3>{{ includedSlots.length }} included</h3>
-          </div>
-        </div>
-
-        <div class="slot-list">
-          <div v-for="slot in includedSlots" :key="slot.key" class="slot-item" :class="{ expanded: expandedSlotKey === slot.key }">
-            <div @click="toggleSlotDetails(slot.key)">
-              <strong>{{ slot.key }}</strong>
-              <span>{{ slot.priority }} / {{ slot.token_budget }}</span>
-            </div>
-            <p>{{ slot.content }}</p>
-            <dl v-if="expandedSlotKey === slot.key" class="detail-grid">
-              <div>
-                <dt>Role</dt>
-                <dd>{{ slot.role }}</dd>
-              </div>
-              <div>
-                <dt>Included</dt>
-                <dd>{{ slot.included ? "yes" : "no" }}</dd>
-              </div>
-              <div>
-                <dt>Budget</dt>
-                <dd>{{ slot.token_budget }}</dd>
-              </div>
-            </dl>
-          </div>
-          <div v-if="excludedSlots.length" class="excluded">{{ excludedSlots.length }} excluded by budget</div>
-        </div>
-      </section>
+      <ChatMemoryPanel
+        v-model:manual-note-draft="manualNoteDraft"
+        v-model:memory-filter="memoryFilter"
+        v-model:memory-draft="memoryDraft"
+        v-model:editing-memory-id="editingMemoryId"
+        v-model:expanded-memory-id="expandedMemoryId"
+        v-model:expanded-slot-key="expandedSlotKey"
+        :memory-pane="memoryPane"
+        :memory-counts="memoryCounts"
+        :filtered-memories="filteredMemories"
+        :memory-diagnostics="memoryDiagnostics"
+        :postprocess-status="postprocessStatus"
+        :postprocess-status-label="postprocessStatusLabel"
+        :postprocess-detail="postprocessDetail"
+        :postprocess-stages="postprocessStages"
+        :included-slots="includedSlots"
+        :excluded-slots="excludedSlots"
+        @toggle-freeze="toggleFreeze"
+        @save-memory-note="saveMemoryNote"
+        @save-memory-item="saveMemoryItem"
+        @cancel-edit-memory="cancelEditMemory"
+        @start-edit-memory="startEditMemory"
+        @remove-memory-item="removeMemoryItem"
+        @toggle-memory-details="toggleMemoryDetails"
+        @toggle-slot-details="toggleSlotDetails"
+      />
     </aside>
   </main>
 </template>
