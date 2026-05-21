@@ -14,7 +14,7 @@ It intentionally leaves out the heavier scoring and director machinery from the 
 
 - Backend: Python, FastAPI, SQLite
 - Frontend: Vite, Vue 3, TypeScript
-- LLM providers: DashScope, DeepSeek, ARK-compatible OpenAI chat APIs
+- LLM providers: an OpenAI-compatible routing endpoint, DashScope, DeepSeek, or ARK-compatible OpenAI chat APIs
 - Retrieval fallback: SQLite FTS plus lightweight keyword ranking
 
 ## Layout
@@ -117,14 +117,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-backend.ps1
 
 ## Environment
 
-The provider layer checks these variables in order:
+The provider layer checks these chat variables in order:
+
+- `LLM_ROUTER_API_KEY`, `LLM_ROUTER_BASE_URL`, `LLM_ROUTER_MODEL`
+  - `LLM_ROUTER_MODEL` defaults to `auto`, so a gateway that accepts an automatic route name can be configured with only the key and base URL.
+  - Set `LLM_ROUTER_MODEL` when the gateway expects a concrete model alias or route name.
 
 - `DASHSCOPE_API_KEY`, `DASHSCOPE_BASE_URL`, `DASHSCOPE_MODEL`
 - `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`
 - `ARK_API_KEY`, `ARK_BASE_URL`, `ARK_MODEL`
 
+When `LLM_ROUTER_*` is configured it wins over the direct chat providers, so chat, story, relationship analysis, and novel generation can all be routed by one OpenAI-compatible gateway without changing business code. `/api/health` reports the selected chat and embedding provider names.
+
 Embedding uses the same provider layer when available:
 
+- `LLM_ROUTER_EMBEDDING_MODEL` when the routing endpoint also exposes an OpenAI-compatible embeddings route. Optional `LLM_ROUTER_EMBEDDING_API_KEY`, `LLM_ROUTER_EMBEDDING_BASE_URL`, and `LLM_ROUTER_EMBEDDING_TIMEOUT_MS` override the chat router values.
 - `DASHSCOPE_EMBEDDING_MODEL`, defaults to `text-embedding-v4` when `DASHSCOPE_API_KEY` is present.
 - `ARK_EMBEDDING_MODEL` when using an ARK embedding endpoint.
 - `DEEPSEEK_EMBEDDING_MODEL` only if you explicitly configure a compatible embedding endpoint.

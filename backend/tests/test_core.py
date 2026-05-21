@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from campus_lite.bond import CharacterBondService
 from campus_lite.characters import CharacterStore
@@ -19,6 +20,26 @@ from campus_lite.story import StoryService
 
 
 class CampusLiteCoreTest(unittest.TestCase):
+    def test_llm_router_provider_takes_priority_for_chat_and_optional_embeddings(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "LLM_ROUTER_API_KEY": "router-key",
+                "LLM_ROUTER_BASE_URL": "http://router.local/v1",
+                "LLM_ROUTER_TIMEOUT_MS": "34567",
+                "LLM_ROUTER_EMBEDDING_MODEL": "router-embedding",
+                "DASHSCOPE_API_KEY": "dashscope-key",
+                "DASHSCOPE_MODEL": "dashscope-chat",
+            },
+            clear=True,
+        ):
+            client = LlmClient()
+
+        self.assertEqual(client.provider_name(), "router")
+        self.assertEqual(client.provider["model"], "auto")
+        self.assertEqual(client.provider["timeout_ms"], 34567)
+        self.assertEqual(client.embedding_provider_name(), "router:router-embedding")
+
     def test_character_cards_load(self) -> None:
         cards = CharacterStore().list_cards()
         self.assertGreaterEqual(len(cards), 5)
@@ -863,9 +884,9 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(llm.response_format, {"type": "json_object"})
             self.assertEqual(rebuilt.story_canvas["diagnostics"]["source"], "remote")
             self.assertEqual(rebuilt.story_canvas["diagnostics"]["mode"], "initial_rolling")
-            self.assertEqual(rebuilt.story_canvas["chapters"][0]["title"], "第1章 远程画布")
+            self.assertEqual(rebuilt.story_canvas["chapters"][0]["title"], "远程画布")
             self.assertEqual(rebuilt.story_canvas["chapters"][0]["target_length"], 1800)
-            self.assertEqual(rebuilt.chapters[0].title, "第1章 远程画布")
+            self.assertEqual(rebuilt.chapters[0].title, "远程画布")
 
     def test_novel_generation_rolls_forward_two_future_chapters(self) -> None:
         class FakeLlm:
@@ -1828,7 +1849,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             canvas = service._parse_canvas_response(text, fallback)
             self.assertEqual(canvas["diagnostics"]["source"], "remote")
             self.assertEqual(canvas["chapters"][0]["chapter_order"], 1)
-            self.assertEqual(canvas["chapters"][0]["title"], "第1章 风起")
+            self.assertEqual(canvas["chapters"][0]["title"], "风起")
             self.assertEqual(canvas["diagnostics"]["scene_source"], "derived_from_chapters")
             self.assertEqual(canvas["scenes"][0]["id"], "sc_1")
             self.assertEqual(canvas["scenes"][0]["surface_event"], "傍晚起风。")
@@ -1945,7 +1966,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             canvas = service._parse_canvas_response(text, fallback)
             self.assertEqual(canvas["diagnostics"]["source"], "remote")
             self.assertEqual(canvas["chapters"][0]["chapter_order"], 1)
-            self.assertEqual(canvas["chapters"][0]["title"], "第1章 风起")
+            self.assertEqual(canvas["chapters"][0]["title"], "风起")
             self.assertEqual(canvas["chapters"][0]["target_length"], 1800)
             self.assertEqual(canvas["scenes"][0]["scene_order"], 1)
 

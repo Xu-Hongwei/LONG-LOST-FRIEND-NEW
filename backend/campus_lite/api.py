@@ -42,7 +42,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
-        return {"ok": True, "llm_configured": llm.configured(), "embedding_configured": llm.embedding_configured()}
+        return {
+            "ok": True,
+            "llm_configured": llm.configured(),
+            "llm_provider": llm.provider_name(),
+            "embedding_configured": llm.embedding_configured(),
+            "embedding_provider": llm.embedding_provider_name(),
+        }
 
     @app.post("/api/visitors/resolve", response_model=VisitorResponse)
     def resolve_visitor(payload: ResolveVisitorRequest) -> VisitorResponse:

@@ -1,6 +1,7 @@
 import { computed, ref, type ComputedRef } from "vue";
 import { canvasActionChainFields, canvasBuildSteps, type CanvasBuildStage } from "./constants";
 import { emptyStoryCanvas, normalizeStoryCanvas } from "./canvas";
+import { formatNovelChapterTitle } from "./chapterTitle";
 import type { NovelChapter, NovelProject, StoryCanvas, StoryCanvasChapter, StoryCanvasScene } from "../../types";
 
 export type StoryCanvasView = "flow" | "chapters" | "scenes" | "threads";
@@ -157,7 +158,8 @@ export function useStoryCanvas(
   }
 
   function canvasChapterTitle(chapterId: string) {
-    return storyCanvasDraft.value.chapters.find((chapter) => chapter.id === chapterId)?.title || chapterId || "未绑定章节";
+    const chapter = storyCanvasDraft.value.chapters.find((item) => item.id === chapterId);
+    return chapter ? formatNovelChapterTitle(chapter.chapter_order, chapter.title) : chapterId || "未绑定章节";
   }
 
   function canvasBuildStepClass(index: number) {

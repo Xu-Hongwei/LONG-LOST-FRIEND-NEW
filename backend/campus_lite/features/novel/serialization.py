@@ -147,9 +147,7 @@ class NovelSerializationMixin:
     def _normalize_chapter_title(self, title: str, order: int) -> str:
         clean = str(title or "").strip()
         clean = re.sub(r"^第[一二三四五六七八九十百千万\d]+章[\s：:、.-]*", "", clean).strip()
-        if not clean:
-            clean = f"章节 {order}"
-        return f"第{order}章 {clean}"[:120]
+        return (clean or "未命名章节")[:120]
 
     def _require_storage(self) -> Storage:
         if self.storage is None:

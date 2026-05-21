@@ -12,6 +12,7 @@ import {
 import { canvasFieldText } from "./features/novel/canvas";
 import { useStoryCanvas } from "./features/novel/useStoryCanvas";
 import type { StoryCanvasView } from "./features/novel/useStoryCanvas";
+import { formatNovelChapterTitle } from "./features/novel/chapterTitle";
 import { useNovelProgress } from "./features/novel/useNovelProgress";
 import { useNovelProject } from "./features/novel/useNovelProject";
 import { useNovelInstruction } from "./features/novel/useNovelInstruction";
@@ -408,7 +409,7 @@ function downloadNovelProjectMarkdown() {
   if (!activeNovelProject.value) return;
   const project = activeNovelProject.value;
   const chapters = project.chapters.map((chapter) => [
-    `## 第 ${chapter.chapter_order} 章 ${chapter.title}`,
+    `## ${formatNovelChapterTitle(chapter.chapter_order, chapter.title)}`,
     "",
     chapter.summary,
     "",

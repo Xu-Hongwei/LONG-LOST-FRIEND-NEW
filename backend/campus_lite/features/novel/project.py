@@ -130,6 +130,7 @@ class NovelProjectMixin:
             story_bible,
             story_items,
         )
+        story_canvas = self._compact_story_canvas(story_canvas)
         if not request.outline.strip():
             outline = self._canvas_outline(story_canvas)
         novel_state = self._default_novel_state(title, story_bible, story_canvas)

@@ -22,6 +22,7 @@ import {
   sceneCardDraftFromCanvas,
   storyCanvasWithChapterDraft
 } from "./canvas";
+import { formatNovelChapterTitle, stripNovelChapterPrefix } from "./chapterTitle";
 import type { CanvasBuildStage, NovelProgressStage } from "./constants";
 import type { ChapterDraft, ProjectDraft } from "./useNovelProject";
 import type {
@@ -98,7 +99,7 @@ export function useNovelProjectActions(options: {
       if (!scene || !canvasChapter) return;
       const nextDraft = {
         ...options.chapterDraft.value,
-        title: canvasChapter.title || options.chapterDraft.value.title,
+        title: stripNovelChapterPrefix(canvasChapter.title || options.chapterDraft.value.title),
         goal: canvasChapter.goal || options.chapterDraft.value.goal,
         scene_card: sceneCardDraftFromCanvas(scene as unknown as Record<string, unknown>, canvasChapter)
       };
@@ -303,7 +304,7 @@ export function useNovelProjectActions(options: {
   async function deleteActiveNovelChapter() {
     if (!options.activeNovelProject.value || !options.activeNovelChapter.value || options.novelProjectBusy.value) return;
     const chapter = options.activeNovelChapter.value;
-    if (!window.confirm(`删除「${chapter.title || `第 ${chapter.chapter_order} 章`}」？章节正文和版本记录都会删除，后续章节会重新编号并标记受影响。`)) return;
+    if (!window.confirm(`删除「${formatNovelChapterTitle(chapter.chapter_order, chapter.title)}」？章节正文和版本记录都会删除，后续章节会重新编号并标记受影响。`)) return;
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {

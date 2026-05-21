@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { NovelChapterStatus, NovelFidelity, NovelForm, NovelPerspective, NovelProject } from "../../types";
+import { formatNovelChapterTitle } from "./chapterTitle";
 
 type NovelStudioMode = "quick" | "project";
 
@@ -113,7 +114,7 @@ const novelAtmosphere = defineModel<string>("novelAtmosphere", { required: true 
           @click="$emit('selectChapter', chapter.id)"
         >
           <b>{{ chapter.chapter_order }}</b>
-          <span>{{ chapter.title }}</span>
+          <span>{{ formatNovelChapterTitle(chapter.chapter_order, chapter.title) }}</span>
           <small>{{ novelChapterStatusLabel(chapter.status) }}</small>
         </button>
       </div>

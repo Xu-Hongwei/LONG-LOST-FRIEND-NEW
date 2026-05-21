@@ -6,6 +6,7 @@ import {
   sceneCardWithPlanningDefaults,
   type ChapterSceneCardDraft
 } from "./canvas";
+import { stripNovelChapterPrefix } from "./chapterTitle";
 import type {
   CharacterCard,
   NovelChapter,
@@ -274,6 +275,7 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
     }
     return {
       ...chapterDraft.value,
+      title: stripNovelChapterPrefix(chapterDraft.value.title),
       scene_card: sceneCard
     };
   }
@@ -281,7 +283,7 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
   function syncChapterDraft(chapter: NovelChapter | null) {
     rememberChapterInstruction();
     chapterDraft.value = {
-      title: chapter?.title || "",
+      title: stripNovelChapterPrefix(chapter?.title || ""),
       goal: chapterPlotGoal(chapter),
       summary: chapter?.summary || "",
       body: chapter?.body || "",

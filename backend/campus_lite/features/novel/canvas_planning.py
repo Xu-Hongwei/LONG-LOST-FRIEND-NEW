@@ -238,6 +238,9 @@ class NovelCanvasPlanningMixin:
             return {}
         next_canvas = json.loads(json.dumps(canvas, ensure_ascii=False))
         chapters = self._canvas_chapters(next_canvas)
+        for index, chapter in enumerate(chapters):
+            order = self._coerce_int(chapter.get("chapter_order"), index + 1, 1, 999)
+            chapter["title"] = self._normalize_chapter_title(str(chapter.get("title") or ""), order)
         chapter_ids = {str(item.get("id") or "") for item in chapters if str(item.get("id") or "")}
         next_canvas["acts"] = self._dedupe_canvas_acts(
             next_canvas.get("acts") if isinstance(next_canvas.get("acts"), list) else [],

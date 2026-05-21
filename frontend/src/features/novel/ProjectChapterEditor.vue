@@ -2,6 +2,7 @@
 import type { CanvasActionKey } from "./constants";
 import type { ChapterSceneCardDraft } from "./canvas";
 import type { NovelChapter, NovelChapterStatus, StoryCanvasChapter } from "../../types";
+import { formatNovelChapterTitle } from "./chapterTitle";
 
 type ChapterDraft = {
   title: string;
@@ -53,7 +54,7 @@ defineEmits<{
     <div class="chapter-editor-head">
       <div>
         <p class="eyebrow">Chapter {{ activeNovelChapter.chapter_order }}</p>
-        <h3>{{ chapterDraft.title || "未命名章节" }}</h3>
+        <h3>{{ formatNovelChapterTitle(activeNovelChapter.chapter_order, chapterDraft.title) }}</h3>
       </div>
       <div class="chapter-actions">
         <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="$emit('checkContinuity')">检查</button>

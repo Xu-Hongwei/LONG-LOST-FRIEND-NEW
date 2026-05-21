@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { StoryCanvasChapter } from "../../types";
 import type { CanvasActionKey } from "./constants";
+import { formatNovelChapterTitle } from "./chapterTitle";
 
 defineProps<{
   chapters: StoryCanvasChapter[];
@@ -25,7 +26,7 @@ defineEmits<{
       @click="$emit('selectChapter', chapter)"
     >
       <div class="canvas-card-title">
-        <strong>{{ chapter.chapter_order }}. {{ chapter.title }}</strong>
+        <strong>{{ formatNovelChapterTitle(chapter.chapter_order, chapter.title) }}</strong>
         <span>{{ novelChapterStatusLabel(chapter.status) }} · {{ chapter.target_length }} 字</span>
       </div>
       <div class="canvas-read-grid">
