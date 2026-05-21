@@ -43,6 +43,28 @@ function novelVersionFoldLabel(version: NovelVersionDisplay) {
   const restorePart = version.restoreCount ? `，含 ${version.restoreCount} 次恢复` : "";
   return `折叠 ${version.duplicateCount} 条${restorePart}`;
 }
+function storyRefreshLabel(storyPane: StoryPane | null) {
+  const diagnostics = storyPane?.diagnostics;
+  if (!diagnostics) return "";
+  if (diagnostics.error) return `刷新失败：${String(diagnostics.error)}`;
+  if (!("generated" in diagnostics) && !("stored" in diagnostics)) return "";
+  const generated = Number(diagnostics.generated || 0);
+  const stored = Number(diagnostics.stored || 0);
+  const remoteStatus = String(diagnostics.remote_status || "");
+  const source = String(diagnostics.source || "");
+  const remoteDetail = diagnostics.remote_error
+    ? `远程失败 ${String(diagnostics.remote_error)}`
+    : remoteStatus === "empty"
+      ? "远程无候选"
+      : remoteStatus === "skipped"
+        ? "远程未启用"
+        : source === "remote"
+          ? "远程生成"
+          : source === "fallback"
+            ? "兜底生成"
+            : "";
+  return `上次刷新：候选 ${generated}，写入 ${stored}${remoteDetail ? ` · ${remoteDetail}` : ""}`;
+}
 </script>
 
 <template>
@@ -53,6 +75,7 @@ function novelVersionFoldLabel(version: NovelVersionDisplay) {
           <p class="eyebrow">Story Pane</p>
           <h3>剧情标签 {{ storyPane?.items.length || 0 }}</h3>
           <small>每 {{ storyAutoRefreshUserInterval }} 条用户消息后台更新一次</small>
+          <small v-if="storyRefreshLabel(storyPane)">{{ storyRefreshLabel(storyPane) }}</small>
         </div>
         <button
           class="ghost muted"

@@ -4,7 +4,6 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 
 from ...characters import CharacterStore
 from ...llm import LlmClient
-from ...memory import MemoryService
 from ...novel import NovelService
 from ...schemas import (
     NovelCanvasExtendRequest,
@@ -23,6 +22,7 @@ from ...schemas import (
 )
 from ...storage import Storage, StoragePayloadError
 from ...story import StoryService
+from ..relationship.memory import MemoryService
 
 
 def register_novel_routes(

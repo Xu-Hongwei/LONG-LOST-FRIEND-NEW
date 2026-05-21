@@ -3,16 +3,16 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .bond import CharacterBondService
 from .characters import CharacterStore
 from .composer import ContextComposer
-from .llm import LlmClient
-from .memory import MemoryService
-from .novel import NovelService
 from .features.chat.routes import register_chat_routes
 from .features.novel.routes import register_novel_routes
+from .features.relationship.bond import CharacterBondService
+from .features.relationship.memory import MemoryService
+from .features.relationship.state import CharacterStateService
+from .llm import LlmClient
+from .novel import NovelService
 from .schemas import ResolveVisitorRequest, VisitorResponse
-from .state import CharacterStateService
 from .storage import Storage
 from .story import StoryService
 

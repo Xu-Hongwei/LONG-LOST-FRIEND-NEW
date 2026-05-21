@@ -610,6 +610,79 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertGreaterEqual(len(items), 1)
             self.assertLessEqual(len(items), 2)
             self.assertEqual(diagnostics["source"], "fallback")
+            self.assertEqual(diagnostics["remote_status"], "skipped")
+            self.assertEqual(diagnostics["fallback_reason"], "llm_not_configured")
+
+    def test_story_refresh_uses_dedicated_timeout(self) -> None:
+        class FakeLlm:
+            last_chat_error = None
+
+            def __init__(self) -> None:
+                self.timeout_ms = None
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                self.timeout_ms = timeout_ms
+                return """[
+                    {
+                        "kind": "story_beat",
+                        "label": "湖边约定",
+                        "content": "用户和角色约定周六一起去湖边拍照。",
+                        "evidence": "我们周六一起去湖边拍照吧。",
+                        "evidence_level": "explicit",
+                        "status": "active",
+                        "source_message_ids": ["msg_1"]
+                    }
+                ]"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, "lin_wanzhi")
+            storage.add_message(session_id, visitor_id, "lin_wanzhi", "user", "我们周六一起去湖边拍照吧。")
+            fake_llm = FakeLlm()
+            diagnostics = self.run_async(
+                StoryService(storage).refresh(
+                    fake_llm,
+                    session_id,
+                    storage.session_messages(session_id),
+                    [],
+                )
+            )
+            self.assertEqual(fake_llm.timeout_ms, 24000)
+            self.assertEqual(diagnostics["source"], "remote")
+            self.assertEqual(diagnostics["remote_status"], "succeeded")
+
+    def test_story_refresh_reports_remote_failure_before_fallback(self) -> None:
+        class FakeLlm:
+            last_chat_error = None
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                raise TimeoutError("story refresh timed out")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, "lin_wanzhi")
+            storage.add_message(session_id, visitor_id, "lin_wanzhi", "user", "我们周六一起去湖边拍照吧。")
+            storage.add_message(session_id, visitor_id, "lin_wanzhi", "assistant", "好呀，我们慢慢选个角度。")
+            diagnostics = self.run_async(
+                StoryService(storage).refresh(
+                    FakeLlm(),
+                    session_id,
+                    storage.session_messages(session_id),
+                    [],
+                )
+            )
+            self.assertEqual(diagnostics["source"], "fallback")
+            self.assertEqual(diagnostics["remote_status"], "failed")
+            self.assertEqual(diagnostics["remote_error"], "TimeoutError")
+            self.assertEqual(diagnostics["fallback_reason"], "remote_error")
 
     def test_novel_project_creates_story_bible_materials_and_chapter(self) -> None:
         card = CharacterStore().get("lin_wanzhi")

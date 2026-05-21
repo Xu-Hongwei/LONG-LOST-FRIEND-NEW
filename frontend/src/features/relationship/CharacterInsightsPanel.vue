@@ -46,7 +46,7 @@ const bondExpanded = defineModel<boolean>("bondExpanded", { required: true });
           <i><b :style="{ width: `${energyPercent}%` }"></b></i>
         </label>
         <label>
-          <span>Resonance {{ resonancePercent }}%</span>
+          <span>Live Resonance {{ resonancePercent }}%</span>
           <i><b :style="{ width: `${resonancePercent}%` }"></b></i>
         </label>
       </div>
@@ -93,7 +93,7 @@ const bondExpanded = defineModel<boolean>("bondExpanded", { required: true });
     <section v-if="characterBond" class="bond-strip side-strip">
       <button class="bond-summary" type="button" @click="bondExpanded = !bondExpanded">
         <span>
-          <small>Base Resonance</small>
+          <small>Bond Baseline</small>
           <strong>{{ bondPercent }}%</strong>
         </span>
         <span class="bond-preference">

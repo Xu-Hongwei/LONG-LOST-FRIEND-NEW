@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from .bond import CharacterBondService
-from .state import CharacterStateService
+from .features.relationship.bond import CharacterBondService
+from .features.relationship.state import CharacterStateService
 from .storage import Storage
 from .features.novel.canvas import NovelCanvasMixin
 from .features.novel.canvas_access import NovelCanvasAccessMixin
@@ -15,6 +15,7 @@ from .features.novel.generation import NovelGenerationMixin
 from .features.novel.generation_beats import NovelGenerationBeatsMixin
 from .features.novel.generation_context import NovelGenerationContextMixin
 from .features.novel.generation_mock import NovelGenerationMockMixin
+from .features.novel.generation_postprocess import NovelGenerationPostprocessMixin
 from .features.novel.generation_response import NovelGenerationResponseMixin
 from .features.novel.optimizer import NovelInstructionOptimizerMixin
 from .features.novel.project import NovelProjectMixin
@@ -35,6 +36,7 @@ class NovelService(
     NovelCanvasSyncMixin,
     NovelProjectMixin,
     NovelGenerationMixin,
+    NovelGenerationPostprocessMixin,
     NovelGenerationResponseMixin,
     NovelGenerationBeatsMixin,
     NovelGenerationContextMixin,

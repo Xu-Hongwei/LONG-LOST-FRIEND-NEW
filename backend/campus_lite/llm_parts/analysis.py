@@ -9,6 +9,9 @@ from ..schemas import CharacterCard, MemoryItem
 
 logger = logging.getLogger(__name__)
 
+RELATIONSHIP_STAGE_TIMEOUT_MS = 12_000
+BOND_STAGE_TIMEOUT_MS = 24_000
+
 
 class LlmAnalysisMixin:
     async def extract_memories(self, user_message: str, assistant_reply: str) -> list[dict[str, Any]]:
@@ -20,7 +23,7 @@ class LlmAnalysisMixin:
             text = await self.chat_complete([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
-            ])
+            ], timeout_ms=RELATIONSHIP_STAGE_TIMEOUT_MS)
             return self._parse_memory_json(text)
         except Exception as exc:
             self.last_chat_error = type(exc).__name__
@@ -55,7 +58,7 @@ class LlmAnalysisMixin:
             text = await self.chat_complete([
                 {"role": "system", "content": self.character_state_system_prompt()},
                 {"role": "user", "content": user},
-            ])
+            ], timeout_ms=RELATIONSHIP_STAGE_TIMEOUT_MS)
             return self._parse_state_json(text)
         except Exception as exc:
             self.last_chat_error = type(exc).__name__
@@ -92,7 +95,7 @@ class LlmAnalysisMixin:
             text = await self.chat_complete([
                 {"role": "system", "content": self.character_bond_system_prompt()},
                 {"role": "user", "content": user},
-            ])
+            ], timeout_ms=BOND_STAGE_TIMEOUT_MS)
             return self._parse_bond_json(text)
         except Exception as exc:
             self.last_chat_error = type(exc).__name__

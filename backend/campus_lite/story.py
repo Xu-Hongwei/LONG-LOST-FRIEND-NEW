@@ -11,6 +11,7 @@ from .storage import Storage
 ALLOWED_KINDS = {"motif", "story_beat", "open_thread", "relationship_texture", "boundary"}
 ALLOWED_EVIDENCE = {"explicit", "inferred", "weak"}
 ALLOWED_STATUS = {"active", "seed", "developed", "archived"}
+STORY_REFRESH_TIMEOUT_MS = 24_000
 
 
 class StoryService:
@@ -28,7 +29,7 @@ class StoryService:
         memories: list[MemoryItem],
     ) -> dict[str, Any]:
         existing = self.list_items(session_id)
-        generated = await self._generate_items(llm, messages, memories, existing)
+        generated, diagnostics = await self._generate_items(llm, messages, memories, existing)
         stored = 0
         for item in generated[:2]:
             story_id = self.storage.upsert_story_item(
@@ -44,7 +45,7 @@ class StoryService:
             if story_id:
                 stored += 1
         return {
-            "source": "remote" if llm.configured() and generated else "fallback",
+            **diagnostics,
             "generated": len(generated[:2]),
             "stored": stored,
         }
@@ -55,17 +56,36 @@ class StoryService:
         messages: list[dict[str, str]],
         memories: list[MemoryItem],
         existing: list[StoryItem],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if llm.configured():
             try:
                 text = await llm.chat_complete([
                     {"role": "system", "content": self._system_prompt()},
                     {"role": "user", "content": self._source(messages, memories, existing)},
-                ])
-                return self._parse_items(text)
+                ], timeout_ms=STORY_REFRESH_TIMEOUT_MS)
+                parsed = self._parse_items(text)
+                if parsed:
+                    return parsed, {"source": "remote", "remote_status": "succeeded"}
+                fallback = self._fallback_items(messages, memories, existing)
+                return fallback, {
+                    "source": "fallback",
+                    "remote_status": "empty",
+                    "fallback_reason": "remote_empty",
+                }
             except Exception as exc:
                 llm.last_chat_error = type(exc).__name__
-        return self._fallback_items(messages, memories, existing)
+                fallback = self._fallback_items(messages, memories, existing)
+                return fallback, {
+                    "source": "fallback",
+                    "remote_status": "failed",
+                    "remote_error": type(exc).__name__,
+                    "fallback_reason": "remote_error",
+                }
+        return self._fallback_items(messages, memories, existing), {
+            "source": "fallback",
+            "remote_status": "skipped",
+            "fallback_reason": "llm_not_configured",
+        }
 
     def _system_prompt(self) -> str:
         return (

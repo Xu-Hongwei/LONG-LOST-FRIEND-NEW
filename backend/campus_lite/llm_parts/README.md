@@ -27,4 +27,5 @@ Embedding 也走 provider 层。未配置或失败时，记忆召回会退回 SQ
 - 新 provider 放 `providers.py`，不要散落在业务服务里。
 - 新 prompt 放 `prompts.py` 或小说自己的 prompt 文件，避免把长 prompt 写进路由。
 - 新 JSON 解析规则放 `parsing.py` 或对应领域的 serialization/parsing 文件。
+- relationship 分阶段分析的远程调用边界和 timeout 放在 `analysis.py`；`postprocess.py` 只负责阶段编排和 diagnostics。
 - mock 只能作为 fallback，不应写入未验证的长期记忆。

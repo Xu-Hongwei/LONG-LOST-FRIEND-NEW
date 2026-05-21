@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 import time
 
-from ...bond import CharacterBondService
 from ...characters import CharacterStore
 from ...llm import LlmClient
-from ...memory import MemoryService
-from ...state import CharacterStateService
 from ...storage import Storage
+from .bond import CharacterBondService
+from .memory import MemoryService
+from .state import CharacterStateService
 
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ def elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
 
 
-class ChatPostprocessService:
+class RelationshipPostprocessService:
     def __init__(
         self,
         *,

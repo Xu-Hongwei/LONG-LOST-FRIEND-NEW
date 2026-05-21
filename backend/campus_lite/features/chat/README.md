@@ -1,45 +1,40 @@
-# 聊天模块说明
+# Chat 后端域
 
-聊天模块后端位于当前目录，前端接口位于 `frontend/src/features/chat/`。
+chat 域负责会话和用户可见消息链路，前端入口在 `frontend/src/features/chat/`。
 
-## 后端文件
+## 文件
 
-- `routes.py`：注册聊天相关 API。
-- `service.py`：聊天主流程，包括创建会话、发送消息、后台分析、记忆面板、故事面板。
+- `routes.py`：注册 session、chat send、story pane 和 export 路由。
+- `service.py`：创建/恢复会话、召回上下文、组装 prompt、生成主回复、排队 relationship postprocess。
 
-## 相关服务
+## 主流程
 
-- `CharacterStore`：从 `characters/*.json` 读取角色卡。
-- `ContextComposer`：把角色、人设、记忆、状态、关系组装成 prompt slots。
-- `MemoryService`：召回、抽取、编辑记忆。
-- `CharacterStateService`：维护当前会话里的角色即时状态。
-- `CharacterBondService`：维护 visitor + character 的长期关系。
-- `StoryService`：维护从聊天里抽取出的故事条目。
-- `LlmClient`：聊天补全、turn analysis、embedding。
+1. `POST /api/sessions` 以 `visitor_id + character_id` 创建或恢复 session。
+2. `POST /api/chat/send` 保存用户消息。
+3. chat service 召回 profile/recall memory，读取近期消息、当前 state 和长期 bond。
+4. `ContextComposer` 组装 prompt slots。
+5. `LlmClient` 返回远程回复，失败时使用 persona-shaped mock reply。
+6. assistant 消息保存后立即返回前端。
+7. 后台任务交给 `features/relationship/postprocess.py` 处理 memory、state 和 bond。
 
 ## API
 
-- `POST /api/sessions`：创建或恢复 visitor + character 的会话。
-- `POST /api/chat/send`：发送消息，返回回复、记忆、prompt slots、状态和关系。
-- `GET /api/sessions/{session_id}/memory`：读取记忆面板。
-- `PATCH /api/sessions/{session_id}/memory`：更新会话记忆设置。
-- `PATCH /api/sessions/{session_id}/memory/items/{memory_id}`：编辑单条记忆。
-- `DELETE /api/sessions/{session_id}/memory/items/{memory_id}`：删除单条记忆。
-- `GET /api/sessions/{session_id}/story`：读取故事面板。
-- `POST /api/sessions/{session_id}/story/refresh`：刷新故事面板。
-- `GET /api/sessions/{session_id}/export`：导出会话。
+- `POST /api/sessions`
+- `POST /api/chat/send`
+- `GET /api/sessions/{session_id}/story`
+- `POST /api/sessions/{session_id}/story/refresh`
+- `GET /api/sessions/{session_id}/export`
 
-## 流程
+memory 路由仍在 chat 路由文件注册以保持 URL 不变，但处理者是 `RelationshipService`：
 
-1. 前端创建或恢复会话。
-2. 发送用户消息。
-3. 后端召回记忆、组装 prompt、请求 LLM 或 mock。
-4. 立即返回用户可见回复。
-5. 后台合并执行状态、关系、记忆分析。
-6. 前端后续刷新记忆或故事面板。
+- `GET /api/sessions/{session_id}/memory`
+- `GET /api/sessions/{session_id}/memory/wait`
+- `PATCH /api/sessions/{session_id}/memory`
+- `PATCH /api/sessions/{session_id}/memory/items/{memory_id}`
+- `DELETE /api/sessions/{session_id}/memory/items/{memory_id}`
 
-## 修改原则
+## 边界
 
-- 用户可见聊天回复不要等待所有后台分析完成。
-- 记忆写入必须保守：低置信、无明确事实、临时情绪不要长期化。
-- 故事面板可以服务小说工作台，但不要把小说章节运行态塞回聊天状态。
+- chat 域不实现 memory 编辑、state 评分或 bond 持久化规则。
+- 主回复不能等待 relationship 后处理结束。
+- story pane 是聊天沉淀出的素材窗口，但章节、版本和 Novel State 不回写到 chat 状态。

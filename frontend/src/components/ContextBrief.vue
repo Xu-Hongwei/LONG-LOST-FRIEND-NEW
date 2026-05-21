@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { CharacterCard, MemoryPane } from "../types";
-import type { LoveGender, LoveProfile } from "../features/personalityTest/data";
-import { loveQuestions } from "../features/personalityTest/data";
+import type { LoveGender, LoveProfile } from "../features/relationship/personalityTest/data";
+import { loveQuestions } from "../features/relationship/personalityTest/data";
 
 type PageKey = "chat" | "love-test" | "novel";
 
