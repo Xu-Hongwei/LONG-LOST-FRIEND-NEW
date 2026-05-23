@@ -61,7 +61,13 @@ class BaseStorageMixin:
                     visitor_id TEXT NOT NULL REFERENCES visitors(id),
                     character_id TEXT NOT NULL,
                     familiarity_stage TEXT NOT NULL DEFAULT '初识',
+                    stage_code TEXT NOT NULL DEFAULT 'initial',
+                    condition_code TEXT NOT NULL DEFAULT 'steady',
+                    condition_settle_turns INTEGER NOT NULL DEFAULT 0,
                     resonance_base REAL NOT NULL DEFAULT 0.30,
+                    trust_level REAL NOT NULL DEFAULT 0.30,
+                    closeness_level REAL NOT NULL DEFAULT 0.20,
+                    boundary_safety REAL NOT NULL DEFAULT 0.60,
                     trust_notes TEXT NOT NULL DEFAULT '',
                     boundary_notes TEXT NOT NULL DEFAULT '',
                     interaction_preferences TEXT NOT NULL DEFAULT '',
@@ -70,6 +76,21 @@ class BaseStorageMixin:
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                     PRIMARY KEY (visitor_id, character_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS relationship_events (
+                    id TEXT PRIMARY KEY,
+                    visitor_id TEXT NOT NULL REFERENCES visitors(id),
+                    character_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    event_type TEXT NOT NULL,
+                    evidence_grade TEXT NOT NULL,
+                    local_confidence REAL NOT NULL DEFAULT 0,
+                    evidence_text TEXT NOT NULL,
+                    source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+                    accepted INTEGER NOT NULL DEFAULT 1,
+                    applied_delta_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
                 CREATE TABLE IF NOT EXISTS messages (
@@ -218,6 +239,8 @@ class BaseStorageMixin:
                     ON memories(visitor_id, memory_scope, character_id, session_id, memory_type, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_embeddings_owner_provider
                     ON embeddings(owner_type, owner_id, provider);
+                CREATE INDEX IF NOT EXISTS idx_relationship_events_character_created
+                    ON relationship_events(visitor_id, character_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_story_items_session_status
                     ON story_items(session_id, status, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_novel_projects_session_updated
@@ -235,6 +258,12 @@ class BaseStorageMixin:
             self._ensure_column(conn, "memories", "normalized_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "sessions", "character_state_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "sessions", "postprocess_diagnostics_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "character_bonds", "stage_code", "TEXT NOT NULL DEFAULT 'initial'")
+            self._ensure_column(conn, "character_bonds", "condition_code", "TEXT NOT NULL DEFAULT 'steady'")
+            self._ensure_column(conn, "character_bonds", "condition_settle_turns", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "character_bonds", "trust_level", "REAL NOT NULL DEFAULT 0.30")
+            self._ensure_column(conn, "character_bonds", "closeness_level", "REAL NOT NULL DEFAULT 0.20")
+            self._ensure_column(conn, "character_bonds", "boundary_safety", "REAL NOT NULL DEFAULT 0.60")
             self._ensure_column(conn, "novel_projects", "story_canvas_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "novel_projects", "novel_state_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "novel_chapters", "scene_card_json", "TEXT NOT NULL DEFAULT '{}'")

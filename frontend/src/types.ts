@@ -46,6 +46,7 @@ export interface MemoryItem {
   confidence: number;
   importance: number;
   source_message_id?: string | null;
+  source_created_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -108,7 +109,14 @@ export interface CharacterState {
 
 export interface CharacterBond {
   familiarity_stage: string;
+  stage_code: "initial" | "familiar" | "trusted" | "close";
+  condition_code: "steady" | "warming" | "guarded" | "strained" | "repairing";
+  condition_settle_turns: number;
+  relationship_condition: string;
   resonance_base: number;
+  trust_level: number;
+  closeness_level: number;
+  boundary_safety: number;
   trust_notes: string;
   boundary_notes: string;
   interaction_preferences: string;

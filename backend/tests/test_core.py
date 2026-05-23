@@ -3,16 +3,21 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+from fastapi import BackgroundTasks
 
 from campus_lite.bond import CharacterBondService
 from campus_lite.characters import CharacterStore
 from campus_lite.composer import ComposeInput, ContextComposer
+from campus_lite.features.chat.service import ChatService
+from campus_lite.features.chat.time_awareness import build_time_awareness
 from campus_lite.llm import LlmClient
 from campus_lite.memory import MemoryService
 from campus_lite.novel import NovelService
-from campus_lite.schemas import NovelChapterGenerateRequest, NovelGenerateRequest, NovelProjectCreateRequest
+from campus_lite.schemas import NovelChapterGenerateRequest, NovelGenerateRequest, NovelProjectCreateRequest, SendMessageRequest
 from campus_lite.schemas import MemoryItem
 from campus_lite.state import CharacterStateService
 from campus_lite.storage import Storage, StoragePayloadError
@@ -85,6 +90,90 @@ class CampusLiteCoreTest(unittest.TestCase):
         short = composer._slot("test.short", "hello world", 50)
         chinese = composer._slot("test.zh", "这是一段中文上下文，用来估算预算。", 50)
         self.assertGreater(chinese.token_budget, short.token_budget)
+
+    def test_context_slots_can_include_time_awareness(self) -> None:
+        card = CharacterStore().list_cards()[0]
+        slots = ContextComposer().compose(
+            ComposeInput(
+                character=card,
+                recent_messages=[],
+                user_message="hello again",
+                memories=[],
+                recent_summary="",
+                time_awareness="距离上次对话大约过了3天。角色可以自然感受到重新开口。",
+            )
+        )
+
+        slot = next(item for item in slots if item.key == "session.time_awareness")
+        self.assertTrue(slot.included)
+        self.assertIn("3天", slot.content)
+
+    def test_time_awareness_only_appears_after_meaningful_gap(self) -> None:
+        now = datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            build_time_awareness((now - timedelta(minutes=12)).strftime("%Y-%m-%d %H:%M:%S"), now),
+            "",
+        )
+
+        prompt = build_time_awareness((now - timedelta(days=3, hours=2)).strftime("%Y-%m-%d %H:%M:%S"), now)
+        self.assertIn("current_time:", prompt)
+        self.assertIn("last_message_at:", prompt)
+        self.assertIn("elapsed_since_last_message:", prompt)
+        self.assertIn("elapsed_bucket: days_later", prompt)
+        self.assertIn("3天", prompt)
+        self.assertIn("不是台词模板", prompt)
+        self.assertIn("不要机械复述字段或时间戳", prompt)
+        self.assertNotIn("回复第一句", prompt)
+
+    def test_chat_send_injects_time_awareness_from_previous_message(self) -> None:
+        class FakeLlm:
+            last_chat_error = None
+            last_embedding_error = None
+
+            async def embed_texts(self, texts):
+                return []
+
+            def embedding_provider_name(self):
+                return None
+
+            async def chat_complete(self, messages):
+                return "我在。隔了一阵，也还是先听你说。"
+
+            def mock_reply(self, character, user_text, memories):
+                return "mock"
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            previous_id = storage.add_message(session_id, visitor_id, card.id, "assistant", "上次聊到这里。")
+            with storage.connect() as conn:
+                conn.execute(
+                    "UPDATE messages SET created_at = datetime('now', '-3 days') WHERE id = ?",
+                    (previous_id,),
+                )
+            service = ChatService(
+                storage=storage,
+                characters=CharacterStore(),
+                memory=MemoryService(storage),
+                story=StoryService(storage),
+                character_state=CharacterStateService(storage),
+                character_bond=CharacterBondService(storage),
+                composer=ContextComposer(),
+                llm=FakeLlm(),
+            )
+
+            self.run_async(service.send_message(
+                SendMessageRequest(visitor_id=visitor_id, session_id=session_id, message="我回来了。"),
+                BackgroundTasks(),
+            ))
+            session = storage.get_session(session_id)
+            slots = json.loads(session["last_prompt_slots"])
+            time_slot = next(item for item in slots if item["key"] == "session.time_awareness")
+
+            self.assertTrue(time_slot["included"])
+            self.assertIn("3天", time_slot["content"])
 
     def test_storage_visitor_session_memory_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,6 +255,77 @@ class CampusLiteCoreTest(unittest.TestCase):
             recalled = memory.recall(second_session, "我平时喜欢什么地方？")
             self.assertTrue(any(item.memory_scope == "global" for item in recalled))
             self.assertTrue(any("图书馆" in item.content for item in recalled))
+
+    def test_memory_recall_carries_source_message_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, "lin_wanzhi")
+            message_id = storage.add_message(session_id, visitor_id, "lin_wanzhi", "user", "quiet library yesterday")
+            with storage.connect() as conn:
+                conn.execute(
+                    "UPDATE messages SET created_at = ? WHERE id = ?",
+                    ("2026-05-22 08:00:00", message_id),
+                )
+            storage.add_memory(
+                visitor_id,
+                session_id,
+                "lin_wanzhi",
+                "user_preference",
+                "user likes quiet library spaces",
+                0.9,
+                message_id,
+                0.8,
+            )
+
+            recalled = MemoryService(storage).recall(session_id, "quiet library")
+
+            self.assertTrue(recalled)
+            self.assertEqual(recalled[0].source_created_at, "2026-05-22 08:00:00")
+
+    def test_memory_recall_source_time_falls_back_to_memory_created_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, "lin_wanzhi")
+            storage.add_memory(
+                visitor_id,
+                session_id,
+                "lin_wanzhi",
+                "user_preference",
+                "user likes green tea",
+                0.9,
+                None,
+                0.8,
+            )
+
+            recalled = MemoryService(storage).recall(session_id, "green tea")
+
+            self.assertTrue(recalled)
+            self.assertEqual(recalled[0].source_created_at, recalled[0].created_at)
+
+    def test_memory_recall_prompt_adds_relative_time_label(self) -> None:
+        composer = ContextComposer()
+        now = datetime(2026, 5, 23, 12, 0, 0, tzinfo=timezone.utc)
+        memory = MemoryItem(
+            id="mem_time",
+            memory_type="open_thread",
+            memory_scope="session",
+            content="user wanted to continue the lakeside walk topic",
+            confidence=0.9,
+            importance=0.8,
+            source_message_id="msg_1",
+            source_created_at="2026-05-22 08:00:00",
+            created_at="2026-05-23 08:00:00",
+            updated_at="2026-05-23 08:00:00",
+        )
+
+        self.assertEqual(composer._memory_time_label(memory, now), "昨天提到")
+        composer._memory_time_label = lambda item: "昨天提到"
+        prompt = composer._memory_recall([memory])
+
+        self.assertIn("昨天提到", prompt)
+        self.assertIn("不要机械复述时间戳", prompt)
 
     def test_vector_memory_can_rescue_semantic_recall(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -381,37 +541,510 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertIn("林晚栀", lin["evidence"])
             self.assertIn("沈砚", shen["evidence"])
 
-    def test_character_bond_guardrail_and_prompt_hides_scores(self) -> None:
+    def test_character_bond_event_reducer_and_prompt_hides_scores(self) -> None:
         card = CharacterStore().get("lin_wanzhi")
         with tempfile.TemporaryDirectory() as tmp:
             storage = Storage(Path(tmp) / "test.db")
             visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
             service = CharacterBondService(storage)
             previous = service.ensure_bond(visitor_id, card.id, card)
-            scored = {
-                "should_update": True,
-                "familiarity_stage": "逐渐熟悉",
-                "resonance_base_delta": 0.8,
-                "trust_notes": "用户明确认可角色用慢节奏解释问题。",
-                "boundary_notes": "用户不希望被连续追问。",
-                "interaction_preferences": "解释规则时要给行为依据，不只给分数。",
-                "milestone": "用户确认状态分数应映射到行为表现。",
-                "evidence": "用户明确表达长期互动设计偏好。",
-            }
-            next_bond = service.apply_model_update(previous, scored, card)
-            self.assertAlmostEqual(next_bond["resonance_base"], previous["resonance_base"] + 0.02)
-            self.assertIn("用户确认状态分数", next_bond["milestones"][0])
+            next_bond, diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-1"],
+                character=card,
+                previous=previous,
+                extracted=[
+                    {
+                        "event_type": "trust_signal",
+                        "evidence_grade": "explicit",
+                        "evidence_text": "我信你会认真解释",
+                    },
+                    {
+                        "event_type": "preference_confirmed",
+                        "evidence_grade": "strong",
+                        "evidence_text": "解释规则时给我行为依据",
+                    },
+                ],
+                evidence_context="我信你会认真解释，解释规则时给我行为依据。",
+            )
+            self.assertAlmostEqual(next_bond["trust_level"], previous["trust_level"] + 0.05)
+            self.assertAlmostEqual(next_bond["closeness_level"], previous["closeness_level"] + 0.02)
+            self.assertEqual(next_bond["condition_code"], "warming")
+            self.assertEqual(next_bond["relationship_condition"], "升温中")
+            self.assertEqual(diagnostics["accepted_events_count"], 2)
+            self.assertTrue(diagnostics["condition_changed"])
+            self.assertEqual(len(storage.list_relationship_events(visitor_id, card.id)), 2)
             prompt = service.bond_to_prompt(next_bond)
             self.assertIn("长期角色关系档案", prompt)
             self.assertIn("不要提到 Bond", prompt)
-            self.assertNotIn("0.32", prompt)
+            self.assertNotIn("0.35", prompt)
 
-    def test_character_bond_prompt_has_conservative_rubric(self) -> None:
+    def test_character_bond_prompt_extracts_events_only(self) -> None:
         prompt = LlmClient().character_bond_system_prompt()
-        self.assertIn("should_update", prompt)
+        self.assertIn("event_type", prompt)
+        self.assertIn("evidence_grade", prompt)
         self.assertIn("用户只是问技术、规则、实现", prompt)
-        self.assertIn("助手单方面建议", prompt)
-        self.assertIn("宁可不更新", prompt)
+        self.assertIn("不要输出任何评分", prompt)
+        self.assertNotIn("resonance_base_delta", prompt)
+
+    def test_relationship_event_evidence_grades_and_parser_reject_scoring(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        client = LlmClient()
+        self.assertEqual(client._parse_relationship_events_json("[{broken json}]"), [])
+        structured = client._parse_relationship_events_json(
+            """
+            {
+              "events": [{
+                "event_type": "trust_signal",
+                "evidence_grade": "explicit",
+                "evidence_text": "鎴戜俊浠讳綘"
+              }]
+            }
+            """
+        )
+        self.assertEqual(structured[0]["event_type"], "trust_signal")
+        parsed = client._parse_relationship_events_json(
+            """
+            [
+              {
+                "event_type": "trust_signal",
+                "evidence_grade": "explicit",
+                "evidence_text": "我信你"
+              },
+              {
+                "event_type": "shared_context",
+                "evidence_grade": "strong",
+                "evidence_text": "还是去湖边走走",
+                "confidence": 0.95
+              },
+              {
+                "event_type": "shared_context",
+                "evidence_grade": "contextual",
+                "evidence_text": "刚才那个约定"
+              }
+            ]
+            """
+        )
+        self.assertEqual([item["event_type"] for item in parsed], ["trust_signal", "shared_context"])
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = CharacterBondService(storage)
+            previous = service.ensure_bond(visitor_id, card.id, card)
+            next_bond, diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-2"],
+                character=card,
+                previous=previous,
+                extracted=parsed,
+                evidence_context="我信你。刚才那个约定我们再看看。",
+            )
+            self.assertAlmostEqual(next_bond["trust_level"], previous["trust_level"] + 0.04)
+            self.assertEqual(diagnostics["accepted_events_count"], 1)
+            self.assertEqual(diagnostics["rejected_event_reasons"]["grade_contextual"], 1)
+
+    def test_relationship_event_extraction_uses_structured_json_contract(self) -> None:
+        class StructuredRelationshipLlm(LlmClient):
+            response_format = None
+            temperature = None
+            system_messages: list[str] = []
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None, temperature=None):
+                self.response_format = response_format
+                self.temperature = temperature
+                self.system_messages = [
+                    str(item.get("content") or "")
+                    for item in messages
+                    if item.get("role") == "system"
+                ]
+                return json.dumps({
+                    "events": [{
+                        "event_type": "trust_signal",
+                        "evidence_grade": "explicit",
+                        "evidence_text": "鎴戜俊浠讳綘",
+                    }],
+                }, ensure_ascii=False)
+
+        llm = StructuredRelationshipLlm()
+        llm.provider = {
+            "name": "fake",
+            "api_key": "fake",
+            "base_url": "http://fake.local/v1",
+            "model": "fake-model",
+            "timeout_ms": 1000,
+        }
+        card = CharacterStore().get("lin_wanzhi")
+        extracted = self.run_async(llm.extract_relationship_events(
+            card,
+            {},
+            {},
+            [],
+            "鎴戜俊浠讳綘銆?",
+            "鎴戜細璁ょ湡鍥炲簲銆?",
+            [],
+        ))
+
+        self.assertEqual(extracted[0]["event_type"], "trust_signal")
+        self.assertEqual(llm.response_format, {"type": "json_object"})
+        self.assertEqual(llm.temperature, 0.2)
+        self.assertTrue(any("Structured output contract" in item for item in llm.system_messages))
+        combined_prompt = "\n".join(llm.system_messages)
+        self.assertIn("exact contiguous substring", combined_prompt)
+        self.assertIn("用户表示", combined_prompt)
+        self.assertIn("Do not summarize", combined_prompt)
+
+    def test_character_bond_stage_freeze_and_repair(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = CharacterBondService(storage)
+            previous = service.normalize_bond({
+                "stage_code": "familiar",
+                "trust_level": 0.56,
+                "closeness_level": 0.38,
+                "boundary_safety": 0.67,
+            }, card)
+            frozen_bond, frozen_diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-3"],
+                character=card,
+                previous=previous,
+                extracted=[
+                    {
+                        "event_type": "boundary_violation",
+                        "evidence_grade": "explicit",
+                        "evidence_text": "你刚才越界了",
+                    }
+                ],
+                evidence_context="你刚才越界了。",
+            )
+            self.assertEqual(frozen_bond["stage_code"], "familiar")
+            self.assertEqual(frozen_bond["condition_code"], "strained")
+            self.assertTrue(frozen_diagnostics["progression_frozen"])
+            repaired_bond, repaired_diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-4"],
+                character=card,
+                previous=frozen_bond,
+                extracted=[
+                    {
+                        "event_type": "repair",
+                        "evidence_grade": "explicit",
+                        "evidence_text": "这样解释我能接受",
+                    },
+                    {
+                        "event_type": "trust_signal",
+                        "evidence_grade": "explicit",
+                        "evidence_text": "我还是愿意信你",
+                    },
+                ],
+                evidence_context="这样解释我能接受，我还是愿意信你。",
+            )
+            self.assertEqual(repaired_bond["stage_code"], "trusted")
+            self.assertEqual(repaired_bond["condition_code"], "repairing")
+            self.assertFalse(repaired_diagnostics["progression_frozen"])
+
+    def test_character_bond_stage_thresholds_and_turn_caps(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            service = CharacterBondService(Storage(Path(tmp) / "test.db"))
+            accepted = [
+                {
+                    "event_type": "shared_context",
+                    "evidence_grade": "explicit",
+                    "evidence_text": "我们上次也聊过这里",
+                    "source_message_ids": ["message-a"],
+                    "accepted": True,
+                },
+                {
+                    "event_type": "emotional_disclosure",
+                    "evidence_grade": "strong",
+                    "evidence_text": "这件事让我有点难受",
+                    "source_message_ids": ["message-a"],
+                    "accepted": True,
+                },
+            ]
+            familiar_bond, _, _ = service.apply_events(
+                service.normalize_bond({
+                    "stage_code": "initial",
+                    "trust_level": 0.37,
+                    "closeness_level": 0.25,
+                    "boundary_safety": 0.60,
+                }, card),
+                accepted,
+                [],
+                service._reduce_delta(accepted),
+                card,
+            )
+            self.assertEqual(familiar_bond["stage_code"], "familiar")
+
+            close_events = [
+                {
+                    "event_type": "boundary_respected",
+                    "evidence_grade": "explicit",
+                    "evidence_text": "你这样停一下我会舒服很多",
+                    "source_message_ids": ["message-c"],
+                    "accepted": True,
+                },
+                {
+                    "event_type": "shared_context",
+                    "evidence_grade": "strong",
+                    "evidence_text": "那就按我们的老约定来",
+                    "source_message_ids": ["message-c"],
+                    "accepted": True,
+                },
+            ]
+            close_bond, _, _ = service.apply_events(
+                service.normalize_bond({
+                    "stage_code": "trusted",
+                    "trust_level": 0.67,
+                    "closeness_level": 0.59,
+                    "boundary_safety": 0.67,
+                }, card),
+                close_events,
+                [
+                    {
+                        "event_type": "trust_signal",
+                        "source_message_ids": ["message-a"],
+                        "accepted": True,
+                    },
+                    {
+                        "event_type": "emotional_disclosure",
+                        "source_message_ids": ["message-b"],
+                        "accepted": True,
+                    },
+                ],
+                service._reduce_delta(close_events),
+                card,
+            )
+            self.assertEqual(close_bond["stage_code"], "close")
+
+            cap_delta = service._reduce_delta([
+                {"event_type": "emotional_disclosure"},
+                {"event_type": "emotional_disclosure"},
+                {"event_type": "trust_signal"},
+            ])
+            self.assertEqual(cap_delta["trust_level"], 0.05)
+            self.assertEqual(cap_delta["closeness_level"], 0.05)
+
+    def test_character_bond_prefers_one_event_for_duplicate_evidence(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = CharacterBondService(storage)
+            previous = service.ensure_bond(visitor_id, card.id, card)
+            next_bond, diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-5"],
+                character=card,
+                previous=previous,
+                extracted=[
+                    {
+                        "event_type": "negative_feedback",
+                        "evidence_grade": "explicit",
+                        "evidence_text": "你刚才一直追问让我不舒服，你越界了。",
+                    },
+                    {
+                        "event_type": "boundary_violation",
+                        "evidence_grade": "explicit",
+                        "evidence_text": "你刚才一直追问让我不舒服，你越界了。",
+                    },
+                ],
+                evidence_context="你刚才一直追问让我不舒服，你越界了。",
+            )
+            self.assertEqual(diagnostics["accepted_events_count"], 1)
+            self.assertEqual(diagnostics["rejected_event_reasons"]["duplicate_evidence"], 1)
+            self.assertAlmostEqual(next_bond["trust_level"], previous["trust_level"] - 0.05)
+            self.assertAlmostEqual(next_bond["boundary_safety"], previous["boundary_safety"] - 0.08)
+            self.assertEqual(next_bond["condition_code"], "strained")
+
+    def test_character_bond_negative_feedback_is_guarded_without_stage_drop(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = CharacterBondService(storage)
+            previous = service.normalize_bond({
+                "stage_code": "trusted",
+                "condition_code": "warming",
+                "trust_level": 0.58,
+                "closeness_level": 0.45,
+                "boundary_safety": 0.66,
+            }, card)
+            next_bond, diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-6"],
+                character=card,
+                previous=previous,
+                extracted=[
+                    {
+                        "event_type": "negative_feedback",
+                        "evidence_grade": "explicit",
+                        "evidence_text": "你这样追问让我想退开一点。",
+                    }
+                ],
+                evidence_context="你这样追问让我想退开一点。",
+            )
+            self.assertEqual(next_bond["stage_code"], "trusted")
+            self.assertEqual(next_bond["condition_code"], "guarded")
+            self.assertEqual(next_bond["relationship_condition"], "有保留")
+            self.assertTrue(diagnostics["condition_changed"])
+            self.assertTrue(diagnostics["progression_frozen"])
+
+    def test_character_bond_condition_settles_after_stable_turns(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = CharacterBondService(storage)
+            warming = service.normalize_bond({"condition_code": "warming"}, card)
+            first_warming, first_warming_diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-7"],
+                character=card,
+                previous=warming,
+                extracted=[],
+                evidence_context="plain continuation",
+            )
+            self.assertEqual(first_warming["condition_code"], "warming")
+            self.assertEqual(first_warming["condition_settle_turns"], 1)
+            self.assertFalse(first_warming_diagnostics["condition_changed"])
+            self.assertEqual(service.get_bond(visitor_id, card.id, card)["condition_settle_turns"], 1)
+            second_warming, second_warming_diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-8"],
+                character=card,
+                previous=first_warming,
+                extracted=[],
+                evidence_context="another plain continuation",
+            )
+            self.assertEqual(second_warming["condition_code"], "steady")
+            self.assertEqual(second_warming["condition_settle_turns"], 0)
+            self.assertTrue(second_warming_diagnostics["condition_changed"])
+
+            repairing = service.normalize_bond({"condition_code": "repairing"}, card)
+            repair_followup = [
+                {
+                    "event_type": "trust_signal",
+                    "evidence_grade": "explicit",
+                    "evidence_text": "I still trust you.",
+                    "source_message_ids": ["message-9"],
+                    "accepted": True,
+                }
+            ]
+            first_repairing, _, _ = service.apply_events(
+                repairing,
+                repair_followup,
+                [],
+                service._reduce_delta(repair_followup),
+                card,
+            )
+            self.assertEqual(first_repairing["condition_code"], "repairing")
+            self.assertEqual(first_repairing["condition_settle_turns"], 1)
+            second_repairing, _, _ = service.apply_events(
+                first_repairing,
+                [],
+                [],
+                service._reduce_delta([]),
+                card,
+            )
+            self.assertEqual(second_repairing["condition_code"], "steady")
+            self.assertEqual(second_repairing["condition_settle_turns"], 0)
+
+    def test_character_bond_rejects_weak_boundary_and_assistant_only_positive_evidence(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = CharacterBondService(storage)
+            previous = service.ensure_bond(visitor_id, card.id, card)
+            _, weak_boundary_diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-10"],
+                character=card,
+                previous=previous,
+                extracted=[
+                    {
+                        "event_type": "boundary_respected",
+                        "evidence_grade": "explicit",
+                        "evidence_text": "Let's talk about today's plan.",
+                    }
+                ],
+                evidence_context="Let's talk about today's plan.",
+            )
+            self.assertEqual(weak_boundary_diagnostics["accepted_events_count"], 0)
+            self.assertEqual(weak_boundary_diagnostics["rejected_event_reasons"]["boundary_without_signal"], 1)
+
+            user_only_context = service._evidence_context(
+                [{"role": "assistant", "content": "We have a shared pact."}],
+                "Okay.",
+                "We have a shared pact.",
+            )
+            _, assistant_only_diagnostics = service.update_from_events(
+                visitor_id=visitor_id,
+                session_id=session_id,
+                source_message_ids=["message-11"],
+                character=card,
+                previous=previous,
+                extracted=[
+                    {
+                        "event_type": "shared_context",
+                        "evidence_grade": "strong",
+                        "evidence_text": "We have a shared pact.",
+                    }
+                ],
+                evidence_context=user_only_context,
+            )
+            self.assertEqual(assistant_only_diagnostics["accepted_events_count"], 0)
+            self.assertEqual(assistant_only_diagnostics["rejected_event_reasons"]["evidence_not_in_context"], 1)
+
+    def test_relationship_event_calibration_cases(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        fixture_path = Path(__file__).parent / "fixtures" / "relationship_event_cases.json"
+        cases = json.loads(fixture_path.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = CharacterBondService(storage)
+            for index, case in enumerate(cases):
+                with self.subTest(case=case["name"]):
+                    visitor_id, _ = storage.resolve_visitor(f"calibration-{index}")
+                    session_id = storage.create_or_get_session(visitor_id, card.id)
+                    previous = service.ensure_bond(visitor_id, card.id, card)
+                    next_bond, diagnostics = service.update_from_events(
+                        visitor_id=visitor_id,
+                        session_id=session_id,
+                        source_message_ids=[f"calibration-message-{index}"],
+                        character=card,
+                        previous=previous,
+                        extracted=case["extracted"],
+                        evidence_context=case["evidence_context"],
+                    )
+                    self.assertEqual(
+                        [event["event_type"] for event in diagnostics["accepted_events"]],
+                        case["accepted_event_types"],
+                    )
+                    self.assertEqual(diagnostics["rejected_event_reasons"], case["rejected_reasons"])
+                    self.assertEqual(next_bond["condition_code"], case["condition_code"])
+                    self.assertEqual(len(diagnostics["extracted_events"]), len(case["extracted"]))
+                    self.assertTrue(all("evidence_text" in item for item in diagnostics["extracted_events"]))
 
     def test_turn_analysis_prompt_and_parser_merge_postprocessing(self) -> None:
         client = LlmClient()
@@ -438,16 +1071,11 @@ class CampusLiteCoreTest(unittest.TestCase):
                 },
                 "evidence": "用户在讨论实现规则。"
               },
-              "bond": {
-                "should_update": true,
-                "familiarity_stage": "逐渐熟悉",
-                "resonance_base_delta": 0.02,
-                "trust_notes": "用户认可解释时给行为依据。",
-                "boundary_notes": "不要只给分数。",
-                "interaction_preferences": "解释规则要说明行为表现。",
-                "milestone": "用户明确偏好行为映射。",
-                "evidence": "用户表达了长期互动偏好。"
-              },
+              "bond": [{
+                "event_type": "preference_confirmed",
+                "evidence_grade": "explicit",
+                "evidence_text": "解释规则要说明行为表现"
+              }],
               "memories": [
                 {
                   "memory_type": "user_preference",
@@ -460,7 +1088,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             """
         )
         self.assertIsNotNone(parsed["state"])
-        self.assertIsNotNone(parsed["bond"])
+        self.assertEqual(parsed["bond"][0]["event_type"], "preference_confirmed")
         self.assertEqual(len(parsed["memories"]), 1)
         self.assertEqual(parsed["memories"][0]["memory_type"], "user_preference")
 

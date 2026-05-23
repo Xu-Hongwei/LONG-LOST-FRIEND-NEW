@@ -166,7 +166,15 @@ class RelationshipPostprocessService:
 
             bond_started = time.perf_counter()
             set_stage("bond", {"status": "running", "started_at": utc_timestamp()})
-            scored_bond = await self.llm.score_character_bond(card, previous_bond, previous_state, recent, user_text, reply, recalled)
+            extracted_events = await self.llm.extract_relationship_events(
+                card,
+                previous_bond,
+                previous_state,
+                recent,
+                user_text,
+                reply,
+                recalled,
+            )
             bond_error = self.llm.last_chat_error
             if bond_error:
                 set_stage(
@@ -180,14 +188,23 @@ class RelationshipPostprocessService:
                 )
                 logger.warning("bond analysis failed for session %s: %s", session_id, bond_error)
             else:
-                self.character_bond.update_from_score(visitor_id, card, previous_bond, scored_bond)
+                _, bond_diagnostics = self.character_bond.update_from_events(
+                    visitor_id=visitor_id,
+                    session_id=session_id,
+                    source_message_ids=[user_message_id],
+                    character=card,
+                    previous=previous_bond,
+                    extracted=extracted_events,
+                    evidence_context=self.character_bond._evidence_context(recent, user_text, reply),
+                )
                 set_stage(
                     "bond",
                     {
                         "status": "succeeded",
                         "finished_at": utc_timestamp(),
                         "duration_ms": elapsed_ms(bond_started),
-                        "updated": bool(scored_bond and scored_bond.get("should_update")),
+                        "updated": bool(bond_diagnostics["accepted_events_count"]),
+                        **bond_diagnostics,
                     },
                 )
 

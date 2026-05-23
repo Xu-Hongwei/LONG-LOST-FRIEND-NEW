@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 from .schemas import CharacterCard, ContextSlot, MemoryItem
 
 
 MAX_CONTEXT_BUDGET = 3200
+LOCAL_TZ = timezone(timedelta(hours=8))
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,7 @@ class ComposeInput:
     manual_note: str = ""
     live_state: str = ""
     relationship_memory: str = ""
+    time_awareness: str = ""
 
 
 class ContextComposer:
@@ -44,6 +47,7 @@ class ContextComposer:
             self._slot("chat.recent_messages", self._recent_messages(request.recent_messages), 78),
             self._slot("user.current_message", request.user_message, 96, role="user"),
             self._slot("response.rules", self._response_rules(), 99),
+            self._slot("session.time_awareness", request.time_awareness, 93),
         ]
         included = [slot for slot in slots if slot.content.strip()]
         return self._apply_budget(included)
@@ -198,10 +202,62 @@ class ContextComposer:
         if not memories:
             return "本轮没有召回到可靠记忆，不要为了显得记得而编造旧事。"
         lines = [
-            f"- [{item.memory_scope}/{item.memory_type}/重要度{item.importance:.1f}] {item.content}"
+            f"- [{item.memory_scope}/{item.memory_type}/{self._memory_time_label(item)}/重要度{item.importance:.1f}] {item.content}"
             for item in memories[:8]
         ]
-        return "本轮可用记忆：\n" + "\n".join(lines)
+        return (
+            "本轮可用记忆：\n"
+            + "\n".join(lines)
+            + "\n使用：只有当记忆与当前话题相关时才自然提起；"
+            "可以说“你昨天提过”或“上次你说过”，不要机械复述时间戳。"
+        )
+
+    def _memory_time_label(self, item: MemoryItem, now: datetime | None = None) -> str:
+        parsed = self._parse_timestamp(item.source_created_at or item.created_at)
+        if not parsed:
+            return "较早前提到"
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        seconds = max(0.0, (current - parsed).total_seconds())
+        minutes = int(seconds // 60)
+        if minutes < 30:
+            return "刚才提到"
+        current_local = current.astimezone(LOCAL_TZ)
+        parsed_local = parsed.astimezone(LOCAL_TZ)
+        days = max(0, (current_local.date() - parsed_local.date()).days)
+        if days == 0:
+            return "今天早些时候提到"
+        if days == 1:
+            return "昨天提到"
+        if days < 7:
+            return f"{days}天前提到"
+        if days < 14:
+            return "上周提到"
+        if days < 60:
+            weeks = max(2, int(round(days / 7)))
+            return f"{weeks}周前提到"
+        if days < 365:
+            months = max(2, int(round(days / 30)))
+            return f"{months}个月前提到"
+        return "较早前提到"
+
+    def _parse_timestamp(self, value: str | None) -> datetime | None:
+        text = (value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            try:
+                parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _recent_messages(self, messages: list[dict[str, str]]) -> str:
         if not messages:

@@ -11,12 +11,13 @@ class LlmChatMixin:
         messages: list[dict[str, str]],
         timeout_ms: int | None = None,
         response_format: dict[str, Any] | None = None,
+        temperature: float | None = None,
     ) -> str:
         if not self.provider:
             raise RuntimeError("No remote LLM provider configured")
         body = {
             "model": self.provider["model"],
-            "temperature": 0.82,
+            "temperature": 0.82 if temperature is None else temperature,
             "messages": messages,
         }
         if response_format:

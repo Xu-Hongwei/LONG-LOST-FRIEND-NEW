@@ -56,16 +56,51 @@ class LlmParsingMixin:
             return None
         return raw
 
-    def _parse_bond_json(self, text: str) -> dict[str, Any] | None:
-        match = re.search(r"\{[\s\S]*\}", text)
-        if not match:
-            return None
-        raw = json.loads(match.group(0))
-        if not isinstance(raw, dict):
-            return None
-        if "should_update" not in raw or "evidence" not in raw:
-            return None
-        return raw
+    def _parse_relationship_events_json(self, text: str) -> list[dict[str, Any]]:
+        raw: Any = None
+        try:
+            raw = json.loads(text.strip())
+        except json.JSONDecodeError:
+            object_match = re.search(r"\{[\s\S]*\}", text)
+            array_match = re.search(r"\[[\s\S]*\]", text)
+            match = object_match or array_match
+            if not match:
+                return []
+            try:
+                raw = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return []
+        if isinstance(raw, dict):
+            raw = raw.get("events")
+        if not isinstance(raw, list):
+            return []
+        allowed_types = {
+            "shared_context",
+            "preference_confirmed",
+            "trust_signal",
+            "emotional_disclosure",
+            "boundary_respected",
+            "negative_feedback",
+            "boundary_violation",
+            "repair",
+        }
+        allowed_grades = {"explicit", "strong", "contextual", "weak"}
+        forbidden = {"score", "delta", "confidence", "stage", "familiarity_stage", "resonance"}
+        cleaned: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict) or forbidden.intersection(item):
+                continue
+            event_type = str(item.get("event_type") or "").strip()
+            evidence_grade = str(item.get("evidence_grade") or "").strip()
+            evidence_text = str(item.get("evidence_text") or "").strip()
+            if event_type not in allowed_types or evidence_grade not in allowed_grades or not evidence_text:
+                continue
+            cleaned.append({
+                "event_type": event_type,
+                "evidence_grade": evidence_grade,
+                "evidence_text": evidence_text[:420],
+            })
+        return cleaned[:8]
 
     def _parse_turn_analysis_json(self, text: str) -> dict[str, Any]:
         match = re.search(r"\{[\s\S]*\}", text)
@@ -79,7 +114,7 @@ class LlmParsingMixin:
         memories = self._clean_memory_items(raw.get("memories") or [])
         return {
             "state": state if self._valid_state_payload(state) else None,
-            "bond": bond if self._valid_bond_payload(bond) else None,
+            "bond": self._clean_relationship_events(bond),
             "memories": memories,
         }
 
@@ -89,5 +124,7 @@ class LlmParsingMixin:
         required = {"mood", "tone", "distance", "focus", "energy", "resonance_delta", "behavior", "evidence"}
         return required.issubset(value.keys()) and isinstance(value.get("behavior"), dict)
 
-    def _valid_bond_payload(self, value: Any) -> bool:
-        return isinstance(value, dict) and "should_update" in value and "evidence" in value
+    def _clean_relationship_events(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, (list, dict)):
+            return []
+        return self._parse_relationship_events_json(json.dumps(value, ensure_ascii=False))

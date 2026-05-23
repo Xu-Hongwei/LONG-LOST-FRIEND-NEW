@@ -19,6 +19,7 @@ class MemoryService:
         self.storage = storage
 
     def row_to_memory(self, row: Any) -> MemoryItem:
+        keys = set(row.keys()) if hasattr(row, "keys") else set()
         return MemoryItem(
             id=row["id"],
             memory_type=row["memory_type"],
@@ -27,6 +28,7 @@ class MemoryService:
             confidence=float(row["confidence"] or 0),
             importance=float(row["importance"] or 0.5),
             source_message_id=row["source_message_id"],
+            source_created_at=row["source_created_at"] if "source_created_at" in keys else row["created_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

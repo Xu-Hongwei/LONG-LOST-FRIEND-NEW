@@ -73,6 +73,8 @@ export function useRelationshipMemory(
           ? String(stage.error_type)
           : stage.reason
             ? String(stage.reason)
+            : key === "bond" && stage.status === "succeeded"
+              ? `${Number(stage.accepted_events_count || 0)}/${Number(stage.extracted_events_count || 0)} events${stage.stage_changed ? " / stage changed" : ""}${stage.condition_changed ? " / condition changed" : ""}${stage.progression_frozen ? " / frozen" : ""}`
             : key === "memory" && stage.status === "succeeded"
               ? `${Number(stage.stored_count || 0)} saved`
               : stage.updated !== undefined

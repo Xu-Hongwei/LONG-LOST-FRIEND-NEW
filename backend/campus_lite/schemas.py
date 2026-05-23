@@ -298,6 +298,7 @@ class MemoryItem(BaseModel):
     confidence: float = 0.0
     importance: float = 0.5
     source_message_id: str | None = None
+    source_created_at: str | None = None
     created_at: str
     updated_at: str
 

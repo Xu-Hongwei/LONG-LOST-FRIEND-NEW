@@ -22,6 +22,7 @@ from ..relationship.bond import CharacterBondService
 from ..relationship.memory import MemoryService
 from ..relationship.postprocess import RelationshipPostprocessService
 from ..relationship.state import CharacterStateService
+from .time_awareness import build_time_awareness
 
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,9 @@ class ChatService:
         if not user_text:
             raise HTTPException(status_code=400, detail="Message is empty")
 
+        previous_messages = self.storage.session_messages(payload.session_id, 1)
+        last_message_at = previous_messages[-1]["created_at"] if previous_messages else ""
+        time_awareness = build_time_awareness(last_message_at)
         user_message_id = self.storage.add_message(payload.session_id, payload.visitor_id, card.id, "user", user_text)
         after_user_ms = int((time.perf_counter() - started) * 1000)
 
@@ -135,6 +139,7 @@ class ChatService:
             manual_note=session["manual_note"] if session else "",
             live_state=self.character_state.state_to_prompt(current_state),
             relationship_memory=self.character_bond.bond_to_prompt(current_bond),
+            time_awareness=time_awareness,
         )
         slots = self.composer.compose(compose_input)
         self.storage.set_prompt_slots(payload.session_id, [slot.model_dump() for slot in slots])

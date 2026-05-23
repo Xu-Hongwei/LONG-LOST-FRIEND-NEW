@@ -7,6 +7,9 @@ import uuid
 
 
 class MemoryStorageMixin:
+    def _memory_select_with_source_time(self, prefix: str = "memories.*") -> str:
+        return f"{prefix}, COALESCE(source_messages.created_at, memories.created_at) AS source_created_at"
+
     def _normalize_memory_key(self, text: str) -> str:
         compact = re.sub(r"[^\w\u4e00-\u9fff]+", "", (text or "").lower())
         return compact[:160] or uuid.uuid4().hex
@@ -134,13 +137,15 @@ class MemoryStorageMixin:
         with self.connect() as conn:
             return conn.execute(
                 f"""
-                SELECT memories.*, embeddings.vector_json
+                SELECT {self._memory_select_with_source_time("memories.*")}, embeddings.vector_json
                 FROM memories
                 JOIN embeddings
                   ON embeddings.owner_type = 'memory'
                  AND embeddings.owner_id = memories.id
                  AND embeddings.provider = ?
-                WHERE {self._memory_scope_where()}
+                LEFT JOIN messages AS source_messages
+                  ON source_messages.id = memories.source_message_id
+                WHERE {self._memory_scope_where("memories")}
                 ORDER BY memories.importance DESC, memories.confidence DESC, memories.updated_at DESC
                 LIMIT ?
                 """,
@@ -250,13 +255,14 @@ class MemoryStorageMixin:
             (session_id, memory_type, normalized_key, content),
         ).fetchone()
 
-    def _memory_scope_where(self) -> str:
-        return """
-            visitor_id = ? AND (
-                memory_scope = 'global'
-                OR (memory_scope = 'character' AND character_id = ?)
-                OR (memory_scope = 'session' AND session_id = ?)
-                OR (memory_scope = '' AND session_id = ?)
+    def _memory_scope_where(self, table: str = "") -> str:
+        prefix = f"{table}." if table else ""
+        return f"""
+            {prefix}visitor_id = ? AND (
+                {prefix}memory_scope = 'global'
+                OR ({prefix}memory_scope = 'character' AND {prefix}character_id = ?)
+                OR ({prefix}memory_scope = 'session' AND {prefix}session_id = ?)
+                OR ({prefix}memory_scope = '' AND {prefix}session_id = ?)
             )
         """
 
@@ -264,8 +270,11 @@ class MemoryStorageMixin:
         with self.connect() as conn:
             return conn.execute(
                 f"""
-                SELECT * FROM memories
-                WHERE {self._memory_scope_where()}
+                SELECT {self._memory_select_with_source_time("memories.*")}
+                FROM memories
+                LEFT JOIN messages AS source_messages
+                  ON source_messages.id = memories.source_message_id
+                WHERE {self._memory_scope_where("memories")}
                 ORDER BY
                     CASE memory_scope
                         WHEN 'global' THEN 0
@@ -291,8 +300,11 @@ class MemoryStorageMixin:
         with self.connect() as conn:
             return conn.execute(
                 f"""
-                SELECT * FROM memories
-                WHERE {self._memory_scope_where()}
+                SELECT {self._memory_select_with_source_time("memories.*")}
+                FROM memories
+                LEFT JOIN messages AS source_messages
+                  ON source_messages.id = memories.source_message_id
+                WHERE {self._memory_scope_where("memories")}
                   AND memory_type IN ('stable_user_info', 'user_preference', 'relationship_progress')
                 ORDER BY
                     CASE memory_scope
@@ -316,8 +328,11 @@ class MemoryStorageMixin:
                 try:
                     rows = conn.execute(
                         f"""
-                        SELECT memories.* FROM memory_fts
+                        SELECT {self._memory_select_with_source_time("memories.*")}
+                        FROM memory_fts
                         JOIN memories ON memories.id = memory_fts.memory_id
+                        LEFT JOIN messages AS source_messages
+                          ON source_messages.id = memories.source_message_id
                         WHERE memory_fts MATCH ?
                           AND memories.visitor_id = ? AND (
                             memories.memory_scope = 'global'
@@ -336,8 +351,11 @@ class MemoryStorageMixin:
                     pass
             candidates = conn.execute(
                 f"""
-                SELECT * FROM memories
-                WHERE {self._memory_scope_where()}
+                SELECT {self._memory_select_with_source_time("memories.*")}
+                FROM memories
+                LEFT JOIN messages AS source_messages
+                  ON source_messages.id = memories.source_message_id
+                WHERE {self._memory_scope_where("memories")}
                 ORDER BY importance DESC, confidence DESC, updated_at DESC
                 """,
                 (visitor_id, character_id, session_id, session_id),

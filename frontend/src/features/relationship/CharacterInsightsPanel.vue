@@ -83,7 +83,7 @@ const bondExpanded = defineModel<boolean>("bondExpanded", { required: true });
     <div class="section-title">
       <div>
         <p class="eyebrow">Bond</p>
-        <h3>{{ characterBond?.familiarity_stage || "No bond" }}</h3>
+        <h3>{{ characterBond ? `${characterBond.familiarity_stage} · ${characterBond.relationship_condition}` : "No bond" }}</h3>
       </div>
       <button class="ghost muted" @click="bondExpanded = !bondExpanded">
         {{ bondExpanded ? "Hide" : "Detail" }}
@@ -102,6 +102,18 @@ const bondExpanded = defineModel<boolean>("bondExpanded", { required: true });
         </span>
       </button>
       <dl v-if="bondExpanded" class="bond-detail">
+        <div>
+          <dt>Condition</dt>
+          <dd>{{ characterBond.relationship_condition }}</dd>
+        </div>
+        <div>
+          <dt>Dimensions</dt>
+          <dd>
+            Trust {{ Math.round(characterBond.trust_level * 100) }}% /
+            Closeness {{ Math.round(characterBond.closeness_level * 100) }}% /
+            Boundary {{ Math.round(characterBond.boundary_safety * 100) }}%
+          </dd>
+        </div>
         <div>
           <dt>Trust</dt>
           <dd>{{ characterBond.trust_notes }}</dd>

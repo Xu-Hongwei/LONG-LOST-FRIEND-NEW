@@ -1,0 +1,129 @@
+[
+  {
+    "name": "ordinary_greeting",
+    "evidence_context": "Okay, let us talk later.",
+    "extracted": [],
+    "accepted_event_types": [],
+    "rejected_reasons": {},
+    "condition_code": "steady"
+  },
+  {
+    "name": "technical_question",
+    "evidence_context": "How does the timeout rule work in the service?",
+    "extracted": [],
+    "accepted_event_types": [],
+    "rejected_reasons": {},
+    "condition_code": "steady"
+  },
+  {
+    "name": "explicit_preference",
+    "evidence_context": "When you explain rules, give me the evidence before the conclusion.",
+    "extracted": [
+      {
+        "event_type": "preference_confirmed",
+        "evidence_grade": "explicit",
+        "evidence_text": "When you explain rules, give me the evidence before the conclusion."
+      }
+    ],
+    "accepted_event_types": ["preference_confirmed"],
+    "rejected_reasons": {},
+    "condition_code": "warming"
+  },
+  {
+    "name": "explicit_trust",
+    "evidence_context": "I trust you to answer carefully.",
+    "extracted": [
+      {
+        "event_type": "trust_signal",
+        "evidence_grade": "explicit",
+        "evidence_text": "I trust you to answer carefully."
+      }
+    ],
+    "accepted_event_types": ["trust_signal"],
+    "rejected_reasons": {},
+    "condition_code": "warming"
+  },
+  {
+    "name": "topic_switch_is_not_boundary_respect",
+    "evidence_context": "Let us talk about today's plan instead.",
+    "extracted": [
+      {
+        "event_type": "boundary_respected",
+        "evidence_grade": "explicit",
+        "evidence_text": "Let us talk about today's plan instead."
+      }
+    ],
+    "accepted_event_types": [],
+    "rejected_reasons": {
+      "boundary_without_signal": 1
+    },
+    "condition_code": "steady"
+  },
+  {
+    "name": "assistant_only_shared_context",
+    "evidence_context": "Okay.",
+    "extracted": [
+      {
+        "event_type": "shared_context",
+        "evidence_grade": "strong",
+        "evidence_text": "We still have our shared pact."
+      }
+    ],
+    "accepted_event_types": [],
+    "rejected_reasons": {
+      "evidence_not_in_context": 1
+    },
+    "condition_code": "steady"
+  },
+  {
+    "name": "atmosphere_only_is_weak",
+    "evidence_context": "This feels a little warm tonight.",
+    "extracted": [
+      {
+        "event_type": "emotional_disclosure",
+        "evidence_grade": "weak",
+        "evidence_text": "This feels a little warm tonight."
+      }
+    ],
+    "accepted_event_types": [],
+    "rejected_reasons": {
+      "grade_weak": 1
+    },
+    "condition_code": "steady"
+  },
+  {
+    "name": "explicit_boundary_violation",
+    "evidence_context": "You crossed my boundary just now and that made me uncomfortable.",
+    "extracted": [
+      {
+        "event_type": "negative_feedback",
+        "evidence_grade": "explicit",
+        "evidence_text": "You crossed my boundary just now and that made me uncomfortable."
+      },
+      {
+        "event_type": "boundary_violation",
+        "evidence_grade": "explicit",
+        "evidence_text": "You crossed my boundary just now and that made me uncomfortable."
+      }
+    ],
+    "accepted_event_types": ["boundary_violation"],
+    "rejected_reasons": {
+      "duplicate_evidence": 1
+    },
+    "condition_code": "strained"
+  },
+  {
+    "name": "explicit_repair",
+    "evidence_context": "I can accept that adjustment, and we can continue slowly.",
+    "extracted": [
+      {
+        "event_type": "repair",
+        "evidence_grade": "explicit",
+        "evidence_text": "I can accept that adjustment, and we can continue slowly."
+      }
+    ],
+    "accepted_event_types": ["repair"],
+    "rejected_reasons": {},
+    "condition_code": "repairing"
+  }
+]

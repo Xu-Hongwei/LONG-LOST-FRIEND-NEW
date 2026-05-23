@@ -11,6 +11,26 @@ logger = logging.getLogger(__name__)
 
 RELATIONSHIP_STAGE_TIMEOUT_MS = 12_000
 BOND_STAGE_TIMEOUT_MS = 24_000
+RELATIONSHIP_EVENT_STRUCTURED_PROMPT = (
+    "Extract relationship events between the user and the current character from the provided chat context. "
+    "Return one JSON object only: {\"events\":[...]}. Use {\"events\":[]} only when no relationship event is present. "
+    "Each event may contain only event_type, evidence_grade, and evidence_text. "
+    "Allowed event_type values are shared_context, preference_confirmed, trust_signal, emotional_disclosure, "
+    "boundary_respected, negative_feedback, boundary_violation, and repair. "
+    "Allowed evidence_grade values are explicit, strong, contextual, and weak. "
+    "Evidence text must be an exact contiguous substring copied from the supplied user message whenever the evidence "
+    "comes from the user. Do not summarize, paraphrase, normalize, shorten, translate, or prefix it with phrases such "
+    "as 'the user said' or '用户表示'. If no exact user-message substring supports the event, return contextual/weak "
+    "or omit the event. "
+    "Never output relationship stages, scores, score deltas, resonance values, or free numeric confidence. "
+    "Use explicit when the user directly confirms trust, a boundary, a relationship-facing preference, "
+    "a concrete shared pact, a violation, or an accepted repair. "
+    "Use strong only for direct text evidence with very little inference. "
+    "Use contextual or weak for indirect hints. "
+    "Assistant-only reassurance, ordinary acknowledgements, topic switches, scheduling, and casual chat are not enough. "
+    "For overlapping evidence keep the single highest-priority event: boundary_violation before negative_feedback, "
+    "and repair before shared_context or trust_signal."
+)
 
 
 class LlmAnalysisMixin:
@@ -65,7 +85,7 @@ class LlmAnalysisMixin:
             logger.warning("character state scoring failed: %s", exc)
             return None
 
-    async def score_character_bond(
+    async def extract_relationship_events(
         self,
         character: CharacterCard,
         previous_bond: dict[str, Any],
@@ -93,14 +113,55 @@ class LlmAnalysisMixin:
         )
         try:
             text = await self.chat_complete([
-                {"role": "system", "content": self.character_bond_system_prompt()},
+                {"role": "system", "content": RELATIONSHIP_EVENT_STRUCTURED_PROMPT},
+                {
+                    "role": "system",
+                    "content": (
+                        'Structured output contract: return one JSON object only, shaped as {"events":[...]}. '
+                        'Use {"events":[]} when there is no relationship event. '
+                        "Each event may contain only event_type, evidence_grade, and evidence_text. "
+                        "The evidence_text must be copied exactly from the current user message as a contiguous "
+                        "substring. Do not output summaries like 'the user said ...' or '用户表示...'. "
+                        "Do not return an empty events array when the user explicitly says they trust this character, "
+                        "names a boundary violation, states a relationship-facing interaction preference, "
+                        "accepts a repair after harm, or names a concrete shared pact. "
+                        'Example trust output: {"events":[{"event_type":"trust_signal","evidence_grade":"explicit",'
+                        '"evidence_text":"I trust you to take what I say seriously."}]}. '
+                        'Example boundary output: {"events":[{"event_type":"boundary_violation","evidence_grade":"explicit",'
+                        '"evidence_text":"You crossed a line just now; do not keep questioning me like that."}]}.'
+                    ),
+                },
                 {"role": "user", "content": user},
-            ], timeout_ms=BOND_STAGE_TIMEOUT_MS)
-            return self._parse_bond_json(text)
+            ],
+                timeout_ms=BOND_STAGE_TIMEOUT_MS,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            return self._parse_relationship_events_json(text)
         except Exception as exc:
             self.last_chat_error = type(exc).__name__
-            logger.warning("character bond scoring failed: %s", exc)
-            return None
+            logger.warning("relationship event extraction failed: %s", exc)
+            return []
+
+    async def score_character_bond(
+        self,
+        character: CharacterCard,
+        previous_bond: dict[str, Any],
+        current_state: dict[str, Any],
+        recent_messages: list[dict[str, str]],
+        user_message: str,
+        assistant_reply: str,
+        recalled_memories: list[MemoryItem],
+    ) -> list[dict[str, Any]]:
+        return await self.extract_relationship_events(
+            character,
+            previous_bond,
+            current_state,
+            recent_messages,
+            user_message,
+            assistant_reply,
+            recalled_memories,
+        )
 
     async def analyze_turn(
         self,
