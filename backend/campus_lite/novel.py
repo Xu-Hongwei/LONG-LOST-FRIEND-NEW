@@ -19,6 +19,7 @@ from .features.novel.generation_postprocess import NovelGenerationPostprocessMix
 from .features.novel.generation_response import NovelGenerationResponseMixin
 from .features.novel.optimizer import NovelInstructionOptimizerMixin
 from .features.novel.project import NovelProjectMixin
+from .features.novel.project_draft import NovelProjectDraftMixin
 from .features.novel.quality import NovelQualityMixin
 from .features.novel.handoff import NovelHandoffMixin
 from .features.novel.serialization import NovelSerializationMixin
@@ -34,6 +35,7 @@ class NovelService(
     NovelCanvasDefaultMixin,
     NovelCanvasAccessMixin,
     NovelCanvasSyncMixin,
+    NovelProjectDraftMixin,
     NovelProjectMixin,
     NovelGenerationMixin,
     NovelGenerationPostprocessMixin,

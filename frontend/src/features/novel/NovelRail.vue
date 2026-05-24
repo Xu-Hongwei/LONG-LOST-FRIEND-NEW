@@ -19,8 +19,9 @@ defineProps<{
 
 defineEmits<{
   generateQuick: [];
-  createProject: [];
+  startProjectDraft: [];
   selectProject: [projectId: string];
+  deleteProject: [projectId: string];
   addChapter: [];
   selectChapter: [chapterId: string];
 }>();
@@ -80,19 +81,29 @@ const novelAtmosphere = defineModel<string>("novelAtmosphere", { required: true 
           <p class="eyebrow">Projects</p>
           <h3>长篇项目</h3>
         </div>
-        <button class="ghost muted" type="button" :disabled="novelProjectBusy || !sessionId" @click="$emit('createProject')">新建</button>
+        <button class="ghost muted" type="button" :disabled="novelProjectBusy || !sessionId" @click="$emit('startProjectDraft')">新建</button>
       </div>
       <div class="project-list">
-        <button
+        <article
           v-for="project in novelProjects"
           :key="project.id"
-          type="button"
+          class="project-list-item"
           :class="{ active: project.id === activeNovelProjectId }"
-          @click="$emit('selectProject', project.id)"
         >
-          <strong>{{ project.title }}</strong>
-          <span>{{ project.genre }} · {{ project.chapters.length }} 章</span>
-        </button>
+          <button type="button" class="project-select" @click="$emit('selectProject', project.id)">
+            <strong>{{ project.title }}</strong>
+            <span>{{ project.genre }} · {{ project.chapters.length }} 章</span>
+          </button>
+          <button
+            type="button"
+            class="project-delete ghost danger"
+            :disabled="novelProjectBusy"
+            title="删除长篇项目"
+            @click="$emit('deleteProject', project.id)"
+          >
+            删除
+          </button>
+        </article>
         <p v-if="!novelProjects.length" class="empty">还没有长篇项目。会从当前会话、记忆和剧情标签生成初始 Story Bible。</p>
       </div>
     </section>

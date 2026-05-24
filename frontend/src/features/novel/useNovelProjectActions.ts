@@ -1,12 +1,14 @@
-import type { ComputedRef, Ref } from "vue";
+import { ref, type ComputedRef, type Ref } from "vue";
 import {
   buildStoryCanvas,
   checkNovelContinuity,
   createNovelChapter,
   createNovelProject,
   deleteNovelChapter,
+  deleteNovelProject,
   deleteNovelVersion,
   extendStoryCanvas,
+  generateNovelProjectDraft,
   generateProjectChapter,
   getNovelProject,
   listNovelProjects,
@@ -40,6 +42,21 @@ type NovelStudioMode = "select" | "quick" | "project";
 
 function readableError(err: unknown) {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isOutlineListLine(line: string) {
+  return /^(\d+[\).、]|[-*•]|第[一二三四五六七八九十\d]+[章节幕阶段])\s*/.test(line.trim());
+}
+
+function normalizeDraftOutline(text: string) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length <= 1) return text.trim();
+  const listLikeCount = lines.filter(isOutlineListLine).length;
+  if (listLikeCount >= 2) return lines.join("\n");
+  return lines.join("").replace(/\s{2,}/g, " ").trim();
 }
 
 export function useNovelProjectActions(options: {
@@ -85,6 +102,8 @@ export function useNovelProjectActions(options: {
   chapterHasBackgroundPostprocess: (chapter: NovelChapter | null | undefined) => boolean;
   chapterPostprocessStatus: (chapter: NovelChapter | null | undefined) => string;
 }) {
+  const projectDraftGenerating = ref(false);
+  const projectDraftDiagnostics = ref<Record<string, unknown>>({});
   let novelGenerationRunId = 0;
 
   async function activeSceneToChapterDraft() {
@@ -184,6 +203,18 @@ export function useNovelProjectActions(options: {
     }
   }
 
+  function startProjectDraft() {
+    options.novelStudioMode.value = "project";
+    options.novelFocusMode.value = false;
+    options.activeNovelProjectId.value = "";
+    options.activeNovelChapterId.value = "";
+    options.continuityReport.value = null;
+    options.chapterVersions.value = [];
+    projectDraftDiagnostics.value = {};
+    options.syncProjectDraft(null);
+    options.syncChapterDraft(null);
+  }
+
   function selectNovelChapter(chapterId: string) {
     options.activeNovelChapterId.value = chapterId;
     options.continuityReport.value = null;
@@ -204,7 +235,7 @@ export function useNovelProjectActions(options: {
         protagonist: options.projectDraft.value.protagonist || options.activeCharacter.value?.name || "",
         worldview: options.projectDraft.value.worldview,
         relationship_setup: options.projectDraft.value.relationship_setup,
-        outline: options.projectDraft.value.outline,
+        outline: normalizeDraftOutline(options.projectDraft.value.outline),
         story_canvas: options.storyCanvasDraft.value
       });
       options.novelProjects.value = [project, ...options.novelProjects.value.filter((item) => item.id !== project.id)];
@@ -216,6 +247,38 @@ export function useNovelProjectActions(options: {
     }
   }
 
+  async function generateProjectDraft(prompt: string) {
+    const trimmed = prompt.trim();
+    if (!options.sessionId.value || !trimmed || options.novelProjectBusy.value || projectDraftGenerating.value) return;
+    projectDraftGenerating.value = true;
+    options.novelProjectBusy.value = true;
+    options.error.value = "";
+    projectDraftDiagnostics.value = {};
+    try {
+      const result = await generateNovelProjectDraft(options.sessionId.value, {
+        prompt: trimmed
+      });
+      options.projectDraft.value = {
+        ...options.projectDraft.value,
+        title: result.project.title || options.projectDraft.value.title,
+        genre: result.project.genre || options.projectDraft.value.genre,
+        tone: result.project.tone || options.projectDraft.value.tone,
+        protagonist: result.project.protagonist || options.projectDraft.value.protagonist,
+        worldview: result.project.worldview || options.projectDraft.value.worldview,
+        relationship_setup: result.project.relationship_setup || options.projectDraft.value.relationship_setup,
+        outline: result.project.outline
+          ? normalizeDraftOutline(result.project.outline)
+          : options.projectDraft.value.outline
+      };
+      projectDraftDiagnostics.value = result.diagnostics || {};
+    } catch (err) {
+      options.error.value = readableError(err);
+    } finally {
+      projectDraftGenerating.value = false;
+      options.novelProjectBusy.value = false;
+    }
+  }
+
   async function saveNovelProject() {
     if (!options.activeNovelProject.value || options.novelProjectBusy.value) return;
     options.novelProjectBusy.value = true;
@@ -223,10 +286,36 @@ export function useNovelProjectActions(options: {
     try {
       const project = await updateNovelProject(options.activeNovelProject.value.id, {
         ...options.projectDraft.value,
+        outline: normalizeDraftOutline(options.projectDraft.value.outline),
         story_canvas: options.storyCanvasDraft.value
       });
       options.replaceNovelProject(project);
       options.syncStoryCanvasDraft(project);
+    } catch (err) {
+      options.error.value = readableError(err);
+    } finally {
+      options.novelProjectBusy.value = false;
+    }
+  }
+
+  async function deleteActiveNovelProject(projectId: string) {
+    if (!projectId || options.novelProjectBusy.value) return;
+    const project = options.novelProjects.value.find((item) => item.id === projectId);
+    const title = project?.title || "当前长篇项目";
+    if (!window.confirm(`删除长篇项目「${title}」？章节、画布和版本会从列表中移除。`)) return;
+    options.novelProjectBusy.value = true;
+    options.error.value = "";
+    try {
+      await deleteNovelProject(projectId);
+      options.novelProjects.value = options.novelProjects.value.filter((item) => item.id !== projectId);
+      if (options.activeNovelProjectId.value === projectId) {
+        const next = options.novelProjects.value[0];
+        if (next) {
+          selectNovelProject(next.id);
+        } else {
+          startProjectDraft();
+        }
+      }
     } catch (err) {
       options.error.value = readableError(err);
     } finally {
@@ -558,14 +647,19 @@ export function useNovelProjectActions(options: {
   }
 
   return {
+    projectDraftGenerating,
+    projectDraftDiagnostics,
     activeSceneToChapterDraft,
     selectCanvasChapter,
     loadNovelProjects,
     selectNovelProject,
     setNovelStudioMode,
+    startProjectDraft,
+    generateProjectDraft,
     selectNovelChapter,
     createLongNovelProject,
     saveNovelProject,
+    deleteActiveNovelProject,
     rebuildStoryCanvas,
     saveStoryCanvas,
     addNovelChapter,

@@ -35,6 +35,7 @@ import ProjectSettingsDrawer from "./features/novel/ProjectSettingsDrawer.vue";
 import QuickDraftPanel from "./features/novel/QuickDraftPanel.vue";
 import StoryCanvasHeader from "./features/novel/StoryCanvasHeader.vue";
 import StoryBiblePanel from "./features/novel/StoryBiblePanel.vue";
+import CharacterWorkshopPanel from "./features/characters/CharacterWorkshopPanel.vue";
 import LoveTestPanel from "./features/relationship/personalityTest/LoveTestPanel.vue";
 import { useLoveTest } from "./features/relationship/personalityTest/useLoveTest";
 import { useRelationshipMemory } from "./features/relationship/useRelationshipMemory";
@@ -49,7 +50,7 @@ const VISITOR_KEY = "campus-pulse-lite-visitor";
 const CHARACTER_KEY = "campus-pulse-lite-character";
 const STORY_AUTO_REFRESH_USER_INTERVAL = 6;
 
-type PageKey = "chat" | "love-test" | "novel";
+type PageKey = "chat" | "characters" | "love-test" | "novel";
 type NovelStudioMode = "select" | "quick" | "project";
 type StoryRefreshOptions = { silent?: boolean };
 const currentPage = ref<PageKey>("chat");
@@ -72,6 +73,7 @@ const {
   initializeChatSession,
   openSession,
   selectCharacter,
+  refreshCharacters,
   submit,
   exportDebugBundle
 } = useChatSession({
@@ -251,14 +253,19 @@ const {
 const novelFocusMode = ref(false);
 const novelEditorFont = ref<"serif" | "sans">("serif");
 const {
+  projectDraftGenerating,
+  projectDraftDiagnostics,
   activeSceneToChapterDraft,
   selectCanvasChapter,
   loadNovelProjects,
   selectNovelProject,
   setNovelStudioMode,
+  startProjectDraft,
+  generateProjectDraft,
   selectNovelChapter,
   createLongNovelProject,
   saveNovelProject,
+  deleteActiveNovelProject,
   rebuildStoryCanvas,
   saveStoryCanvas,
   addNovelChapter,
@@ -318,6 +325,16 @@ const bondPercent = computed(() => Math.round((characterBond.value?.resonance_ba
 
 function setPage(page: PageKey) {
   currentPage.value = page;
+}
+
+async function refreshWorkshopCharacters(preferredCharacterId = "") {
+  await refreshCharacters(preferredCharacterId || selectedCharacterId.value);
+}
+
+async function startChatWithCharacter(characterId: string) {
+  selectedCharacterId.value = characterId;
+  currentPage.value = "chat";
+  await openSession();
 }
 
 function readableError(err: unknown) {
@@ -444,7 +461,7 @@ function downloadNovelProjectMarkdown() {
 </script>
 
 <template>
-  <main class="shell" :class="{ 'test-shell': currentPage === 'love-test' || currentPage === 'novel', 'novel-focus-shell': currentPage === 'novel' && novelFocusMode }">
+  <main class="shell" :class="{ 'test-shell': currentPage === 'characters' || currentPage === 'love-test' || currentPage === 'novel', 'novel-focus-shell': currentPage === 'novel' && novelFocusMode }">
     <aside class="left-panel">
       <div class="brand">
         <span class="brand-mark"></span>
@@ -455,14 +472,15 @@ function downloadNovelProjectMarkdown() {
       </div>
 
       <nav class="page-nav">
+        <button :class="{ active: currentPage === 'characters' }" @click="setPage('characters')">角色工坊</button>
         <button :class="{ active: currentPage === 'chat' }" @click="setPage('chat')">聊天</button>
         <button :class="{ active: currentPage === 'love-test' }" @click="setPage('love-test')">恋爱人格测试</button>
         <button :class="{ active: currentPage === 'novel' }" @click="setPage('novel')">小说工坊</button>
       </nav>
 
-      <label v-if="currentPage === 'chat' || currentPage === 'novel'" class="field">
+      <label v-if="currentPage === 'chat' || currentPage === 'characters' || currentPage === 'novel'" class="field">
         <span>Visitor ID</span>
-        <input v-model="visitorId" @change="openSession" spellcheck="false" />
+        <input v-model="visitorId" @change="currentPage === 'characters' ? refreshWorkshopCharacters() : openSession()" spellcheck="false" />
       </label>
 
       <section v-if="currentPage === 'chat' || currentPage === 'novel'" class="character-list">
@@ -506,6 +524,15 @@ function downloadNovelProjectMarkdown() {
       :error="error"
       @submit="submit"
       @export="exportDebugBundle"
+    />
+
+    <CharacterWorkshopPanel
+      v-else-if="currentPage === 'characters'"
+      :visitor-id="visitorId"
+      :characters="characters"
+      :active-character-id="selectedCharacterId"
+      @refresh="refreshWorkshopCharacters"
+      @start-chat="startChatWithCharacter"
     />
 
     <LoveTestPanel
@@ -590,8 +617,9 @@ function downloadNovelProjectMarkdown() {
           :active-novel-chapter-id="activeNovelChapterId"
           :novel-chapter-status-label="novelChapterStatusLabel"
           @generate-quick="generateNovelDraft"
-          @create-project="createLongNovelProject"
+          @start-project-draft="startProjectDraft"
           @select-project="selectNovelProject"
+          @delete-project="deleteActiveNovelProject"
           @add-chapter="addNovelChapter"
           @select-chapter="selectNovelChapter"
         />
@@ -620,9 +648,12 @@ function downloadNovelProjectMarkdown() {
             v-if="novelStudioMode === 'project' && !activeNovelProject"
             v-model:project-draft="projectDraft"
             :novel-project-busy="novelProjectBusy"
+            :project-draft-generating="projectDraftGenerating"
+            :project-draft-diagnostics="projectDraftDiagnostics"
             :story-busy="storyBusy"
             :session-id="sessionId"
             @create-project="createLongNovelProject"
+            @generate-project-draft="generateProjectDraft"
             @refresh-story-tags="refreshStoryTags()"
           />
 

@@ -3,6 +3,7 @@ export interface CharacterCard {
   name: string;
   archetype: string;
   tagline: string;
+  gender?: string;
   bio: string;
   speech_style: string;
   likes: string[];
@@ -36,6 +37,8 @@ export interface CharacterCard {
     accent?: string;
     portrait_hint?: string;
   };
+  origin?: "builtin" | "custom";
+  owner_visitor_id?: string;
 }
 
 export interface MemoryItem {
@@ -318,6 +321,16 @@ export interface NovelProjectCreateRequest {
   relationship_setup?: string;
   outline?: string;
   story_canvas?: StoryCanvas;
+}
+
+export interface NovelProjectDraftGenerateRequest {
+  prompt: string;
+  current?: NovelProjectCreateRequest;
+}
+
+export interface NovelProjectDraftGenerateResponse {
+  project: NovelProjectCreateRequest;
+  diagnostics: Record<string, unknown>;
 }
 
 export interface NovelProjectUpdateRequest {

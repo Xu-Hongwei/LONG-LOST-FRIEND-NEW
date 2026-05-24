@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .characters import CharacterStore
@@ -12,12 +12,22 @@ from .features.relationship.memory import MemoryService
 from .features.relationship.state import CharacterStateService
 from .llm import LlmClient
 from .novel import NovelService
-from .schemas import ResolveVisitorRequest, VisitorResponse
+from .schemas import (
+    CharacterDraftGenerateRequest,
+    CharacterDraftGenerateResponse,
+    CharacterWriteRequest,
+    ResolveVisitorRequest,
+    VisitorResponse,
+)
 from .storage import Storage
 from .story import StoryService
 
 
-def create_app() -> FastAPI:
+def create_app(
+    storage: Storage | None = None,
+    characters: CharacterStore | None = None,
+    llm: LlmClient | None = None,
+) -> FastAPI:
     app = FastAPI(title="Campus Pulse Lite", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -27,18 +37,18 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    storage = Storage()
-    characters = CharacterStore()
+    storage = storage or Storage()
+    characters = characters or CharacterStore()
     memory = MemoryService(storage)
     story = StoryService(storage)
     character_state = CharacterStateService(storage)
     character_bond = CharacterBondService(storage)
     composer = ContextComposer()
     novel = NovelService(character_state, character_bond, storage)
-    llm = LlmClient()
+    llm = llm or LlmClient()
 
     for card in characters.list_cards():
-        storage.upsert_character(card.model_dump())
+        storage.upsert_character(card.model_dump(), origin="builtin")
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
@@ -56,8 +66,44 @@ def create_app() -> FastAPI:
         return VisitorResponse(visitor_id=visitor_id, created=created)
 
     @app.get("/api/characters")
-    def list_characters() -> list[dict[str, object]]:
-        return [card.model_dump() for card in characters.list_cards()]
+    def list_characters(visitor_id: str = "") -> list[dict[str, object]]:
+        resolved_visitor_id = visitor_id
+        if visitor_id:
+            resolved_visitor_id, _ = storage.resolve_visitor(visitor_id)
+        return storage.list_character_cards(resolved_visitor_id)
+
+    @app.post("/api/characters/draft", response_model=CharacterDraftGenerateResponse)
+    async def generate_character_draft(payload: CharacterDraftGenerateRequest) -> CharacterDraftGenerateResponse:
+        storage.resolve_visitor(payload.visitor_id)
+        character = await llm.generate_character_draft(payload.prompt, payload.template)
+        return CharacterDraftGenerateResponse(
+            character=character,
+            diagnostics={
+                "source": "remote" if llm.provider and not llm.last_analysis_error else "fallback",
+                "error": llm.last_analysis_error,
+            },
+        )
+
+    @app.post("/api/characters")
+    def create_character(payload: CharacterWriteRequest) -> dict[str, object]:
+        visitor_id, _ = storage.resolve_visitor(payload.visitor_id)
+        return storage.create_custom_character(visitor_id, payload.model_dump(exclude={"visitor_id"}))
+
+    @app.put("/api/characters/{character_id}")
+    def update_character(character_id: str, payload: CharacterWriteRequest) -> dict[str, object]:
+        visitor_id, _ = storage.resolve_visitor(payload.visitor_id)
+        updated = storage.update_custom_character(visitor_id, character_id, payload.model_dump(exclude={"visitor_id"}))
+        if not updated:
+            raise HTTPException(status_code=404, detail="Custom character not found")
+        return updated
+
+    @app.delete("/api/characters/{character_id}")
+    def delete_character(character_id: str, visitor_id: str) -> dict[str, bool]:
+        resolved_visitor_id, _ = storage.resolve_visitor(visitor_id)
+        deleted = storage.delete_custom_character(resolved_visitor_id, character_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Custom character not found")
+        return {"deleted": True}
 
     register_chat_routes(
         app,

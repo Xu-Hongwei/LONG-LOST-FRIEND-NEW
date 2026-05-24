@@ -82,6 +82,18 @@ class NovelProjectStorageMixin:
             )
             return cur.rowcount > 0
 
+    def delete_novel_project(self, project_id: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE novel_projects
+                SET status = 'archived', updated_at = datetime('now')
+                WHERE id = ? AND status != 'archived'
+                """,
+                (project_id,),
+            )
+            return cur.rowcount > 0
+
     def _novel_project_update_fields(self, updates: dict[str, Any]) -> tuple[list[str], list[Any]]:
         allowed = {
             "title": 120,

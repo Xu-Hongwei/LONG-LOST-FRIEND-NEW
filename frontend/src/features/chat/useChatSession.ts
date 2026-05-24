@@ -61,7 +61,7 @@ export function useChatSession(options: ChatSessionOptions) {
       visitorId.value = resolved.visitor_id;
       localStorage.setItem(options.visitorKey, resolved.visitor_id);
       options.onVisitorChanged?.(resolved.visitor_id);
-      characters.value = await listCharacters();
+      characters.value = await listCharacters(resolved.visitor_id);
       const storedCharacterId = localStorage.getItem(characterStorageKey(resolved.visitor_id)) || "";
       selectedCharacterId.value = characters.value.some((character) => character.id === storedCharacterId)
         ? storedCharacterId
@@ -108,6 +108,18 @@ export function useChatSession(options: ChatSessionOptions) {
       localStorage.setItem(characterStorageKey(visitorId.value), characterId);
     }
     void openSession();
+  }
+
+  async function refreshCharacters(preferredCharacterId = selectedCharacterId.value) {
+    if (!visitorId.value) return;
+    characters.value = await listCharacters(visitorId.value);
+    if (preferredCharacterId && characters.value.some((character) => character.id === preferredCharacterId)) {
+      selectedCharacterId.value = preferredCharacterId;
+      return;
+    }
+    if (!characters.value.some((character) => character.id === selectedCharacterId.value)) {
+      selectedCharacterId.value = characters.value[0]?.id || "";
+    }
   }
 
   async function submit() {
@@ -193,6 +205,7 @@ export function useChatSession(options: ChatSessionOptions) {
     initializeChatSession,
     openSession,
     selectCharacter,
+    refreshCharacters,
     submit,
     exportDebugBundle
   };

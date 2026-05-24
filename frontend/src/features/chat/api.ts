@@ -15,8 +15,9 @@ export async function resolveVisitor(visitorId?: string): Promise<{ visitor_id: 
   });
 }
 
-export async function listCharacters(): Promise<CharacterCard[]> {
-  return request("/api/characters");
+export async function listCharacters(visitorId = ""): Promise<CharacterCard[]> {
+  const query = visitorId ? `?visitor_id=${encodeURIComponent(visitorId)}` : "";
+  return request(`/api/characters${query}`);
 }
 
 export async function createSession(visitorId: string, characterId: string): Promise<SessionResponse> {

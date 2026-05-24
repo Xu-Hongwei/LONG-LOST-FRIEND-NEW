@@ -32,8 +32,112 @@ RELATIONSHIP_EVENT_STRUCTURED_PROMPT = (
     "and repair before shared_context or trust_signal."
 )
 
+CHARACTER_DRAFT_STRUCTURED_PROMPT = (
+    "You expand a short user idea into a safe fictional AI chat character card. "
+    "Return one JSON object only with key \"character\". The character object must use these keys: "
+    "name, archetype, tagline, gender, bio, personality, scenario, speech_style, relationship_pace, "
+    "opening_line, likes, dislikes, boundaries, mes_example, creator_notes, system_prompt, "
+    "post_history_instructions, interaction_policy, anti_patterns, voice, visual. "
+    "interaction_policy must include initiative_level, action_density, action_style, comfort_style, "
+    "question_style, memory_style. voice must include sentence_rhythm, signature_moves, avoid, sample_lines. "
+    "visual must include accent and portrait_hint. "
+    "Make the examples rich enough to be useful: sample_lines should contain 4 to 6 short reusable lines; "
+    "mes_example should contain 2 to 3 user/character exchanges showing greeting, emotional support, memory use, "
+    "and boundary or relationship pacing where relevant. "
+    "likes, dislikes, boundaries, anti_patterns, and signature_moves should usually contain 3 to 6 concrete items. "
+    "Do not create a real-person impersonation, do not include private personal data, and keep the role fictional. "
+    "Write natural Chinese fields unless the user explicitly asks otherwise. "
+    "The card should be usable for a campus companion chat and should avoid forcing intimacy or fixed actions every turn."
+)
+
 
 class LlmAnalysisMixin:
+    async def generate_character_draft(
+        self,
+        prompt: str,
+        template: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        user = (
+            f"用户粗设定：{prompt}\n"
+            f"可参考模板：{json.dumps(template or {}, ensure_ascii=False)}\n"
+            "请扩写成完整角色卡 JSON。不要保存角色，只返回草稿。"
+        )
+        if not self.provider:
+            return self._fallback_character_draft(prompt, template)
+        try:
+            text = await self.chat_complete(
+                [
+                    {"role": "system", "content": CHARACTER_DRAFT_STRUCTURED_PROMPT},
+                    {"role": "user", "content": user},
+                ],
+                timeout_ms=24_000,
+                response_format={"type": "json_object"},
+                temperature=0.55,
+            )
+            parsed = self._parse_character_draft_json(text)
+            if parsed:
+                return parsed
+            self.last_analysis_error = "InvalidCharacterDraftJson"
+        except Exception as exc:
+            self.last_analysis_error = type(exc).__name__
+            logger.warning("character draft generation failed: %s", exc)
+        return self._fallback_character_draft(prompt, template)
+
+    def _fallback_character_draft(self, prompt: str, template: dict[str, Any] | None = None) -> dict[str, Any]:
+        base = template if isinstance(template, dict) else {}
+        seed = (prompt or "").strip()
+        name = str(base.get("name") or "").strip() or "自定义角色"
+        archetype = str(base.get("archetype") or "").strip() or "自定义人格"
+        raw = {
+            **base,
+            "name": name,
+            "archetype": archetype,
+            "tagline": str(base.get("tagline") or f"由设定「{seed[:40] or '自定义'}」扩写出的角色"),
+            "bio": str(base.get("bio") or f"这个角色围绕用户设定展开：{seed}"),
+            "personality": str(base.get("personality") or f"核心设定：{seed}。保持稳定、具体、不过度表演。"),
+            "scenario": str(base.get("scenario") or "当前关系处在轻陪伴聊天中，地点和动作跟随上下文自然生成。"),
+            "speech_style": str(base.get("speech_style") or "自然、具体、少说教，优先回应用户当下的话。"),
+            "likes": base.get("likes") or ["清楚表达", "稳定回应", "自然的共同记忆"],
+            "dislikes": base.get("dislikes") or ["突然越界", "空泛说教", "固定动作循环"],
+            "boundaries": base.get("boundaries") or ["不强行推进亲密关系", "不冒充真人", "遇到危险或违法话题时温和拒绝"],
+            "relationship_pace": str(base.get("relationship_pace") or "根据聊天自然推进，不突然越界。"),
+            "opening_line": str(base.get("opening_line") or f"你好，我是{name}。你刚刚那个设定，我已经记住了。"),
+            "mes_example": str(base.get("mes_example") or "\n".join([
+                "用户：今天有点不知道从哪里开始。",
+                f"{name}：那就先不用急着讲完整。你给我一个最小的开头就好，我会接住。",
+                "",
+                "用户：你会记得我之前说过的事吗？",
+                f"{name}：会。但我不会像读档案一样念出来，只会在刚好需要的时候轻轻提一下。",
+                "",
+                "用户：我不太喜欢被催着表态。",
+                f"{name}：明白。那我会放慢一点，先确认你的节奏，不替你做决定。",
+            ])),
+            "creator_notes": str(base.get("creator_notes") or "这是本地 fallback 草稿；远程模型不可用或返回格式无效时生成。"),
+            "anti_patterns": base.get("anti_patterns") or ["不要突然告白", "不要每轮重复同一个动作", "不要把安慰写成训话"],
+            "interaction_policy": {
+                "initiative_level": 0.45,
+                "action_density": "low",
+                "action_style": "动作轻量、跟随语境，不固定道具或场景。",
+                "comfort_style": "先回应用户感受，再给一个具体落点。",
+                "question_style": "少量追问，优先接住用户已经说出的内容。",
+                "memory_style": "自然提起相关记忆，不像读档案。",
+            },
+            "voice": {
+                "sentence_rhythm": "句子自然，有节奏但不过度文学化。",
+                "signature_moves": ["顺着用户当前话题回应", "把抽象感受落成具体态度", "在合适时自然提起旧话题"],
+                "avoid": ["系统腔", "固定动作循环", "突然推进亲密", "长篇说教"],
+                "sample_lines": [
+                    f"我大概懂你想要的感觉：{seed[:60] or '稳定、自然、具体'}。",
+                    "我们可以先从最小的那句话开始，不用一下子讲完。",
+                    "这件事我会记得，但不会拿它压着你。",
+                    "如果你不想现在回答，我就先陪你停在这里。",
+                    "我会慢一点靠近，不抢你的节奏。",
+                ],
+            },
+            "visual": {"accent": "#9fb6d7", "portrait_hint": "自定义角色"},
+        }
+        return self._clean_character_draft(raw)
+
     async def extract_memories(self, user_message: str, assistant_reply: str) -> list[dict[str, Any]]:
         if not self.provider:
             return []

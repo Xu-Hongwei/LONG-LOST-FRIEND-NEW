@@ -3,7 +3,7 @@ import type { CharacterCard, MemoryPane } from "../types";
 import type { LoveGender, LoveProfile } from "../features/relationship/personalityTest/data";
 import { loveQuestions } from "../features/relationship/personalityTest/data";
 
-type PageKey = "chat" | "love-test" | "novel";
+type PageKey = "chat" | "characters" | "love-test" | "novel";
 
 defineProps<{
   currentPage: PageKey;
@@ -66,6 +66,12 @@ defineEmits<{
         <dd>完成后可写入手动记忆，让当前角色知道怎样靠近你更舒服。</dd>
       </div>
     </dl>
+  </section>
+
+  <section v-else-if="currentPage === 'characters'" class="character-brief">
+    <p class="eyebrow">Character Workshop</p>
+    <h2>角色工坊</h2>
+    <p>自建角色会进入聊天、关系记忆和小说工坊。</p>
   </section>
 
   <section v-else-if="currentPage === 'novel' && activeCharacter" class="character-brief">

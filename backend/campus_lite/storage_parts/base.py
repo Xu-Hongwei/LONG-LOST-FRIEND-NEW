@@ -40,6 +40,9 @@ class BaseStorageMixin:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     card_json TEXT NOT NULL,
+                    owner_visitor_id TEXT NOT NULL DEFAULT '',
+                    origin TEXT NOT NULL DEFAULT 'builtin',
+                    deleted_at TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
@@ -254,6 +257,15 @@ class BaseStorageMixin:
                 """
             )
             self._ensure_column(conn, "memories", "memory_scope", "TEXT NOT NULL DEFAULT 'session'")
+            self._ensure_column(conn, "characters", "owner_visitor_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "characters", "origin", "TEXT NOT NULL DEFAULT 'builtin'")
+            self._ensure_column(conn, "characters", "deleted_at", "TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_characters_owner_origin
+                    ON characters(owner_visitor_id, origin, deleted_at, updated_at)
+                """
+            )
             self._ensure_column(conn, "memories", "importance", "REAL NOT NULL DEFAULT 0.5")
             self._ensure_column(conn, "memories", "normalized_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "sessions", "character_state_json", "TEXT NOT NULL DEFAULT '{}'")

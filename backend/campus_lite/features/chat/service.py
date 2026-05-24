@@ -10,6 +10,7 @@ from ...composer import ComposeInput, ContextComposer
 from ...llm import LlmClient
 from ...schemas import (
     ChatMessage,
+    CharacterCard,
     ChatResponse,
     CreateSessionRequest,
     SendMessageRequest,
@@ -64,10 +65,7 @@ class ChatService:
 
     def create_session(self, payload: CreateSessionRequest) -> SessionResponse:
         visitor_id, _ = self.storage.resolve_visitor(payload.visitor_id)
-        try:
-            card = self.characters.get(payload.character_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Character not found") from exc
+        card = self._get_character(payload.character_id, visitor_id)
         session_id = self.storage.create_or_get_session(visitor_id, card.id)
         session = self.storage.get_session(session_id)
         if not self.storage.recent_messages(session_id, 1):
@@ -98,10 +96,7 @@ class ChatService:
         session = self.storage.get_session(payload.session_id)
         if not session or session["visitor_id"] != payload.visitor_id:
             raise HTTPException(status_code=404, detail="Session not found")
-        try:
-            card = self.characters.get(session["character_id"])
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Character not found") from exc
+        card = self._get_character(session["character_id"], payload.visitor_id)
 
         user_text = payload.message.strip()
         if not user_text:
@@ -225,10 +220,7 @@ class ChatService:
         session = self.storage.get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        try:
-            card = self.characters.get(session["character_id"])
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Character not found") from exc
+        card = self._get_character(session["character_id"], session["visitor_id"])
         pane = self.memory.build_pane(session_id)
         return {
             "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -240,6 +232,15 @@ class ChatService:
             "memory_pane": pane,
             "prompt_slots": pane.get("prompt_slots", []),
         }
+
+    def _get_character(self, character_id: str, visitor_id: str) -> CharacterCard:
+        card = self.storage.get_character_card(character_id, visitor_id)
+        if card:
+            return CharacterCard.model_validate(card)
+        try:
+            return self.characters.get(character_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Character not found") from exc
 
     def get_story_pane(self, session_id: str) -> StoryPaneResponse:
         session = self.storage.get_session(session_id)

@@ -10,6 +10,8 @@ import type {
   NovelInstructionOptimizeResponse,
   NovelProject,
   NovelProjectCreateRequest,
+  NovelProjectDraftGenerateRequest,
+  NovelProjectDraftGenerateResponse,
   NovelProjectUpdateRequest,
   NovelVersion
 } from "../../types";
@@ -23,6 +25,16 @@ export async function generateNovel(sessionId: string, payload: NovelGenerateReq
 
 export async function listNovelProjects(sessionId: string): Promise<NovelProject[]> {
   return request(`/api/sessions/${sessionId}/novel/projects`);
+}
+
+export async function generateNovelProjectDraft(
+  sessionId: string,
+  payload: NovelProjectDraftGenerateRequest
+): Promise<NovelProjectDraftGenerateResponse> {
+  return request(`/api/sessions/${sessionId}/novel/project-draft`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }
 
 export async function getNovelProject(projectId: string): Promise<NovelProject> {
@@ -40,6 +52,12 @@ export async function updateNovelProject(projectId: string, payload: NovelProjec
   return request(`/api/novel/projects/${projectId}`, {
     method: "PATCH",
     body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteNovelProject(projectId: string): Promise<{ deleted: boolean }> {
+  return request(`/api/novel/projects/${projectId}`, {
+    method: "DELETE"
   });
 }
 

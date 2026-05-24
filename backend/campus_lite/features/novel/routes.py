@@ -6,6 +6,7 @@ from ...characters import CharacterStore
 from ...llm import LlmClient
 from ...novel import NovelService
 from ...schemas import (
+    CharacterCard,
     NovelCanvasExtendRequest,
     NovelChapterDraftSaveRequest,
     NovelChapterGenerateRequest,
@@ -16,6 +17,8 @@ from ...schemas import (
     NovelInstructionOptimizeRequest,
     NovelInstructionOptimizeResponse,
     NovelProjectCreateRequest,
+    NovelProjectDraftGenerateRequest,
+    NovelProjectDraftGenerateResponse,
     NovelProjectResponse,
     NovelProjectUpdateRequest,
     NovelVersion,
@@ -35,15 +38,23 @@ def register_novel_routes(
     novel: NovelService,
     llm: LlmClient,
 ) -> None:
+    def get_character_for_session(session: dict[str, object]) -> CharacterCard:
+        character_id = str(session["character_id"])
+        visitor_id = str(session["visitor_id"])
+        card = storage.get_character_card(character_id, visitor_id)
+        if card:
+            return CharacterCard.model_validate(card)
+        try:
+            return characters.get(character_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Character not found") from exc
+
     @app.post("/api/sessions/{session_id}/novel/generate", response_model=NovelGenerateResponse)
     async def generate_novel(session_id: str, payload: NovelGenerateRequest) -> NovelGenerateResponse:
         session = storage.get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        try:
-            card = characters.get(session["character_id"])
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Character not found") from exc
+        card = get_character_for_session(dict(session))
         messages = storage.session_messages(session_id, payload.message_limit)
         if len(messages) < 2:
             raise HTTPException(status_code=400, detail="Not enough messages to generate a novel")
@@ -65,15 +76,31 @@ def register_novel_routes(
             raise HTTPException(status_code=404, detail="Session not found")
         return novel.project_responses(session_id)
 
+    @app.post("/api/sessions/{session_id}/novel/project-draft", response_model=NovelProjectDraftGenerateResponse)
+    async def generate_novel_project_draft(
+        session_id: str,
+        payload: NovelProjectDraftGenerateRequest,
+    ) -> NovelProjectDraftGenerateResponse:
+        session = storage.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        card = get_character_for_session(dict(session))
+        messages = storage.session_messages(session_id, 80)
+        return await novel.generate_project_draft(
+            llm,
+            card,
+            messages,
+            memory.list_memories(session_id),
+            story.list_items(session_id),
+            payload,
+        )
+
     @app.post("/api/sessions/{session_id}/novel/projects", response_model=NovelProjectResponse)
     def create_novel_project(session_id: str, payload: NovelProjectCreateRequest) -> NovelProjectResponse:
         session = storage.get_session(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        try:
-            card = characters.get(session["character_id"])
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Character not found") from exc
+        card = get_character_for_session(dict(session))
         messages = storage.session_messages(session_id, 80)
         try:
             return novel.create_project(
@@ -107,6 +134,13 @@ def register_novel_routes(
         if payload.story_canvas is not None:
             novel.sync_story_canvas_to_chapters(project_id)
         return novel.project_response(project_id)
+
+    @app.delete("/api/novel/projects/{project_id}")
+    def delete_novel_project(project_id: str) -> dict[str, bool]:
+        deleted = storage.delete_novel_project(project_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Novel project not found")
+        return {"deleted": True}
 
     @app.post("/api/novel/projects/{project_id}/canvas/build", response_model=NovelProjectResponse)
     async def build_novel_canvas(project_id: str) -> NovelProjectResponse:

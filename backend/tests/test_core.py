@@ -8,7 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import BackgroundTasks
+from fastapi.testclient import TestClient
 
+from campus_lite.api import create_app
 from campus_lite.bond import CharacterBondService
 from campus_lite.characters import CharacterStore
 from campus_lite.composer import ComposeInput, ContextComposer
@@ -17,7 +19,7 @@ from campus_lite.features.chat.time_awareness import build_time_awareness
 from campus_lite.llm import LlmClient
 from campus_lite.memory import MemoryService
 from campus_lite.novel import NovelService
-from campus_lite.schemas import NovelChapterGenerateRequest, NovelGenerateRequest, NovelProjectCreateRequest, SendMessageRequest
+from campus_lite.schemas import CharacterCard, NovelChapterGenerateRequest, NovelGenerateRequest, NovelProjectCreateRequest, SendMessageRequest
 from campus_lite.schemas import MemoryItem
 from campus_lite.state import CharacterStateService
 from campus_lite.storage import Storage, StoragePayloadError
@@ -193,6 +195,247 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertTrue(recalled)
             self.assertEqual(recalled[0].memory_type, "user_preference")
             self.assertEqual(recalled[0].memory_scope, "global")
+
+    def test_custom_character_can_open_chat_and_seed_novel_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            app = create_app(storage=storage, characters=CharacterStore(), llm=LlmClient())
+            client = TestClient(app)
+            visitor_id = "custom-character-tester"
+
+            created = client.post("/api/characters", json={
+                "visitor_id": visitor_id,
+                "name": "Mira",
+                "archetype": "quiet strategist",
+                "tagline": "notices small choices before speaking",
+                "bio": "A user-created campus companion.",
+                "speech_style": "calm, concise, observant",
+                "relationship_pace": "slow and respectful",
+                "opening_line": "I am here. What should we look at first?",
+                "personality": "Patient, careful, and quietly warm.",
+                "boundaries": ["keep replies safe", "do not force intimacy"],
+            })
+            self.assertEqual(created.status_code, 200)
+            character_id = created.json()["id"]
+
+            listed = client.get(f"/api/characters?visitor_id={visitor_id}")
+            self.assertEqual(listed.status_code, 200)
+            self.assertTrue(any(item["id"] == character_id and item["origin"] == "custom" for item in listed.json()))
+
+            session = client.post("/api/sessions", json={
+                "visitor_id": visitor_id,
+                "character_id": character_id,
+            })
+            self.assertEqual(session.status_code, 200)
+            self.assertEqual(session.json()["character"]["name"], "Mira")
+            session_id = session.json()["session_id"]
+            project = client.post(f"/api/sessions/{session_id}/novel/projects", json={
+                "title": "Mira Draft",
+                "genre": "campus",
+                "tone": "quiet",
+            })
+            self.assertEqual(project.status_code, 200)
+            self.assertEqual(project.json()["character_id"], character_id)
+
+            deleted = client.delete(f"/api/characters/{character_id}?visitor_id={visitor_id}")
+            self.assertEqual(deleted.status_code, 200)
+
+    def test_character_draft_endpoint_returns_clean_json_card(self) -> None:
+        class FakeDraftLlm(LlmClient):
+            provider = {"model": "fake", "api_key": "fake", "base_url": "http://fake", "timeout_ms": 1000}
+            embedding_provider = None
+            last_analysis_error = None
+
+            async def generate_character_draft(self, prompt, template=None):
+                return self._clean_character_draft({
+                    "name": "Nia",
+                    "archetype": "calm maker",
+                    "tagline": "builds quiet little rituals",
+                    "gender": "female",
+                    "bio": "A fictional campus companion.",
+                    "speech_style": "soft, brief, concrete",
+                    "opening_line": "I kept a seat for you.",
+                    "interaction_policy": {"initiative_level": 0.35, "action_density": "low"},
+                    "voice": {"sample_lines": ["We can start small."]},
+                    "visual": {"accent": "#88aacc"},
+                })
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            app = create_app(storage=storage, characters=CharacterStore(), llm=FakeDraftLlm())
+            client = TestClient(app)
+
+            response = client.post("/api/characters/draft", json={
+                "visitor_id": "draft-tester",
+                "prompt": "quiet ritual maker",
+            })
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["character"]["name"], "Nia")
+            self.assertIn("interaction_policy", payload["character"])
+            self.assertEqual(payload["diagnostics"]["source"], "remote")
+
+    def test_custom_character_and_novel_project_draft_persist_through_api(self) -> None:
+        class FakeNovelDraftLlm(LlmClient):
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, **kwargs):
+                return json.dumps({
+                    "title": "雨后图书馆计划",
+                    "genre": "慢热校园日常长篇",
+                    "tone": "温柔、克制、低戏剧化、对白自然",
+                    "protagonist": "Mira",
+                    "worldview": "雨后校园、图书馆和社团活动构成主要生活场域。",
+                    "relationship_setup": "两人从熟悉但仍谨慎确认边界的状态开始靠近。",
+                    "outline": ["雨后重逢", "晚餐约定", "误会与确认", "共同完成社团任务", "回收图书馆伏笔"],
+                }, ensure_ascii=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            app = create_app(storage=storage, characters=CharacterStore(), llm=FakeNovelDraftLlm())
+            client = TestClient(app)
+            visitor_id = "novel-project-draft-tester"
+
+            character = client.post("/api/characters", json={
+                "visitor_id": visitor_id,
+                "name": "Mira",
+                "archetype": "quiet strategist",
+                "tagline": "notices small choices before speaking",
+                "bio": "A user-created campus companion.",
+                "speech_style": "calm, concise, observant",
+                "relationship_pace": "slow and respectful",
+                "opening_line": "I am here. What should we look at first?",
+            })
+            self.assertEqual(character.status_code, 200)
+            character_id = character.json()["id"]
+            self.assertEqual(storage.get_character_card(character_id, visitor_id)["origin"], "custom")
+
+            session = client.post("/api/sessions", json={"visitor_id": visitor_id, "character_id": character_id})
+            self.assertEqual(session.status_code, 200)
+            session_id = session.json()["session_id"]
+
+            draft = client.post(f"/api/sessions/{session_id}/novel/project-draft", json={
+                "prompt": "雨后校园慢热日常，从图书馆和晚餐约定开始。",
+                "current": {"genre": "校园日常长篇", "tone": "温柔、克制、日常"},
+            })
+            self.assertEqual(draft.status_code, 200)
+            draft_project = draft.json()["project"]
+            self.assertEqual(draft_project["title"], "雨后图书馆计划")
+            self.assertEqual(draft_project["genre"], "慢热校园日常长篇")
+            self.assertIn("晚餐约定", draft_project["outline"])
+
+            created = client.post(f"/api/sessions/{session_id}/novel/projects", json=draft_project)
+            self.assertEqual(created.status_code, 200)
+            project = created.json()
+            self.assertEqual(project["character_id"], character_id)
+            self.assertEqual(project["title"], "雨后图书馆计划")
+            self.assertEqual(project["genre"], "慢热校园日常长篇")
+            self.assertEqual(project["tone"], "温柔、克制、低戏剧化、对白自然")
+            self.assertIn("雨后校园", project["worldview"])
+            self.assertIn("确认边界", project["relationship_setup"])
+
+            deleted = client.delete(f"/api/novel/projects/{project['id']}")
+            self.assertEqual(deleted.status_code, 200)
+            listed_projects = client.get(f"/api/sessions/{session_id}/novel/projects")
+            self.assertEqual(listed_projects.status_code, 200)
+            self.assertFalse(any(item["id"] == project["id"] for item in listed_projects.json()))
+
+    def test_novel_project_draft_genre_hint_overrides_stale_current_draft(self) -> None:
+        class FakeStaleDraftLlm(LlmClient):
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, **kwargs):
+                return json.dumps({
+                    "title": "湖畔微风与温柔相伴",
+                    "genre": "校园日常长篇",
+                    "tone": "轻柔舒缓，以细腻情感和温和互动为主",
+                    "protagonist": "林晚栀",
+                    "worldview": "故事发生在校园和湖边。",
+                    "relationship_setup": "普通同学逐渐成为好友。",
+                    "outline": "1. 湖边相遇\n2. 图书馆约定",
+                }, ensure_ascii=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            app = create_app(storage=storage, characters=CharacterStore(), llm=FakeStaleDraftLlm())
+            client = TestClient(app)
+            visitor_id = "novel-genre-hint-tester"
+            character_id = client.get("/api/characters", params={"visitor_id": visitor_id}).json()[0]["id"]
+            session = client.post("/api/sessions", json={"visitor_id": visitor_id, "character_id": character_id})
+            self.assertEqual(session.status_code, 200)
+
+            response = client.post(f"/api/sessions/{session.json()['session_id']}/novel/project-draft", json={
+                "prompt": "修仙武侠，少年剑修和冷淡医修被迫同行。",
+                "current": {
+                    "title": "湖畔旧草稿",
+                    "genre": "校园日常长篇",
+                    "tone": "温柔、克制、日常",
+                },
+            })
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["project"]["genre"], "修仙武侠长篇")
+            self.assertEqual(payload["diagnostics"]["genre_hint"], "修仙武侠长篇")
+
+    def test_novel_project_draft_collapses_soft_wrapped_outline(self) -> None:
+        class FakeWrappedDraftLlm(LlmClient):
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, **kwargs):
+                return json.dumps({
+                    "title": "Soft Wrap Plan",
+                    "genre": "campus mystery",
+                    "tone": "quiet suspense",
+                    "protagonist": "Mira",
+                    "worldview": "A school and a lake.",
+                    "relationship_setup": "Two classmates investigate carefully.",
+                    "outline": "Mira finds a strange note before class.\nShe follows it to the lakeside after school.\nThe second clue changes what she thought she knew.",
+                })
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            app = create_app(storage=storage, characters=CharacterStore(), llm=FakeWrappedDraftLlm())
+            client = TestClient(app)
+            visitor_id = "novel-soft-wrap-tester"
+            character_id = client.get("/api/characters", params={"visitor_id": visitor_id}).json()[0]["id"]
+            session = client.post("/api/sessions", json={"visitor_id": visitor_id, "character_id": character_id})
+            self.assertEqual(session.status_code, 200)
+
+            response = client.post(f"/api/sessions/{session.json()['session_id']}/novel/project-draft", json={
+                "prompt": "campus mystery about a lake clue",
+            })
+
+            self.assertEqual(response.status_code, 200)
+            outline = response.json()["project"]["outline"]
+            self.assertNotIn("\n", outline)
+            self.assertIn("before class.She follows", outline)
+
+    def test_character_draft_parser_accepts_textual_initiative_and_rich_examples(self) -> None:
+        client = LlmClient()
+
+        parsed = client._clean_character_draft({
+            "name": "Nia",
+            "archetype": "calm maker",
+            "interaction_policy": {"initiative_level": "偏低，慢热", "action_density": "low"},
+            "voice": {
+                "sample_lines": [
+                    "We can start small.",
+                    "I will not rush you.",
+                    "I remember the quiet parts.",
+                    "One step is enough.",
+                ],
+            },
+            "mes_example": "User: hello\nNia: We can start small.",
+        })
+
+        self.assertLess(parsed["interaction_policy"]["initiative_level"], 0.5)
+        self.assertGreaterEqual(len(parsed["voice"]["sample_lines"]), 4)
+        self.assertIn("Nia", parsed["mes_example"])
 
     def test_session_messages_can_restore_recent_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1400,6 +1643,40 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual([item["chapter_order"] for item in canvas_chapters[:4]], [1, 2, 3, 4])
             self.assertEqual(len(rebuilt.chapters), len(canvas_chapters))
             self.assertEqual(rebuilt.chapters[-1].chapter_order, len(canvas_chapters))
+
+    def test_canvas_prompt_includes_real_identity_mapping_for_custom_character(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            card_data = storage.create_custom_character(visitor_id, {
+                "name": "林悦",
+                "archetype": "成熟高冷御姐",
+                "tagline": "优雅冷艳，内心温柔",
+                "bio": "一位边界感清晰的角色。",
+                "speech_style": "简洁、冷静。",
+                "opening_line": "你好。",
+            })
+            card = CharacterCard.model_validate(card_data)
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(
+                card,
+                visitor_id,
+                session_id,
+                [],
+                [],
+                [],
+                NovelProjectCreateRequest(title="暗影迷踪", protagonist="许砚清"),
+            )
+            row = storage.get_novel_project(project.id)
+            self.assertIsNotNone(row)
+
+            source = service._initial_canvas_source(row, project.story_bible, [])
+
+            self.assertIn("用户小说名/主角名：许砚清", source)
+            self.assertIn("AI角色名：林悦", source)
+            self.assertIn("禁止在 chapters、scenes、threads 中把人物写成“用户”“助手”“AI”", source)
+            self.assertIn("不要写“许砚清、用户”", source)
 
     def test_novel_build_canvas_lock_depends_on_initial_chapter_versions(self) -> None:
         class CanvasFallbackLlm:

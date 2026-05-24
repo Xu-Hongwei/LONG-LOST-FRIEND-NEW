@@ -50,6 +50,44 @@ class CharacterCard(BaseModel):
     backstory: dict[str, Any] = Field(default_factory=dict)
     voice: dict[str, Any] = Field(default_factory=dict)
     visual: dict[str, Any] = Field(default_factory=dict)
+    origin: Literal["builtin", "custom"] = "builtin"
+    owner_visitor_id: str = ""
+
+
+class CharacterWriteRequest(BaseModel):
+    visitor_id: str
+    name: str = Field(min_length=1, max_length=80)
+    archetype: str = Field(default="", max_length=120)
+    tagline: str = Field(default="", max_length=160)
+    gender: str = Field(default="unknown", max_length=32)
+    bio: str = Field(default="", max_length=1200)
+    speech_style: str = Field(default="", max_length=800)
+    likes: list[str] = Field(default_factory=list)
+    dislikes: list[str] = Field(default_factory=list)
+    boundaries: list[str] = Field(default_factory=list)
+    relationship_pace: str = Field(default="", max_length=800)
+    opening_line: str = Field(default="", max_length=800)
+    personality: str = Field(default="", max_length=2000)
+    scenario: str = Field(default="", max_length=2000)
+    mes_example: str = Field(default="", max_length=3000)
+    creator_notes: str = Field(default="", max_length=1600)
+    system_prompt: str = Field(default="", max_length=2000)
+    post_history_instructions: str = Field(default="", max_length=2000)
+    interaction_policy: dict[str, Any] = Field(default_factory=dict)
+    anti_patterns: list[str] = Field(default_factory=list)
+    voice: dict[str, Any] = Field(default_factory=dict)
+    visual: dict[str, Any] = Field(default_factory=dict)
+
+
+class CharacterDraftGenerateRequest(BaseModel):
+    visitor_id: str
+    prompt: str = Field(min_length=2, max_length=2000)
+    template: dict[str, Any] | None = None
+
+
+class CharacterDraftGenerateResponse(BaseModel):
+    character: dict[str, Any]
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateSessionRequest(BaseModel):
@@ -150,6 +188,16 @@ class NovelProjectCreateRequest(BaseModel):
     relationship_setup: str = Field(default="", max_length=2000)
     outline: str = Field(default="", max_length=4000)
     story_canvas: dict[str, Any] | None = None
+
+
+class NovelProjectDraftGenerateRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=1000)
+    current: NovelProjectCreateRequest | None = None
+
+
+class NovelProjectDraftGenerateResponse(BaseModel):
+    project: NovelProjectCreateRequest
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class NovelProjectUpdateRequest(BaseModel):

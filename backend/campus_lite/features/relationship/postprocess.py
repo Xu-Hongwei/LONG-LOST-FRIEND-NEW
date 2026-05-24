@@ -5,6 +5,7 @@ import time
 
 from ...characters import CharacterStore
 from ...llm import LlmClient
+from ...schemas import CharacterCard
 from ...storage import Storage
 from .bond import CharacterBondService
 from .memory import MemoryService
@@ -89,7 +90,7 @@ class RelationshipPostprocessService:
                 self.storage.set_postprocess_diagnostics(session_id, diagnostics)
                 return
 
-            card = self.characters.get(card_id)
+            card = self._get_character(card_id, visitor_id)
             session = self.storage.get_session(session_id)
             frozen = bool(session["frozen"]) if session else False
             extracted = []
@@ -241,3 +242,9 @@ class RelationshipPostprocessService:
             })
             self.storage.set_postprocess_diagnostics(session_id, diagnostics)
             logger.exception("post-turn analysis failed for session %s: %s", session_id, exc)
+
+    def _get_character(self, character_id: str, visitor_id: str) -> CharacterCard:
+        card = self.storage.get_character_card(character_id, visitor_id)
+        if card:
+            return CharacterCard.model_validate(card)
+        return self.characters.get(character_id)

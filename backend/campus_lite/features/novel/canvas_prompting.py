@@ -20,6 +20,7 @@ class NovelCanvasPromptMixin:
             "scenes 每项必须包含 id, chapter_id, scene_order, current_scene, pov, present_characters, surface_event, "
             "character_desire, tension, required_facts, forbidden_progress, ending_beat, linked_material_ids。"
             "不要输出任何数字评分、冲突等级或低/中/高标签；所有张力都必须写成具体可见的文字原因。"
+            "画布和正文规划中禁止使用“用户”“助手”“AI”作为人物名或视角名，必须使用作品设定里的真实人物名。"
         )
 
     def _canvas_extend_system_prompt(self) -> str:
@@ -35,6 +36,7 @@ class NovelCanvasPromptMixin:
             "character_desire, tension, required_facts, forbidden_progress, ending_beat, linked_material_ids。"
             "不要输出任何数字评分、冲突等级或低/中/高标签；scene.tension 必须写具体阻碍，例如外部打断、"
             "时间压力、信息差或人物不能立刻开口的原因。"
+            "画布和正文规划中禁止使用“用户”“助手”“AI”作为人物名或视角名，必须使用作品设定里的真实人物名。"
         )
 
     def _canvas_source(
@@ -51,6 +53,7 @@ class NovelCanvasPromptMixin:
             f"类型：{project['genre']}",
             f"基调：{project['tone']}",
             f"主角：{project['protagonist']}",
+            self._canvas_identity_mapping(project),
             f"世界观：{self._clean_material_text(project['worldview'])}",
             f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
             "[Story Bible]",
@@ -84,6 +87,7 @@ class NovelCanvasPromptMixin:
             f"类型：{project['genre']}",
             f"基调：{project['tone']}",
             f"主角：{project['protagonist']}",
+            self._canvas_identity_mapping(project),
             f"世界观：{self._clean_material_text(project['worldview'])}",
             f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
             "[Story Bible]",
@@ -110,6 +114,36 @@ class NovelCanvasPromptMixin:
             "scenes: 至少每章 1 个场景对象，chapter_id 必须指向章节 id；"
             "threads: 线索对象数组，可为空；quality_rules: 字符串数组。"
         )
+
+    def _canvas_identity_mapping(self, project: Any) -> str:
+        protagonist = str(project["protagonist"] or project["title"] or "主角").strip()
+        character_name = self._project_character_name(project)
+        lines = [
+            "[身份映射]",
+            f"用户小说名/主角名：{protagonist}",
+        ]
+        if character_name:
+            lines.append(f"AI角色名：{character_name}")
+        lines.append("禁止在 chapters、scenes、threads 中把人物写成“用户”“助手”“AI”；如果素材里出现这些内部称呼，必须改写成上面的真实人物名。")
+        if character_name and character_name != protagonist:
+            lines.append(f"present_characters 必须使用“{protagonist}、{character_name}”这类真实姓名组合，不要写“{protagonist}、用户”。")
+        else:
+            lines.append(f"视角和人物欲望必须围绕“{protagonist}”等真实姓名表达，不要写“用户视角”或“用户想要”。")
+        return "\n".join(lines)
+
+    def _project_character_name(self, project: Any) -> str:
+        try:
+            character_id = str(project["character_id"] or "").strip()
+            visitor_id = str(project["visitor_id"] or "").strip()
+        except Exception:
+            return ""
+        if not character_id:
+            return ""
+        try:
+            card = self._require_storage().get_character_card(character_id, visitor_id)
+        except Exception:
+            card = None
+        return str((card or {}).get("name") or "").strip()
 
     def _canvas_extend_source(
         self,
@@ -142,6 +176,7 @@ class NovelCanvasPromptMixin:
             f"类型：{project['genre']}",
             f"基调：{project['tone']}",
             f"主角：{project['protagonist']}",
+            self._canvas_identity_mapping(project),
             f"世界观：{self._clean_material_text(project['worldview'])}",
             f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
             "[Story Bible]",
