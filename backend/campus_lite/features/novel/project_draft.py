@@ -13,6 +13,7 @@ from ...schemas import (
     NovelProjectDraftGenerateResponse,
     StoryItem,
 )
+from .setting_profiles import infer_novel_setting_type, novel_setting_guidance
 
 logger = logging.getLogger(__name__)
 
@@ -157,13 +158,18 @@ class NovelProjectDraftMixin:
         title_seed = seed.split("，")[0].split(",")[0].split("。")[0].strip()[:32]
         title = current.title or (f"{title_seed}计划" if title_seed else f"{character.name}的长篇计划")
         protagonist = current.protagonist or character.name
-        genre = current.genre or "校园日常长篇"
+        genre = current.genre or "现代日常长篇"
         genre_hint = self._genre_hint_from_prompt(seed)
         if genre_hint and not self._genre_matches_hint(genre, genre_hint):
             genre = genre_hint
         tone = current.tone or "温柔、克制、日常"
+        setting_type = infer_novel_setting_type(
+            {"genre": genre, "worldview": current.worldview or "", "relationship_setup": current.relationship_setup or ""},
+            character,
+        )
+        setting_text = novel_setting_guidance(setting_type, character.setting_notes)
         worldview = current.worldview or (
-            f"故事从当前聊天积累出的日常关系出发，以{protagonist}与{character.name}的校园生活、共同话题和未完成约定为核心。"
+            f"故事从当前聊天积累出的关系出发，以{protagonist}与{character.name}在“{setting_text}”中的共同话题、未完成约定和外部事件为核心。"
             "场景保持可感知、低悬浮，事件推进依赖真实互动而不是突发巧合。"
         )
         relationship_setup = current.relationship_setup or (

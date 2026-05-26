@@ -13,7 +13,9 @@ import type {
   NovelProjectDraftGenerateRequest,
   NovelProjectDraftGenerateResponse,
   NovelProjectUpdateRequest,
-  NovelVersion
+  NovelVersion,
+  StoryEventPoolBindingRequest,
+  StoryEventPoolEventWriteRequest
 } from "../../types";
 
 export async function generateNovel(sessionId: string, payload: NovelGenerateRequest): Promise<NovelGenerateResponse> {
@@ -70,6 +72,40 @@ export async function buildStoryCanvas(projectId: string): Promise<NovelProject>
 
 export async function extendStoryCanvas(projectId: string, payload: NovelCanvasExtendRequest): Promise<NovelProject> {
   return request(`/api/novel/projects/${projectId}/canvas/extend`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function createStoryEventPoolEvent(projectId: string, payload: StoryEventPoolEventWriteRequest): Promise<NovelProject> {
+  return request(`/api/novel/projects/${projectId}/event-pool/events`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function updateStoryEventPoolEvent(projectId: string, eventId: string, payload: StoryEventPoolEventWriteRequest): Promise<NovelProject> {
+  return request(`/api/novel/projects/${projectId}/event-pool/events/${eventId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function retireStoryEventPoolEvent(projectId: string, eventId: string): Promise<NovelProject> {
+  return request(`/api/novel/projects/${projectId}/event-pool/events/${eventId}/retire`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export async function deleteStoryEventPoolEvent(projectId: string, eventId: string): Promise<NovelProject> {
+  return request(`/api/novel/projects/${projectId}/event-pool/events/${eventId}`, {
+    method: "DELETE"
+  });
+}
+
+export async function bindStoryEventPoolEvent(projectId: string, chapterId: string, payload: StoryEventPoolBindingRequest): Promise<NovelProject> {
+  return request(`/api/novel/projects/${projectId}/chapters/${chapterId}/event-pool-binding`, {
     method: "POST",
     body: JSON.stringify(payload)
   });

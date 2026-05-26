@@ -1,5 +1,5 @@
 import { request } from "../../lib/apiClient";
-import type { CharacterCard } from "../../types";
+import type { CharacterCard, CharacterSettingType } from "../../types";
 
 export type CharacterWritePayload = Omit<CharacterCard, "id" | "origin" | "owner_visitor_id"> & {
   visitor_id: string;
@@ -28,6 +28,9 @@ export async function deleteCharacter(characterId: string, visitorId: string): P
 export async function generateCharacterDraft(
   visitorId: string,
   prompt: string,
+  settingType: CharacterSettingType,
+  settingNotes: string,
+  draftMode: "complete" | "rewrite",
   template?: Partial<CharacterCard>
 ): Promise<{ character: Partial<CharacterCard>; diagnostics: Record<string, unknown> }> {
   return request("/api/characters/draft", {
@@ -35,6 +38,9 @@ export async function generateCharacterDraft(
     body: JSON.stringify({
       visitor_id: visitorId,
       prompt,
+      setting_type: settingType,
+      setting_notes: settingNotes,
+      draft_mode: draftMode,
       template: template || null
     })
   });

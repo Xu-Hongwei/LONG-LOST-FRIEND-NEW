@@ -1,4 +1,4 @@
-import type { NovelChapter, NovelChapterStatus, StoryCanvas, StoryCanvasChapter, StoryCanvasScene } from "../../types";
+import type { NovelChapter, NovelChapterStatus, StoryCanvas, StoryCanvasChapter, StoryCanvasEvent, StoryCanvasEventPool, StoryCanvasScene } from "../../types";
 import { sceneCardFields } from "./constants";
 
 export type ChapterSceneCardDraft = Record<string, string>;
@@ -11,6 +11,13 @@ export function emptyStoryCanvas(): StoryCanvas {
     chapters: [],
     scenes: [],
     threads: [],
+    event_pool: {
+      version: 1,
+      target_active: 10,
+      setting_type: "modern_daily",
+      active: [],
+      retired: []
+    },
     quality_rules: []
   };
 }
@@ -19,6 +26,44 @@ export function stringArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
   const text = String(value || "").trim();
   return text ? text.split(/[；;]\s*/).map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function normalizeStoryEvent(value: unknown, index: number): StoryCanvasEvent {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return {
+    id: String(raw.id || `evt_${index + 1}`),
+    place: String(raw.place || ""),
+    time_anchor: String(raw.time_anchor || ""),
+    event: String(raw.event || ""),
+    hook: String(raw.hook || ""),
+    motifs: stringArray(raw.motifs),
+    use_mode: String(raw.use_mode || "guide"),
+    status: String(raw.status || "fresh"),
+    source: String(raw.source || "setting_profile"),
+    used_chapter_ids: stringArray(raw.used_chapter_ids),
+    bound_chapter_orders: stringArray(raw.bound_chapter_orders),
+    bound_chapter_titles: stringArray(raw.bound_chapter_titles),
+    used_summary: String(raw.used_summary || ""),
+    tags: raw.tags && typeof raw.tags === "object" ? raw.tags as Record<string, unknown> : {},
+    source_reason: String(raw.source_reason || ""),
+    selection_score: Number(raw.selection_score || 0),
+    selection_reasons: stringArray(raw.selection_reasons),
+    selection_penalties: stringArray(raw.selection_penalties)
+  };
+}
+
+function normalizeStoryEventPool(value: unknown): StoryCanvasEventPool {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const active = Array.isArray(raw.active) ? raw.active : [];
+  const retired = Array.isArray(raw.retired) ? raw.retired : [];
+  return {
+    version: Number(raw.version || 1),
+    target_active: Number(raw.target_active || 10),
+    setting_type: String(raw.setting_type || "modern_daily"),
+    active: active.map(normalizeStoryEvent),
+    retired: retired.map(normalizeStoryEvent),
+    updated_at: String(raw.updated_at || "")
+  };
 }
 
 export function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
@@ -31,6 +76,7 @@ export function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
   return {
     version: Number(raw.version || 1),
     mode: String(raw.mode || "story_canvas"),
+    event_pool: normalizeStoryEventPool(raw.event_pool),
     acts: acts.map((item, index) => {
       const act = item as Record<string, unknown>;
       return {
@@ -47,6 +93,7 @@ export function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
         id: String(chapter.id || `canvas_ch_${index + 1}`),
         act_id: String(chapter.act_id || "act_1"),
         chapter_order: Number(chapter.chapter_order || index + 1),
+        event_pool_id: String(chapter.event_pool_id || ""),
         title: String(chapter.title || `第 ${index + 1} 章`),
         goal: String(chapter.goal || ""),
         external_event: String(chapter.external_event || ""),
@@ -62,6 +109,9 @@ export function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
         status: String(chapter.status || "planned") as StoryCanvasChapter["status"],
         emotion_curve: String(chapter.emotion_curve || ""),
         scene_ids: stringArray(chapter.scene_ids),
+        event_pool_score: Number(chapter.event_pool_score || 0),
+        event_pool_reasons: stringArray(chapter.event_pool_reasons),
+        event_pool_penalties: stringArray(chapter.event_pool_penalties),
         completed_summary: String(chapter.completed_summary || ""),
         actual_word_count: Number(chapter.actual_word_count || 0),
         completed_at: String(chapter.completed_at || "")

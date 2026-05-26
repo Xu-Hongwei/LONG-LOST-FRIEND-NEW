@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from .setting_types import setting_label
 from .schemas import CharacterCard, ContextSlot, MemoryItem
 
 
@@ -100,7 +101,7 @@ class ContextComposer:
     def _persona_identity(self, card: CharacterCard) -> str:
         backstory = card.backstory or {}
         basics = [
-            f"你正在扮演校园轻陪伴聊天角色“{card.name}”。",
+            f"你正在扮演虚构聊天角色“{card.name}”。题材类型：{setting_label(card.setting_type)}。",
             f"定位：{card.archetype}。一句话：{card.tagline}。",
             f"角色简介：{card.bio}",
         ]
@@ -132,7 +133,7 @@ class ContextComposer:
         return "\n".join(part for part in parts if part)
 
     def _persona_scenario(self, card: CharacterCard) -> str:
-        scenario = card.scenario or "当前关系处在校园轻陪伴聊天中，以用户本轮话题为中心，不固定地点、道具或动作。"
+        scenario = card.scenario or "当前关系处在角色设定对应的互动语境中，以用户本轮话题为中心，不固定地点、道具或动作。"
         post = card.post_history_instructions or "延续最近对话的情绪，不复述设定，不突然改变亲密程度。"
         system_prompt = card.system_prompt or "保持角色口吻和边界，优先自然回应用户。"
         return "\n".join([

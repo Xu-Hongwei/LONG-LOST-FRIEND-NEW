@@ -5,6 +5,8 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
+from ..setting_types import normalize_setting_type
+
 
 class CharacterStorageMixin:
     def upsert_character(self, card: dict[str, Any], owner_visitor_id: str = "", origin: str = "builtin") -> None:
@@ -111,6 +113,8 @@ class CharacterStorageMixin:
             "archetype": archetype,
             "tagline": str(card.get("tagline") or "").strip()[:160] or f"{name}的自定义角色卡",
             "gender": str(card.get("gender") or "unknown").strip()[:32] or "unknown",
+            "setting_type": normalize_setting_type(card.get("setting_type")),
+            "setting_notes": str(card.get("setting_notes") or "").strip()[:800],
             "bio": str(card.get("bio") or "").strip()[:1200] or f"{name}是一个由用户创建的聊天角色。",
             "speech_style": str(card.get("speech_style") or "").strip()[:800] or "自然、稳定，跟随用户当前话题回应。",
             "likes": self._short_list(card.get("likes"), 12, 80),
@@ -127,6 +131,7 @@ class CharacterStorageMixin:
             "interaction_policy": card.get("interaction_policy") if isinstance(card.get("interaction_policy"), dict) else {},
             "anti_patterns": self._short_list(card.get("anti_patterns"), 12, 160),
             "backstory": card.get("backstory") if isinstance(card.get("backstory"), dict) else {},
+            "story_seed_pool": self._story_seed_pool(card.get("story_seed_pool")),
             "voice": card.get("voice") if isinstance(card.get("voice"), dict) else {},
             "visual": card.get("visual") if isinstance(card.get("visual"), dict) else {},
             "origin": origin,
@@ -147,6 +152,16 @@ class CharacterStorageMixin:
             if len(result) >= limit:
                 break
         return result
+
+    def _story_seed_pool(self, value: Any) -> dict[str, list[str]]:
+        source = value if isinstance(value, dict) else {}
+        return {
+            "places": self._short_list(source.get("places"), 8, 120),
+            "event_seeds": self._short_list(source.get("event_seeds"), 8, 180),
+            "hook_seeds": self._short_list(source.get("hook_seeds"), 8, 180),
+            "motifs": self._short_list(source.get("motifs"), 8, 120),
+            "forbidden_defaults": self._short_list(source.get("forbidden_defaults"), 8, 120),
+        }
 
     def _row_to_character_card(self, row: sqlite3.Row) -> dict[str, Any]:
         try:

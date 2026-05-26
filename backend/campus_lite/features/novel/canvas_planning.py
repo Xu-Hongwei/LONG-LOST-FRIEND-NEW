@@ -4,6 +4,15 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from .event_pool import (
+    advance_story_event_pool,
+    apply_story_event_pool_delta,
+    bind_story_event_pool_to_chapters,
+    normalize_story_event_pool,
+    story_event_for_order,
+)
+from .setting_profiles import infer_novel_setting_type, novel_setting_profile
+
 
 class NovelCanvasPlanningMixin:
     def _default_extension_canvas(
@@ -18,43 +27,34 @@ class NovelCanvasPlanningMixin:
         act_id = f"rolling_act_{start}_{start + count - 1}"
         open_threads = [str(item) for item in novel_state.get("open_threads", []) if str(item).strip()]
         anchor = open_threads[0] if open_threads else "上一次被打断的话题还没有真正说完。"
+        setting_type = infer_novel_setting_type(project)
+        profile = novel_setting_profile(setting_type)
+        event_pool = normalize_story_event_pool(current_canvas.get("event_pool"), setting_type)
         chapters: list[dict[str, Any]] = []
         scenes: list[dict[str, Any]] = []
-        titles = ["借来的伞", "公告栏前", "社团教室", "周末之前", "雨停以后", "旧便签"]
+        titles = profile["titles"]
         for offset in range(count):
             order = start + offset
             chapter_id = f"canvas_ch_{order}"
             scene_id = f"scene_{order}"
             title = titles[offset % len(titles)]
-            place = ["图书馆门口", "教学楼公告栏前", "社团教室外", "校门口小路", "自习室窗边", "操场看台"][offset % 6]
-            event = [
-                "临时降雨让两人不得不共用一把伞去取被落下的资料。",
-                "公告栏上的活动名单出现误会，两人一起确认报名信息。",
-                "社团教室临时缺人，两人被同学拉去帮忙整理器材。",
-                "原定出行前时间被课程调整打乱，两人需要重新约定。",
-                "雨停后路面积水，两人绕路时发现之前提到的小店。",
-                "旧便签从书页里滑出来，上面的话让未说完的问题重新出现。",
-            ][offset % 6]
-            ending = [
-                "伞柄被还回去时，林晚栀发现里面夹着一张没写完的借阅单。",
-                "名单旁边多出一个陌生名字，让原本简单的计划变得不确定。",
-                "灯忽然灭了一下，两人同时停住，没有把刚才的问题问完。",
-                "新的时间只剩一个空位，林晚栀第一次主动问他是否方便。",
-                "小店门口挂着暂停营业的牌子，约定被迫留到下一次。",
-                "她看见便签背面多了一行字，却没有立刻问出口。",
-            ][offset % 6]
+            pool_event = story_event_for_order(event_pool, order, setting_type)
+            place = pool_event.get("place") or profile["places"][offset % len(profile["places"])]
+            event = pool_event.get("event") or profile["events"][offset % len(profile["events"])]
+            ending = pool_event.get("hook") or profile["endings"][offset % len(profile["endings"])]
             chapters.append({
                 "id": chapter_id,
                 "act_id": act_id,
                 "chapter_order": order,
+                "event_pool_id": str(pool_event.get("id") or ""),
                 "title": f"第{order}章 {title}",
-                "goal": f"承接“{anchor[:70]}”，本章把场面放在{place}：{event}林晚栀需要先处理眼前麻烦，却被时间、旁人或信息差打断；她做出一个不越界的小选择，让两人多一件可回望的共同经历。",
+                "goal": f"承接“{anchor[:70]}”，本章把场面放在{place}：{event}主角需要先处理眼前麻烦，却被时间、旁人或信息差打断；主角做出一个不越界的小选择，让两人多一件可回望的共同经历。",
                 "external_event": event,
                 "trigger_event": event,
-                "immediate_reaction": "林晚栀先处理眼前的小麻烦，没有急着解释自己的在意。",
+                "immediate_reaction": "主角先处理眼前的小麻烦，没有急着解释自己的在意。",
                 "obstacle_escalation": "旁人的催促、时间限制或突发变化让他们不能把话说完整。",
                 "counterpart_reaction": "对方没有追问，只用一个具体动作帮她把场面接住。",
-                "character_choice": "林晚栀没有立刻退开，而是主动完成一个小选择。",
+                "character_choice": "主角没有立刻退开，而是主动完成一个小选择。",
                 "scene_consequence": "两人多了一件只有彼此知道的小事。",
                 "relationship_shift": "从可以聊天推进到能一起处理小麻烦。",
                 "ending_hook": ending,
@@ -68,7 +68,7 @@ class NovelCanvasPlanningMixin:
                 "chapter_id": chapter_id,
                 "scene_order": 1,
                 "current_scene": place,
-                "pov": "第三人称限知，林晚栀感受靠前。",
+                "pov": f"第三人称限知，{project['protagonist']}感受靠前。",
                 "present_characters": f"{project['protagonist']}、对方、路过同学",
                 "surface_event": event,
                 "character_desire": "她想把眼前的小麻烦处理得自然一点，也想确认对方是否还记得上一章留下的话。",
@@ -81,6 +81,7 @@ class NovelCanvasPlanningMixin:
         return {
             "version": 1,
             "mode": "story_canvas",
+            "event_pool": event_pool,
             "acts": [{"id": act_id, "order": start, "title": f"第{start}-{start + count - 1}章滚动小弧线", "purpose": "承接已写正文，规划下一组局部关系推进。", "chapter_ids": [item["id"] for item in chapters]}],
             "chapters": chapters,
             "scenes": scenes,
@@ -157,10 +158,24 @@ class NovelCanvasPlanningMixin:
         ]:
             if key in scene_card and scene_card.get(key) not in (None, "", []):
                 scene[key] = scene_card[key]
+        setting_type = self._json_dict(next_canvas.get("diagnostics")).get("setting_type") or infer_novel_setting_type(project)
+        next_canvas["event_pool"] = advance_story_event_pool(
+            next_canvas.get("event_pool"),
+            str(setting_type),
+            order,
+            str(canvas_chapter.get("event_pool_id") or ""),
+            canvas_chapter,
+        )
         compacted = self._compact_story_canvas(next_canvas)
         storage.update_novel_project(project_id, {"story_canvas": compacted, "outline": self._canvas_outline(compacted)})
 
-    def _merge_extended_canvas(self, current: dict[str, Any], extension: dict[str, Any], from_order: int) -> dict[str, Any]:
+    def _merge_extended_canvas(
+        self,
+        current: dict[str, Any],
+        extension: dict[str, Any],
+        from_order: int,
+        scoring_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         kept_chapters = [item for item in self._canvas_chapters(current) if int(item.get("chapter_order") or 0) <= from_order]
         kept_ids = {str(item.get("id")) for item in kept_chapters}
         kept_scenes = [item for item in self._canvas_scenes(current) if str(item.get("chapter_id")) in kept_ids]
@@ -221,19 +236,23 @@ class NovelCanvasPlanningMixin:
         merged_chapters = [*kept_chapters, *normalized_chapters]
         merged_scenes = [*kept_scenes, *normalized_scenes]
         merged_threads = [*kept_threads, *normalized_threads][-24:]
+        event_pool_source = extension.get("event_pool") if isinstance(extension.get("event_pool"), dict) else current.get("event_pool")
+        event_pool = normalize_story_event_pool(event_pool_source, str(diagnostics.get("setting_type") or "modern_daily"))
+        event_pool = apply_story_event_pool_delta(event_pool, extension.get("event_pool_delta"), str(diagnostics.get("setting_type") or "modern_daily"))
         return self._compact_story_canvas({
             **current,
             "version": self._coerce_int(current.get("version"), 1, 1, 99),
             "mode": "story_canvas",
+            "event_pool": event_pool,
             "acts": [*(current.get("acts") if isinstance(current.get("acts"), list) else []), *(extension.get("acts") if isinstance(extension.get("acts"), list) else [])],
             "chapters": merged_chapters,
             "scenes": merged_scenes,
             "threads": merged_threads,
             "quality_rules": self._unique_short_list([*(current.get("quality_rules") if isinstance(current.get("quality_rules"), list) else []), *(extension.get("quality_rules") if isinstance(extension.get("quality_rules"), list) else [])], 20),
             "diagnostics": diagnostics,
-        })
+        }, scoring_context)
 
-    def _compact_story_canvas(self, canvas: dict[str, Any]) -> dict[str, Any]:
+    def _compact_story_canvas(self, canvas: dict[str, Any], scoring_context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not canvas:
             return {}
         next_canvas = json.loads(json.dumps(canvas, ensure_ascii=False))
@@ -256,6 +275,12 @@ class NovelCanvasPlanningMixin:
             and (not str(item.get("payoff_chapter_id") or "") or str(item.get("payoff_chapter_id") or "") in chapter_ids)
         ][-24:] if isinstance(next_canvas.get("threads"), list) else []
         diagnostics = self._json_dict(next_canvas.get("diagnostics"))
+        next_canvas["event_pool"] = bind_story_event_pool_to_chapters(
+            next_canvas.get("event_pool"),
+            chapters,
+            str(diagnostics.get("setting_type") or "modern_daily"),
+            scoring_context,
+        )
         next_canvas["diagnostics"] = {
             **diagnostics,
             "compact_acts": len(next_canvas["acts"]),

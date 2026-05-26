@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any
 
+from ..setting_types import normalize_setting_type
+
 from ..schemas import MemoryType
 
 
@@ -152,14 +154,92 @@ class LlmParsingMixin:
                     return 0.3
                 return default
 
+        def normalize_gender(value: Any) -> str:
+            text_value = str(value or "").strip()
+            lowered = text_value.lower()
+            mapping = {
+                "female": "女",
+                "woman": "女",
+                "girl": "女",
+                "女": "女",
+                "male": "男",
+                "man": "男",
+                "boy": "男",
+                "男": "男",
+                "nonbinary": "非二元",
+                "non-binary": "非二元",
+                "nb": "非二元",
+                "非二元": "非二元",
+                "unknown": "未设定",
+                "unspecified": "未设定",
+                "未设定": "未设定",
+            }
+            return mapping.get(lowered, text_value[:32] or "未设定")
+
+        def normalize_action_density(value: Any) -> str:
+            text_value = str(value or "").strip()
+            lowered = text_value.lower()
+            enum_values = {"very_low", "low", "medium_low", "medium", "high"}
+            if lowered in enum_values:
+                return ""
+            return text_value[:220]
+
+        def seed_list(
+            source: dict[str, Any],
+            key: str,
+            limit: int = 8,
+            item_limit: int = 120,
+            aliases: list[str] | None = None,
+            kind: str = "general",
+        ) -> list[str]:
+            value = source.get(key)
+            for alias in aliases or []:
+                if value in (None, "", []):
+                    value = source.get(alias)
+            if isinstance(value, str):
+                candidates = re.split(r"[\n,，、]+", value)
+            elif isinstance(value, list):
+                candidates = value
+            else:
+                candidates = []
+            result: list[str] = []
+            for item in candidates:
+                text_value = clean_seed_text(str(item or ""), kind, item_limit)
+                if text_value:
+                    result.append(text_value)
+                if len(result) >= limit:
+                    break
+            return result
+
+        def clean_seed_text(value: str, kind: str, item_limit: int) -> str:
+            text_value = re.sub(r"^\s*[-*•\d.、)）]+\s*", "", value or "").strip()
+            text_value = re.sub(r"\s+", " ", text_value)
+            if not text_value:
+                return ""
+            if kind == "place":
+                if len(text_value) > 34 or re.search(r"[。！？!?；;]", text_value):
+                    return ""
+                if any(token in text_value for token in ["生活在", "性格", "名字", "角色设定", "用户粗设定"]):
+                    return ""
+            elif kind == "motif":
+                if len(text_value) > 24 or re.search(r"[。！？!?；;]", text_value):
+                    return ""
+            elif kind in {"event", "hook"}:
+                if any(token in text_value for token in ["生活在", "性格如", "名字一般", "角色设定"]):
+                    return ""
+            return text_value[:item_limit]
+
         interaction = raw.get("interaction_policy") if isinstance(raw.get("interaction_policy"), dict) else {}
         voice = raw.get("voice") if isinstance(raw.get("voice"), dict) else {}
         visual = raw.get("visual") if isinstance(raw.get("visual"), dict) else {}
+        story_seed = raw.get("story_seed_pool") if isinstance(raw.get("story_seed_pool"), dict) else {}
         cleaned = {
             "name": text("name", 80, "自定义角色"),
             "archetype": text("archetype", 120, "自定义人格"),
             "tagline": text("tagline", 160),
-            "gender": text("gender", 32, "unknown") or "unknown",
+            "gender": normalize_gender(raw.get("gender")),
+            "setting_type": normalize_setting_type(raw.get("setting_type")),
+            "setting_notes": text("setting_notes", 800),
             "bio": text("bio", 1200),
             "speech_style": text("speech_style", 800),
             "likes": string_list("likes", 12, 80),
@@ -175,13 +255,20 @@ class LlmParsingMixin:
             "post_history_instructions": text("post_history_instructions", 2000),
             "interaction_policy": {
                 "initiative_level": number(interaction.get("initiative_level"), 0.45),
-                "action_density": str(interaction.get("action_density") or "low")[:40],
+                "action_density": normalize_action_density(interaction.get("action_density")),
                 "action_style": str(interaction.get("action_style") or "").strip()[:800],
                 "comfort_style": str(interaction.get("comfort_style") or "").strip()[:800],
                 "question_style": str(interaction.get("question_style") or "").strip()[:800],
                 "memory_style": str(interaction.get("memory_style") or "").strip()[:800],
             },
             "anti_patterns": string_list("anti_patterns", 12, 160),
+            "story_seed_pool": {
+                "places": seed_list(story_seed, "places", aliases=["locations", "place_seeds", "location_seeds"], kind="place"),
+                "event_seeds": seed_list(story_seed, "event_seeds", item_limit=180, aliases=["events", "event_pool", "plot_events"], kind="event"),
+                "hook_seeds": seed_list(story_seed, "hook_seeds", item_limit=180, aliases=["hooks", "ending_hooks", "plot_hooks"], kind="hook"),
+                "motifs": seed_list(story_seed, "motifs", aliases=["images", "symbols"], kind="motif"),
+                "forbidden_defaults": seed_list(story_seed, "forbidden_defaults", aliases=["forbidden", "avoid_defaults"]),
+            },
             "voice": {
                 "sentence_rhythm": str(voice.get("sentence_rhythm") or "").strip()[:800],
                 "signature_moves": [

@@ -10,6 +10,7 @@ from ...schemas import (
     NovelProjectResponse,
     StoryItem,
 )
+from .setting_profiles import novel_setting_guidance
 from .quality import INTERNAL_ID_PATTERN
 
 
@@ -114,6 +115,13 @@ class NovelProjectMixin:
         storage = self._require_storage()
         story_bible = self.build_story_bible(character, memories, story_items)
         title = (request.title or "").strip() or f"{character.name}的长篇计划"
+        effective_genre = request.genre
+        if (
+            request.genre == NovelProjectCreateRequest.model_fields["genre"].default
+            and character.setting_type == "campus"
+            and not any(str(value or "").strip() for value in [request.title, request.worldview, request.relationship_setup, request.outline])
+        ):
+            effective_genre = "校园日常长篇"
         worldview = request.worldview.strip() or self._default_worldview(character, story_items)
         relationship_setup = request.relationship_setup.strip() or self._default_relationship_setup(
             visitor_id,
@@ -124,11 +132,12 @@ class NovelProjectMixin:
         outline = request.outline.strip() or self._default_outline(character, story_items)
         story_canvas = request.story_canvas or self._default_story_canvas(
             title,
-            request.genre,
+            effective_genre,
             request.tone,
             request.protagonist or character.name,
             story_bible,
             story_items,
+            character,
         )
         story_canvas = self._compact_story_canvas(story_canvas)
         if not request.outline.strip():
@@ -139,7 +148,7 @@ class NovelProjectMixin:
             visitor_id,
             character.id,
             title,
-            request.genre,
+            effective_genre,
             request.tone,
             request.protagonist or character.name,
             worldview,
@@ -337,8 +346,9 @@ class NovelProjectMixin:
         return clean[:90]
 
     def _default_worldview(self, character: CharacterCard, story_items: list[StoryItem]) -> str:
-        motifs = "、".join(item.label for item in story_items if item.kind == "motif") or "日常校园与聊天里的细节"
-        return f"故事发生在贴近日常的校园/生活场域，核心意象包括{motifs}。世界观服务于人物关系，不制造脱离会话事实的大设定。"
+        motifs = "、".join(item.label for item in story_items if item.kind == "motif") or "聊天里的细节与未完成话题"
+        setting = novel_setting_guidance(character.setting_type, character.setting_notes)
+        return f"故事发生在{setting}中，核心意象包括{motifs}。世界观服务于人物关系，不制造脱离会话事实的大设定。"
 
     def _default_relationship_setup(
         self,

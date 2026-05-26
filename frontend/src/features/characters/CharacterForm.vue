@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { CharacterDraft } from "./useCharacterWorkshop";
+import { settingLabel } from "./useCharacterWorkshop";
 
 const props = defineProps<{
   busy: boolean;
@@ -33,8 +34,9 @@ defineEmits<{
         <p>{{ draft.tagline || draft.archetype || "先写一句粗设定，或用 AI 扩写出完整角色卡。" }}</p>
         <div class="character-preview-tags">
           <span>{{ draft.archetype || "未设定定位" }}</span>
-          <span>{{ draft.gender }}</span>
-          <span>{{ draft.action_density }}</span>
+          <span>{{ settingLabel(draft.setting_type) }}</span>
+          <span v-if="draft.gender.trim()">{{ draft.gender }}</span>
+          <span v-if="draft.action_density.trim()">{{ draft.action_density }}</span>
         </div>
       </div>
     </section>
@@ -59,16 +61,15 @@ defineEmits<{
         </label>
         <label>
           <span>性别</span>
-          <select v-model="draft.gender" :disabled="props.busy">
-            <option value="unknown">unknown</option>
-            <option value="female">female</option>
-            <option value="male">male</option>
-            <option value="nonbinary">nonbinary</option>
-          </select>
+          <input v-model="draft.gender" :disabled="props.busy" placeholder="由 AI 生成，可手动编辑" />
         </label>
         <label>
           <span>强调色</span>
           <input v-model="draft.accent" type="color" :disabled="props.busy" />
+        </label>
+        <label class="span-2">
+          <span>题材补充</span>
+          <input v-model="draft.setting_notes" :disabled="props.busy" placeholder="例如：低魔江湖、近未来雨城、成人职场合伙人关系" />
         </label>
       </div>
       <label>
@@ -134,6 +135,36 @@ defineEmits<{
     <section class="character-form-section">
       <header>
         <p class="eyebrow">04</p>
+        <h4>默认故事素材包</h4>
+      </header>
+      <p class="story-seed-note">只作为角色默认灵感；创建小说时会按项目题材转译，不会强制写入每一本作品。</p>
+      <div class="character-form-grid">
+        <label>
+          <span>可转译场域</span>
+          <textarea v-model="draft.seed_places" rows="3" :disabled="props.busy" />
+        </label>
+        <label>
+          <span>事件模式</span>
+          <textarea v-model="draft.seed_events" rows="3" :disabled="props.busy" />
+        </label>
+        <label>
+          <span>关系钩子</span>
+          <textarea v-model="draft.seed_hooks" rows="3" :disabled="props.busy" />
+        </label>
+        <label>
+          <span>角色意象</span>
+          <textarea v-model="draft.seed_motifs" rows="3" :disabled="props.busy" />
+        </label>
+        <label class="span-2">
+          <span>避免套用</span>
+          <textarea v-model="draft.seed_forbidden" rows="2" :disabled="props.busy" />
+        </label>
+      </div>
+    </section>
+
+    <section class="character-form-section">
+      <header>
+        <p class="eyebrow">05</p>
         <h4>行为策略</h4>
       </header>
       <div class="character-form-grid compact">
@@ -143,11 +174,7 @@ defineEmits<{
         </label>
         <label>
           <span>动作密度</span>
-          <select v-model="draft.action_density" :disabled="props.busy">
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-          </select>
+          <input v-model="draft.action_density" :disabled="props.busy" placeholder="由 AI 生成，可手动编辑" />
         </label>
       </div>
       <div class="character-form-grid">
@@ -172,7 +199,7 @@ defineEmits<{
 
     <section class="character-form-section">
       <header>
-        <p class="eyebrow">05</p>
+        <p class="eyebrow">06</p>
         <h4>声音样例</h4>
       </header>
       <div class="character-form-grid">

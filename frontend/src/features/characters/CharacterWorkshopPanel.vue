@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { CharacterCard } from "../../types";
 import CharacterForm from "./CharacterForm.vue";
-import { useCharacterWorkshop } from "./useCharacterWorkshop";
+import { settingLabel, useCharacterWorkshop } from "./useCharacterWorkshop";
 
 const props = defineProps<{
   visitorId: string;
@@ -35,6 +35,23 @@ function startChat(characterId: string) {
   emit("refresh", characterId);
   emit("startChat", characterId);
 }
+
+function generationSourceLabel(source: unknown) {
+  if (source === "remote") return "远程返回";
+  if (source === "partial") return "部分远程";
+  if (source === "fallback") return "本地兜底";
+  if (source === "local") return "本地生成";
+  return String(source || "");
+}
+
+function generationSourceTone(source: unknown) {
+  if (source === "partial") return "partial";
+  return source === "remote" ? "remote" : "fallback";
+}
+
+function generationReason(diagnostics: Record<string, unknown>) {
+  return String(diagnostics.reason || diagnostics.error || diagnostics.fallback_reason || "").trim();
+}
 </script>
 
 <template>
@@ -58,8 +75,41 @@ function startChat(characterId: string) {
           v-model="workshop.generationPrompt.value"
           rows="5"
           :disabled="workshop.busy.value"
-          placeholder="例：一个嘴硬但很会照顾人的社团学姐，讲话短促，关系推进慢。"
+          placeholder="先选题材，再写一句话。例：冷淡但可靠的医修，讲话短，关系推进慢。"
         />
+        <label class="generator-setting">
+          <span>题材类型</span>
+          <select v-model="workshop.draft.setting_type" :disabled="workshop.busy.value">
+            <option v-for="option in workshop.settingOptions" :key="option.value" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
+        <div class="generator-mode" role="group" aria-label="角色卡生成模式">
+          <button
+            type="button"
+            :class="{ active: workshop.draftMode.value === 'complete' }"
+            :disabled="workshop.busy.value"
+            @click="workshop.draftMode.value = 'complete'"
+          >
+            补全润色
+          </button>
+          <button
+            type="button"
+            :class="{ active: workshop.draftMode.value === 'rewrite' }"
+            :disabled="workshop.busy.value"
+            @click="workshop.draftMode.value = 'rewrite'"
+          >
+            整卡重写
+          </button>
+        </div>
+        <small>
+          {{
+            workshop.draftMode.value === "rewrite"
+              ? "只保留名字、题材和一句话核心，整张角色卡重新生成。"
+              : "保留已写好的内容，补齐空字段并润色薄弱字段。"
+          }}
+        </small>
         <button
           type="button"
           class="wide generator-button"
@@ -72,51 +122,56 @@ function startChat(characterId: string) {
         </button>
         <div v-if="workshop.generating.value" class="generation-status">
           <span></span>
-          <p>正在生成结构化 JSON，并填入角色卡草稿。</p>
+          <p>正在请求远程结构化 JSON，并填入角色卡草稿。</p>
         </div>
-        <small v-else-if="workshop.generationDiagnostics.value.source">
-          {{ workshop.generationDiagnostics.value.source === "remote" ? "remote JSON" : "fallback draft" }}
-        </small>
-      </section>
-
-      <section class="workshop-panel">
-        <div class="workshop-panel-head">
-          <p class="eyebrow">Custom</p>
-          <strong>{{ workshop.customCharacters.value.length }}</strong>
-        </div>
-        <div class="workshop-list">
-          <article v-for="character in workshop.customCharacters.value" :key="character.id" class="workshop-character">
-            <span class="portrait" :style="{ '--accent': character.visual?.accent || '#8da2c8' }"></span>
-            <div>
-              <strong>{{ character.name }}</strong>
-              <small>{{ character.archetype }}</small>
-            </div>
-            <div class="workshop-actions">
-              <button type="button" class="ghost muted" @click="workshop.editCharacter(character)">编辑</button>
-              <button type="button" class="ghost muted" @click="startChat(character.id)">
-                {{ character.id === props.activeCharacterId ? "当前" : "开聊" }}
-              </button>
-              <button type="button" class="ghost danger" @click="removeCharacter(character)">删除</button>
-            </div>
-          </article>
-          <p v-if="!workshop.customCharacters.value.length" class="workshop-empty">还没有自建角色，可以先用 AI 扩写一版。</p>
+        <div
+          v-else-if="workshop.generationDiagnostics.value.source"
+          class="generation-source"
+          :class="generationSourceTone(workshop.generationDiagnostics.value.source)"
+        >
+          <strong>{{ generationSourceLabel(workshop.generationDiagnostics.value.source) }}</strong>
+          <span v-if="workshop.generationDiagnostics.value.source === 'remote'">结构化 JSON 已填入</span>
+          <span v-else-if="workshop.generationDiagnostics.value.source === 'partial'">
+            部分远程成功，其余字段使用本地兜底
+          </span>
+          <span v-else>使用本地草稿填入</span>
+          <em v-if="generationReason(workshop.generationDiagnostics.value)">
+            {{ generationReason(workshop.generationDiagnostics.value) }}
+          </em>
         </div>
       </section>
 
       <section class="workshop-panel">
         <div class="workshop-panel-head">
-          <p class="eyebrow">Templates</p>
-          <strong>{{ workshop.builtinCharacters.value.length }}</strong>
+          <p class="eyebrow">Library</p>
+          <strong>{{ props.characters.length }}</strong>
         </div>
         <div class="workshop-list">
-          <article v-for="character in workshop.builtinCharacters.value" :key="character.id" class="workshop-character compact">
-            <span class="portrait" :style="{ '--accent': character.visual?.accent || '#8da2c8' }"></span>
-            <div>
-              <strong>{{ character.name }}</strong>
-              <small>{{ character.archetype }}</small>
-            </div>
-            <button type="button" class="ghost muted" @click="workshop.useTemplate(character)">复制</button>
-          </article>
+          <template v-for="group in workshop.groupedCharacters.value" :key="group.settingType">
+            <p class="workshop-group-label">{{ group.label }}</p>
+            <article
+              v-for="character in group.characters"
+              :key="character.id"
+              class="workshop-character"
+              :class="{ compact: character.origin !== 'custom' }"
+            >
+              <span class="portrait" :style="{ '--accent': character.visual?.accent || '#8da2c8' }"></span>
+              <div>
+                <strong>{{ character.name }}</strong>
+                <small>{{ character.archetype }}</small>
+                <small class="workshop-card-meta">{{ character.origin === "custom" ? "自建" : "模板" }}</small>
+              </div>
+              <div v-if="character.origin === 'custom'" class="workshop-actions">
+                <button type="button" class="ghost muted" @click="workshop.editCharacter(character)">编辑</button>
+                <button type="button" class="ghost muted" @click="startChat(character.id)">
+                  {{ character.id === props.activeCharacterId ? "当前" : "开聊" }}
+                </button>
+                <button type="button" class="ghost danger" @click="removeCharacter(character)">删除</button>
+              </div>
+              <button v-else type="button" class="ghost muted" @click="workshop.useTemplate(character)">复制</button>
+            </article>
+          </template>
+          <p v-if="!props.characters.length" class="workshop-empty">还没有角色，可以先用 AI 扩写一版。</p>
         </div>
       </section>
     </aside>

@@ -4,6 +4,8 @@ export interface CharacterCard {
   archetype: string;
   tagline: string;
   gender?: string;
+  setting_type?: CharacterSettingType;
+  setting_notes?: string;
   bio: string;
   speech_style: string;
   likes: string[];
@@ -26,6 +28,13 @@ export interface CharacterCard {
     memory_style?: string;
   };
   anti_patterns?: string[];
+  story_seed_pool?: {
+    places?: string[];
+    event_seeds?: string[];
+    hook_seeds?: string[];
+    motifs?: string[];
+    forbidden_defaults?: string[];
+  };
   voice?: {
     sentence_rhythm?: string;
     openings?: string[];
@@ -40,6 +49,18 @@ export interface CharacterCard {
   origin?: "builtin" | "custom";
   owner_visitor_id?: string;
 }
+
+export type CharacterSettingType =
+  | "campus"
+  | "modern_daily"
+  | "workplace"
+  | "xianxia_wuxia"
+  | "urban_fantasy"
+  | "mystery"
+  | "sci_fi"
+  | "historical"
+  | "fantasy_adventure"
+  | "custom";
 
 export interface MemoryItem {
   id: string;
@@ -233,6 +254,7 @@ export interface StoryCanvasChapter {
   id: string;
   act_id: string;
   chapter_order: number;
+  event_pool_id?: string;
   title: string;
   goal: string;
   external_event: string;
@@ -248,6 +270,9 @@ export interface StoryCanvasChapter {
   status: StoryCanvasChapterStatus;
   emotion_curve: string;
   scene_ids: string[];
+  event_pool_score?: number;
+  event_pool_reasons?: string[];
+  event_pool_penalties?: string[];
   completed_summary?: string;
   actual_word_count?: number;
   completed_at?: string;
@@ -279,9 +304,40 @@ export interface StoryCanvasThread {
   notes: string;
 }
 
+export interface StoryCanvasEvent {
+  id: string;
+  place: string;
+  time_anchor?: string;
+  event: string;
+  hook: string;
+  motifs: string[];
+  use_mode?: "strict" | "guide" | "flavor" | "free" | string;
+  status: "fresh" | "planned" | "used" | "mutated" | "retired" | string;
+  source: string;
+  used_chapter_ids: string[];
+  bound_chapter_orders?: string[];
+  bound_chapter_titles?: string[];
+  used_summary?: string;
+  tags?: Record<string, unknown>;
+  source_reason?: string;
+  selection_score?: number;
+  selection_reasons?: string[];
+  selection_penalties?: string[];
+}
+
+export interface StoryCanvasEventPool {
+  version: number;
+  target_active: number;
+  setting_type: string;
+  active: StoryCanvasEvent[];
+  retired: StoryCanvasEvent[];
+  updated_at?: string;
+}
+
 export interface StoryCanvas {
   version: number;
   mode: string;
+  event_pool?: StoryCanvasEventPool;
   acts: StoryCanvasAct[];
   chapters: StoryCanvasChapter[];
   scenes: StoryCanvasScene[];
@@ -364,6 +420,22 @@ export interface NovelCanvasExtendRequest {
   from_chapter_order: number;
   count?: number;
   instruction?: string;
+}
+
+export interface StoryEventPoolEventWriteRequest {
+  place: string;
+  time_anchor?: string;
+  event: string;
+  hook: string;
+  motifs?: string[];
+  use_mode?: "strict" | "guide" | "flavor" | "free";
+  source_reason?: string;
+  tags?: Record<string, unknown>;
+}
+
+export interface StoryEventPoolBindingRequest {
+  event_id?: string | null;
+  use_mode?: "strict" | "guide" | "flavor" | "free" | null;
 }
 
 export interface NovelInstructionOptimizeRequest {

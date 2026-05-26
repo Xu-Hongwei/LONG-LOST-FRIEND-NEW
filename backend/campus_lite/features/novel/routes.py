@@ -22,6 +22,8 @@ from ...schemas import (
     NovelProjectResponse,
     NovelProjectUpdateRequest,
     NovelVersion,
+    StoryEventPoolBindingRequest,
+    StoryEventPoolEventWriteRequest,
 )
 from ...storage import Storage, StoragePayloadError
 from ...story import StoryService
@@ -256,6 +258,46 @@ def register_novel_routes(
             return await novel.optimize_chapter_instruction(llm, project_id, payload)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/novel/projects/{project_id}/event-pool/events", response_model=NovelProjectResponse)
+    def create_event_pool_event(project_id: str, payload: StoryEventPoolEventWriteRequest) -> NovelProjectResponse:
+        try:
+            return novel.create_event_pool_event(project_id, payload)
+        except ValueError as exc:
+            status = 404 if "project" in str(exc).lower() else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.patch("/api/novel/projects/{project_id}/event-pool/events/{event_id}", response_model=NovelProjectResponse)
+    def update_event_pool_event(project_id: str, event_id: str, payload: StoryEventPoolEventWriteRequest) -> NovelProjectResponse:
+        try:
+            return novel.update_event_pool_event(project_id, event_id, payload)
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.post("/api/novel/projects/{project_id}/event-pool/events/{event_id}/retire", response_model=NovelProjectResponse)
+    def retire_event_pool_event(project_id: str, event_id: str) -> NovelProjectResponse:
+        try:
+            return novel.retire_event_pool_event(project_id, event_id)
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.delete("/api/novel/projects/{project_id}/event-pool/events/{event_id}", response_model=NovelProjectResponse)
+    def delete_event_pool_event(project_id: str, event_id: str) -> NovelProjectResponse:
+        try:
+            return novel.delete_event_pool_event(project_id, event_id)
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.post("/api/novel/projects/{project_id}/chapters/{chapter_id}/event-pool-binding", response_model=NovelProjectResponse)
+    def bind_event_pool_event(project_id: str, chapter_id: str, payload: StoryEventPoolBindingRequest) -> NovelProjectResponse:
+        try:
+            return novel.bind_event_pool_event_to_chapter(project_id, chapter_id, payload)
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc).lower() else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
 
     @app.post("/api/novel/projects/{project_id}/check", response_model=NovelContinuityReport)
     def check_novel_continuity(project_id: str, payload: NovelChapterGenerateRequest | None = None) -> NovelContinuityReport:

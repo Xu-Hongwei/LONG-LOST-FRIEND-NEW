@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { CanvasActionKey } from "./constants";
 import type { ChapterSceneCardDraft } from "./canvas";
-import type { NovelChapter, NovelChapterStatus, StoryCanvasChapter } from "../../types";
+import type { NovelChapter, NovelChapterStatus, StoryCanvasChapter, StoryCanvasEvent } from "../../types";
 import { formatNovelChapterTitle } from "./chapterTitle";
 
 type ChapterDraft = {
@@ -22,6 +22,7 @@ type ChapterLengthGuide = {
 defineProps<{
   activeNovelChapter: NovelChapter;
   activeCanvasChapter: StoryCanvasChapter | null;
+  activeCanvasEvent: StoryCanvasEvent | null;
   activeCanvasActionChain: { key: CanvasActionKey; label: string; text: string }[];
   sceneCardFields: { key: string; label: string; rows: number }[];
   novelChapterStatusOptions: { value: NovelChapterStatus; label: string }[];
@@ -46,6 +47,8 @@ defineEmits<{
   deleteChapter: [];
   generateChapter: [];
   optimizeInstruction: [];
+  clearEventBinding: [];
+  rebindEvent: [];
 }>();
 </script>
 
@@ -81,6 +84,33 @@ defineEmits<{
       <span>本章剧情概述</span>
       <textarea v-model="chapterDraft.goal" rows="3" />
     </label>
+    <section class="chapter-event-binding">
+      <div>
+        <p class="eyebrow">Event Binding</p>
+        <h4>当前章节采用事件</h4>
+      </div>
+      <div v-if="activeCanvasEvent" class="chapter-event-binding-grid">
+        <span>地点</span>
+        <strong>{{ activeCanvasEvent.place || "未设定地点" }}</strong>
+        <span>时间</span>
+        <strong>{{ activeCanvasEvent.time_anchor || "未设定时间锚点" }}</strong>
+        <span>事件</span>
+        <p>{{ activeCanvasEvent.event || "暂无事件描述" }}</p>
+        <span>钩子</span>
+        <p>{{ activeCanvasEvent.hook || "暂无钩子" }}</p>
+        <span>模式</span>
+        <strong>{{ activeCanvasEvent.use_mode || "guide" }}</strong>
+        <span>Score</span>
+        <strong>{{ activeCanvasEvent.selection_score || activeCanvasChapter?.event_pool_score || 0 }}</strong>
+        <span>Reasons</span>
+        <p>{{ (activeCanvasEvent.selection_reasons || activeCanvasChapter?.event_pool_reasons || []).join("；") || "暂无原因" }}</p>
+      </div>
+      <p v-else class="chapter-event-empty">未绑定项目事件</p>
+      <div class="chapter-event-actions">
+        <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="$emit('rebindEvent')">重新绑定</button>
+        <button type="button" class="ghost muted danger" :disabled="novelProjectBusy || !activeCanvasEvent" @click="$emit('clearEventBinding')">取消绑定</button>
+      </div>
+    </section>
     <section class="scene-card-editor">
       <div class="scene-card-head">
         <div>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -16,10 +17,11 @@ from campus_lite.characters import CharacterStore
 from campus_lite.composer import ComposeInput, ContextComposer
 from campus_lite.features.chat.service import ChatService
 from campus_lite.features.chat.time_awareness import build_time_awareness
+from campus_lite.features.novel.event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters, normalize_story_event_pool, score_story_event, story_event_for_chapter
 from campus_lite.llm import LlmClient
 from campus_lite.memory import MemoryService
 from campus_lite.novel import NovelService
-from campus_lite.schemas import CharacterCard, NovelChapterGenerateRequest, NovelGenerateRequest, NovelProjectCreateRequest, SendMessageRequest
+from campus_lite.schemas import CharacterCard, NovelChapterGenerateRequest, NovelGenerateRequest, NovelInstructionOptimizeRequest, NovelProjectCreateRequest, SendMessageRequest
 from campus_lite.schemas import MemoryItem
 from campus_lite.state import CharacterStateService
 from campus_lite.storage import Storage, StoragePayloadError
@@ -49,8 +51,12 @@ class CampusLiteCoreTest(unittest.TestCase):
 
     def test_character_cards_load(self) -> None:
         cards = CharacterStore().list_cards()
-        self.assertGreaterEqual(len(cards), 5)
-        self.assertTrue(any(card.name == "林晚栀" for card in cards))
+        self.assertGreaterEqual(len(cards), 10)
+        lin = next(card for card in cards if card.name == "林晚栀")
+        self.assertEqual(lin.setting_type, "campus")
+        self.assertIn("校园", lin.scenario)
+        self.assertTrue(any(card.setting_type == "sci_fi" for card in cards))
+        self.assertTrue(any(card.setting_type == "xianxia_wuxia" for card in cards))
 
     def test_context_slots_keep_persona_and_memory(self) -> None:
         card = CharacterStore().list_cards()[0]
@@ -208,15 +214,27 @@ class CampusLiteCoreTest(unittest.TestCase):
                 "name": "Mira",
                 "archetype": "quiet strategist",
                 "tagline": "notices small choices before speaking",
-                "bio": "A user-created campus companion.",
+                "setting_type": "sci_fi",
+                "setting_notes": "rainy future city",
+                "bio": "A user-created investigator.",
                 "speech_style": "calm, concise, observant",
                 "relationship_pace": "slow and respectful",
                 "opening_line": "I am here. What should we look at first?",
                 "personality": "Patient, careful, and quietly warm.",
                 "boundaries": ["keep replies safe", "do not force intimacy"],
+                "story_seed_pool": {
+                    "places": ["rain station", "archive room"],
+                    "event_seeds": ["a timestamp is missing"],
+                    "hook_seeds": ["the file points back to Mira"],
+                    "motifs": ["rain", "old glass"],
+                    "forbidden_defaults": ["campus club"],
+                },
             })
             self.assertEqual(created.status_code, 200)
             character_id = created.json()["id"]
+            self.assertEqual(created.json()["setting_type"], "sci_fi")
+            self.assertEqual(created.json()["setting_notes"], "rainy future city")
+            self.assertEqual(created.json()["story_seed_pool"]["places"], ["rain station", "archive room"])
 
             listed = client.get(f"/api/characters?visitor_id={visitor_id}")
             self.assertEqual(listed.status_code, 200)
@@ -246,16 +264,25 @@ class CampusLiteCoreTest(unittest.TestCase):
             embedding_provider = None
             last_analysis_error = None
 
-            async def generate_character_draft(self, prompt, template=None):
+            async def generate_character_draft(
+                self,
+                prompt,
+                template=None,
+                setting_type="modern_daily",
+                setting_notes="",
+                draft_mode="complete",
+            ):
                 return self._clean_character_draft({
                     "name": "Nia",
                     "archetype": "calm maker",
                     "tagline": "builds quiet little rituals",
                     "gender": "female",
-                    "bio": "A fictional campus companion.",
+                    "setting_type": setting_type,
+                    "setting_notes": setting_notes,
+                    "bio": "A fictional city companion.",
                     "speech_style": "soft, brief, concrete",
                     "opening_line": "I kept a seat for you.",
-                    "interaction_policy": {"initiative_level": 0.35, "action_density": "low"},
+                    "interaction_policy": {"initiative_level": 0.35, "action_density": "只在确认节奏时出现轻动作，避免连续重复同一姿态。"},
                     "voice": {"sample_lines": ["We can start small."]},
                     "visual": {"accent": "#88aacc"},
                 })
@@ -268,13 +295,266 @@ class CampusLiteCoreTest(unittest.TestCase):
             response = client.post("/api/characters/draft", json={
                 "visitor_id": "draft-tester",
                 "prompt": "quiet ritual maker",
+                "setting_type": "workplace",
+                "setting_notes": "adult cofounder relationship",
             })
 
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             self.assertEqual(payload["character"]["name"], "Nia")
+            self.assertEqual(payload["character"]["setting_type"], "workplace")
+            self.assertEqual(payload["character"]["setting_notes"], "adult cofounder relationship")
+            self.assertEqual(payload["character"]["gender"], "女")
             self.assertIn("interaction_policy", payload["character"])
+            self.assertIn("确认节奏", payload["character"]["interaction_policy"]["action_density"])
             self.assertEqual(payload["diagnostics"]["source"], "remote")
+
+    def test_character_draft_remote_runs_core_and_pack_in_parallel(self) -> None:
+        class FakeSplitDraftLlm(LlmClient):
+            def __init__(self) -> None:
+                self.provider = {"name": "fake", "model": "fake", "api_key": "fake", "base_url": "http://fake", "timeout_ms": 1000}
+                self.embedding_provider = None
+                self.last_chat_error = None
+                self.last_analysis_error = None
+                self.last_character_draft_diagnostics = {}
+                self.active_calls = 0
+                self.max_active_calls = 0
+                self.timeouts: list[int | None] = []
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None, temperature=None):
+                self.timeouts.append(timeout_ms)
+                self.active_calls += 1
+                self.max_active_calls = max(self.max_active_calls, self.active_calls)
+                try:
+                    await asyncio.sleep(0.01)
+                    system = messages[0]["content"]
+                    if "CORE persona" in system:
+                        return json.dumps({
+                            "character": {
+                                "name": "Lin Yue",
+                                "archetype": "reliable operator",
+                                "tagline": "keeps order under pressure",
+                                "gender": "female",
+                                "setting_type": "workplace",
+                                "setting_notes": "adult cofounder relationship",
+                                "bio": "A focused workplace partner.",
+                                "personality": "precise, calm, reliable",
+                                "scenario": "adult workplace collaboration",
+                                "speech_style": "brief and concrete",
+                                "relationship_pace": "slow and bounded",
+                                "opening_line": "Sit down. We can split the problem.",
+                                "boundaries": ["does not decide for the user"],
+                                "anti_patterns": ["no forced intimacy"],
+                            }
+                        }, ensure_ascii=False)
+                    return json.dumps({
+                        "character": {
+                            "likes": ["clear plans"],
+                            "dislikes": ["vague promises"],
+                            "mes_example": "user: today is messy\nLin Yue: list the most urgent thing first.",
+                            "interaction_policy": {
+                                "initiative_level": 0.55,
+                                "action_density": "只在确认任务边界或情绪转折时出现轻动作，避免每轮重复姿态。",
+                            },
+                            "story_seed_pool": {
+                                "places": ["meeting room door"],
+                                "event_seeds": ["a sudden change forces both sides to solve a concrete work problem"],
+                                "hook_seeds": ["one unconfirmed choice waits for the next meeting"],
+                                "motifs": ["folded document"],
+                                "forbidden_defaults": ["no campus club default"],
+                            },
+                            "voice": {"sample_lines": ["Split the problem first."]},
+                            "visual": {"accent": "#b8a06f"},
+                        }
+                    }, ensure_ascii=False)
+                finally:
+                    self.active_calls -= 1
+
+        client = FakeSplitDraftLlm()
+        draft = asyncio.run(client.generate_character_draft("reliable workplace partner", None, "workplace", "adult cofounder relationship"))
+
+        self.assertGreaterEqual(client.max_active_calls, 2)
+        self.assertEqual(client.last_character_draft_diagnostics["source"], "remote")
+        self.assertEqual(client.last_character_draft_diagnostics["core_source"], "remote")
+        self.assertEqual(client.last_character_draft_diagnostics["pack_source"], "remote")
+        self.assertEqual(client.timeouts, [60000, 60000])
+        self.assertEqual(draft["name"], "Lin Yue")
+        self.assertEqual(draft["story_seed_pool"]["places"], ["meeting room door"])
+        self.assertIn("确认任务边界", draft["interaction_policy"]["action_density"])
+
+    def test_character_draft_partial_remote_uses_local_pack_fallback(self) -> None:
+        class FakePartialDraftLlm(LlmClient):
+            def __init__(self) -> None:
+                self.provider = {"name": "fake", "model": "fake", "api_key": "fake", "base_url": "http://fake", "timeout_ms": 1000}
+                self.embedding_provider = None
+                self.last_chat_error = None
+                self.last_analysis_error = None
+                self.last_character_draft_diagnostics = {}
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None, temperature=None):
+                system = messages[0]["content"]
+                if "CORE persona" not in system:
+                    raise TimeoutError("pack too slow")
+                return json.dumps({
+                    "character": {
+                        "name": "Cen Jing",
+                        "archetype": "cyber detective",
+                        "gender": "female",
+                        "setting_type": "sci_fi",
+                        "setting_notes": "near-future rain city investigation",
+                        "bio": "Cen Jing investigates data anomalies in the rain city.",
+                        "personality": "calm and sharp",
+                        "scenario": "commissioned investigation in a near-future city",
+                        "speech_style": "short, direct lines",
+                        "relationship_pace": "keeps distance and builds trust slowly",
+                        "opening_line": "Give me the important part first.",
+                    }
+                }, ensure_ascii=False)
+
+        client = FakePartialDraftLlm()
+        draft = asyncio.run(client.generate_character_draft("cyber detective, calm and reliable", None, "sci_fi", "near-future rain city"))
+
+        self.assertEqual(client.last_character_draft_diagnostics["source"], "partial")
+        self.assertEqual(client.last_character_draft_diagnostics["core_source"], "remote")
+        self.assertEqual(client.last_character_draft_diagnostics["pack_source"], "fallback")
+        self.assertEqual(client.last_character_draft_diagnostics["pack_error"], "TimeoutError")
+        self.assertIsNone(client.last_analysis_error)
+        self.assertEqual(draft["name"], "Cen Jing")
+        self.assertTrue(draft["story_seed_pool"]["places"])
+        self.assertTrue(draft["voice"]["sample_lines"])
+
+    def test_character_draft_fallback_respects_non_campus_setting(self) -> None:
+        draft = LlmClient()._fallback_character_draft("赛博侦探，冷静可靠", None, "sci_fi", "近未来雨城")
+        combined = json.dumps(draft, ensure_ascii=False)
+
+        self.assertEqual(draft["setting_type"], "sci_fi")
+        self.assertIn("近未来雨城", draft["setting_notes"])
+        self.assertTrue(draft["story_seed_pool"]["places"])
+        self.assertTrue(draft["story_seed_pool"]["event_seeds"])
+        for forbidden in ["校园", "社团", "图书馆", "学姐"]:
+            self.assertNotIn(forbidden, combined)
+
+        xianxia = LlmClient()._fallback_character_draft("冷淡医修，关系推进慢", None, "xianxia_wuxia", "")
+        xianxia_text = json.dumps(xianxia, ensure_ascii=False)
+        self.assertEqual(xianxia["setting_type"], "xianxia_wuxia")
+        self.assertTrue(xianxia["setting_notes"])
+        self.assertIn("低魔江湖", xianxia["setting_notes"])
+        self.assertIn("修仙", xianxia_text)
+        self.assertIn("医修", xianxia_text)
+        self.assertEqual(xianxia["interaction_policy"]["initiative_level"], 0.30)
+        self.assertIn("动作保持克制", xianxia["interaction_policy"]["action_density"])
+        self.assertNotIn(xianxia["interaction_policy"]["action_density"], {"low", "medium", "high"})
+
+        heroine = LlmClient()._fallback_character_draft("行侠仗义的女侠，关系推进慢", None, "xianxia_wuxia", "")
+        self.assertEqual(heroine["gender"], "女")
+        self.assertEqual(heroine["visual"]["accent"], "#9bbb8f")
+        self.assertIn("慢热克制", heroine["relationship_pace"])
+
+    def test_character_story_seed_pool_filters_misplaced_bio_text(self) -> None:
+        client = LlmClient()
+        parsed = client._clean_character_draft({
+            "name": "Nia",
+            "story_seed_pool": {
+                "locations": [
+                    "一个生活在都市里的高中女生，性格如同她的名字一般温柔可爱。",
+                    "雨后公交站",
+                ],
+                "events": ["临时活动名单被改动，两人被安排一起善后。"],
+                "hooks": ["对方没有解释自己为什么突然沉默。"],
+                "symbols": ["雨后路灯", "这是一句很长很长的解释性意象，已经不像短名词意象了。"],
+            },
+        })
+
+        seed_pool = parsed["story_seed_pool"]
+        self.assertEqual(seed_pool["places"], ["雨后公交站"])
+        self.assertEqual(seed_pool["motifs"], ["雨后路灯"])
+        self.assertEqual(seed_pool["event_seeds"], ["临时活动名单被改动，两人被安排一起善后。"])
+
+        completed = client._complete_story_seed_pool(seed_pool, "modern_daily", "温柔可靠的都市角色")
+        self.assertTrue(completed["forbidden_defaults"])
+        self.assertEqual(completed["places"], ["雨后公交站"])
+
+    def test_character_draft_completion_fills_empty_remote_fields(self) -> None:
+        client = LlmClient()
+        remote = client._clean_character_draft({
+            "name": "柳依云",
+            "archetype": "侠女",
+            "setting_type": "xianxia_wuxia",
+            "gender": "女",
+            "bio": "",
+            "personality": "",
+            "scenario": "",
+            "speech_style": "",
+            "relationship_pace": "",
+            "opening_line": "",
+            "likes": [],
+            "boundaries": [],
+            "interaction_policy": {"action_density": ""},
+            "voice": {},
+            "visual": {},
+            "story_seed_pool": {},
+        })
+
+        completed = client._complete_character_draft_fields(
+            remote,
+            "江湖女侠，冷静可靠，关系推进慢",
+            None,
+            "xianxia_wuxia",
+            "",
+        )
+
+        self.assertEqual(completed["name"], "柳依云")
+        self.assertEqual(completed["gender"], "女")
+        self.assertTrue(completed["bio"])
+        self.assertTrue(completed["scenario"])
+        self.assertTrue(completed["speech_style"])
+        self.assertTrue(completed["relationship_pace"])
+        self.assertTrue(completed["opening_line"])
+        self.assertTrue(completed["likes"])
+        self.assertTrue(completed["boundaries"])
+        self.assertTrue(completed["voice"]["sample_lines"])
+        self.assertEqual(completed["visual"]["accent"], "#9bbb8f")
+
+    def test_character_rewrite_mode_keeps_only_anchor_template_fields(self) -> None:
+        client = LlmClient()
+        anchor = client._rewrite_anchor_template({
+            "name": "柳依云",
+            "setting_type": "xianxia_wuxia",
+            "setting_notes": "低魔江湖",
+            "bio": "旧简介不应带入",
+            "scenario": "旧场景不应带入",
+            "story_seed_pool": {"places": ["旧地点"]},
+        })
+
+        self.assertEqual(anchor, {
+            "name": "柳依云",
+            "setting_type": "xianxia_wuxia",
+            "setting_notes": "低魔江湖",
+        })
+
+    def test_context_composer_default_identity_is_not_campus_locked(self) -> None:
+        card = CharacterCard(
+            id="custom_generic",
+            name="Mira",
+            archetype="quiet strategist",
+            tagline="notices small choices",
+            bio="A fictional chat character.",
+            speech_style="calm",
+            opening_line="Hello.",
+        )
+        slots = ContextComposer().compose(
+            ComposeInput(
+                character=card,
+                recent_messages=[],
+                user_message="hello",
+                memories=[],
+                recent_summary="",
+            )
+        )
+        rendered = "\n".join(slot.content for slot in slots)
+
+        self.assertIn("虚构聊天角色", rendered)
+        self.assertNotIn("校园轻陪伴", rendered)
 
     def test_custom_character_and_novel_project_draft_persist_through_api(self) -> None:
         class FakeNovelDraftLlm(LlmClient):
@@ -381,6 +661,1095 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(payload["project"]["genre"], "修仙武侠长篇")
             self.assertEqual(payload["diagnostics"]["genre_hint"], "修仙武侠长篇")
 
+    def test_non_campus_story_canvas_uses_setting_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+
+            canvas = service._default_story_canvas(
+                "云外听剑",
+                "修仙武侠长篇",
+                "克制、锋利、慢热",
+                "许砚清",
+                {},
+                [],
+            )
+            combined = json.dumps(canvas, ensure_ascii=False)
+
+            self.assertEqual(canvas["diagnostics"]["setting_type"], "xianxia_wuxia")
+            self.assertEqual(len(canvas["event_pool"]["active"]), 10)
+            self.assertIn("山门", combined)
+            self.assertIn("药庐", combined)
+            for forbidden in ["图书馆", "公告栏", "社团", "课程误会"]:
+                self.assertNotIn(forbidden, combined)
+
+    def test_project_setting_overrides_character_setting_for_novel_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            card = CharacterCard(
+                id="custom_cyber",
+                name="岑镜",
+                archetype="自定义角色",
+                tagline="雨城里的赛博侦探",
+                setting_type="sci_fi",
+                setting_notes="赛博侦探，近未来雨城，义体线索。",
+                bio="A custom cyber detective.",
+                speech_style="calm",
+                opening_line="说吧。",
+            )
+
+            canvas = service._default_story_canvas(
+                "雨城档案",
+                "现代日常长篇",
+                "冷静、悬疑",
+                "岑镜",
+                {},
+                [],
+                card,
+            )
+            combined = json.dumps(canvas, ensure_ascii=False)
+
+            self.assertEqual(canvas["diagnostics"]["setting_type"], "modern_daily")
+            self.assertIn("街角", combined)
+            self.assertNotIn("空轨", combined)
+            for forbidden in ["图书馆", "公告栏", "社团", "课程误会"]:
+                self.assertNotIn(forbidden, combined)
+
+    def test_character_story_seed_pool_overrides_non_campus_canvas_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            card = CharacterCard(
+                id="custom_medic",
+                name="寒青辞",
+                archetype="冷淡医修",
+                tagline="只救该救的人",
+                setting_type="xianxia_wuxia",
+                bio="A custom healer.",
+                speech_style="brief",
+                opening_line="坐下。",
+                story_seed_pool={
+                    "places": ["霜灯药室", "断桥雪亭"],
+                    "event_seeds": ["药灯忽然熄灭，旧伤记录被人翻动。"],
+                    "hook_seeds": ["雪亭下藏着半张未署名药方。"],
+                    "motifs": ["霜灯", "药香"],
+                    "forbidden_defaults": ["图书馆", "社团"],
+                },
+            )
+
+            canvas = service._default_story_canvas(
+                "霜灯药事",
+                "修仙武侠长篇",
+                "冷淡、克制",
+                "寒青辞",
+                {},
+                [],
+                card,
+            )
+            combined = json.dumps(canvas, ensure_ascii=False)
+
+            self.assertEqual(canvas["diagnostics"]["seed_pool_source"], "character_seed")
+            self.assertEqual(len(canvas["event_pool"]["active"]), 10)
+            self.assertEqual(canvas["event_pool"]["active"][0]["source"], "character_seed")
+            self.assertIn("霜灯药室", combined)
+            self.assertIn("药灯忽然熄灭", combined)
+            self.assertIn("半张未署名药方", combined)
+            self.assertNotIn("山门药庐", combined)
+
+    def test_custom_setting_label_does_not_auto_reclassify_from_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            card = CharacterCard(
+                id="custom_freeform",
+                name="岑镜",
+                archetype="自定义角色",
+                tagline="雨城里的赛博侦探",
+                setting_type="custom",
+                setting_notes="赛博侦探，近未来雨城，义体线索。",
+                bio="A custom cyber detective.",
+                speech_style="calm",
+                opening_line="说吧。",
+            )
+
+            canvas = service._default_story_canvas(
+                "雨城档案",
+                "现代日常长篇",
+                "冷静、悬疑",
+                "岑镜",
+                {},
+                [],
+                card,
+            )
+
+            self.assertEqual(canvas["diagnostics"]["setting_type"], "modern_daily")
+
+    def test_cross_setting_character_seed_pool_is_not_copied_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            card = CharacterCard(
+                id="custom_cyber_seed",
+                name="岑镜",
+                archetype="赛博侦探",
+                tagline="雨城里的赛博侦探",
+                setting_type="sci_fi",
+                bio="A custom cyber detective.",
+                speech_style="calm",
+                opening_line="说吧。",
+                story_seed_pool={
+                    "places": ["空轨站台", "数据交易所"],
+                    "event_seeds": ["监控盲区出现新的时间戳。"],
+                    "hook_seeds": ["屏幕上多出一条匿名留言。"],
+                    "motifs": ["蓝色霓虹", "旧数据芯片"],
+                    "forbidden_defaults": ["图书馆", "社团"],
+                },
+            )
+
+            canvas = service._default_story_canvas(
+                "山门旧案",
+                "修仙武侠长篇",
+                "冷淡、克制",
+                "岑镜",
+                {},
+                [],
+                card,
+            )
+            combined = json.dumps(canvas, ensure_ascii=False)
+
+            self.assertEqual(canvas["diagnostics"]["setting_type"], "xianxia_wuxia")
+            self.assertEqual(canvas["diagnostics"]["seed_pool_source"], "character_seed_translatable")
+            self.assertIn("山门", combined)
+            self.assertIn("蓝色霓虹", combined)
+            self.assertNotIn("空轨站台", combined)
+            self.assertNotIn("监控盲区", combined)
+
+    def test_campus_story_canvas_can_still_use_campus_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+
+            canvas = service._default_story_canvas(
+                "雨后图书馆计划",
+                "校园日常长篇",
+                "温柔、克制、日常",
+                "林晚栀",
+                {},
+                [],
+            )
+            combined = json.dumps(canvas, ensure_ascii=False)
+
+            self.assertIn("图书馆", combined)
+            self.assertIn("校园", combined)
+            self.assertEqual(len(canvas["event_pool"]["active"]), 10)
+
+    def test_rolling_canvas_uses_project_event_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            card = CharacterStore().get("lin_wanzhi")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            raw_project = storage.get_novel_project(project.id)
+            current_canvas = {
+                "event_pool": {
+                    "version": 1,
+                    "setting_type": "modern_daily",
+                    "active": [
+                        {
+                            "id": "evt_custom_1",
+                            "place": "mirror dock",
+                            "event": "custom drifting event",
+                            "hook": "custom hook remains",
+                            "status": "fresh",
+                            "source": "manual",
+                        }
+                    ],
+                    "retired": [],
+                },
+                "diagnostics": {"setting_type": "modern_daily"},
+            }
+
+            canvas = service._default_extension_canvas(raw_project, current_canvas, 0, 2)
+
+            self.assertEqual(len(canvas["event_pool"]["active"]), 10)
+            self.assertEqual(canvas["chapters"][0]["event_pool_id"], "evt_custom_1")
+            self.assertEqual(canvas["chapters"][0]["external_event"], "custom drifting event")
+            self.assertEqual(canvas["scenes"][0]["current_scene"], "mirror dock")
+
+    def test_event_pool_dedupes_against_retired_and_generates_variants(self) -> None:
+        raw = {
+            "version": 1,
+            "setting_type": "modern_daily",
+            "active": [
+                {
+                    "id": "evt_done",
+                    "place": "街角咖啡店",
+                    "event": "一场临时变更打乱原本普通的见面，两人需要重新确认彼此的节奏。",
+                    "hook": "路灯亮起时，对方没有催促主角立刻回答。",
+                    "status": "fresh",
+                },
+                {
+                    "id": "evt_b",
+                    "place": "街角咖啡店",
+                    "event": "一场临时变更打乱原本普通的见面，两人需要重新确认彼此的节奏。",
+                    "hook": "路灯亮起时，对方没有催促主角立刻回答。",
+                    "status": "fresh",
+                },
+            ],
+            "retired": [
+                {
+                    "id": "evt_done",
+                    "place": "雨后人行道",
+                    "event": "雨后路面积水让同行路线改变，一个旧话题被自然带回来。",
+                    "hook": "伞沿的水落下来，刚好打断那句快说出口的话。",
+                    "status": "retired",
+                }
+            ],
+        }
+
+        pool = normalize_story_event_pool(raw, "modern_daily")
+        active_keys = {(item["place"], item["event"], item["hook"]) for item in pool["active"]}
+        retired_keys = {(item["place"], item["event"], item["hook"]) for item in pool["retired"]}
+        active_ids = [item["id"] for item in pool["active"]]
+        retired_ids = [item["id"] for item in pool["retired"]]
+
+        self.assertEqual(len(pool["active"]), 10)
+        self.assertEqual(len(active_ids), len(set(active_ids)))
+        self.assertTrue(set(active_ids).isdisjoint(retired_ids))
+        self.assertEqual(len(active_keys), 10)
+        self.assertTrue(active_keys.isdisjoint(retired_keys))
+        self.assertTrue(any("变体" in item["event"] for item in pool["active"]))
+
+    def test_event_pool_binding_skips_completed_chapters(self) -> None:
+        pool = bind_story_event_pool_to_chapters(
+            {
+                "version": 1,
+                "setting_type": "modern_daily",
+                "active": [
+                    {
+                        "id": "evt_1",
+                        "place": "archive room",
+                        "event": "archive receipt mismatch reveals a past appointment",
+                        "hook": "the old note stays unanswered",
+                    },
+                    {
+                        "id": "evt_2",
+                        "place": "rain station",
+                        "event": "rain station delay forces the pair to wait together",
+                        "hook": "the last train announcement interrupts them",
+                    },
+                ],
+                "retired": [],
+            },
+            [
+                {
+                    "chapter_order": 1,
+                    "status": "completed",
+                    "event_pool_id": "evt_1",
+                    "external_event": "archive receipt mismatch reveals a past appointment",
+                    "title": "Done",
+                },
+                {
+                    "chapter_order": 2,
+                    "status": "planned",
+                    "event_pool_id": "evt_1",
+                    "external_event": "rain station delay forces the pair to wait together",
+                    "title": "Next",
+                },
+            ],
+            "modern_daily",
+        )
+        evt_1 = next(item for item in pool["active"] if item["id"] == "evt_1")
+        evt_2 = next(item for item in pool["active"] if item["id"] == "evt_2")
+
+        self.assertEqual(evt_1["status"], "fresh")
+        self.assertEqual(evt_1["bound_chapter_orders"], [])
+        self.assertEqual(evt_2["status"], "planned")
+        self.assertEqual(evt_2["bound_chapter_orders"], ["2"])
+
+    def test_event_pool_display_bindings_are_rebuilt_from_current_chapters(self) -> None:
+        pool = bind_story_event_pool_to_chapters(
+            {
+                "version": 1,
+                "setting_type": "modern_daily",
+                "active": [
+                    {
+                        "id": "evt_a",
+                        "place": "old station",
+                        "event": "old station delay forces a route choice",
+                        "hook": "old station hook",
+                        "bound_chapter_orders": ["1", "3", "4"],
+                        "bound_chapter_titles": ["stale"],
+                    },
+                    {
+                        "id": "evt_b",
+                        "place": "new bookshop",
+                        "event": "bookshop mixup forces the pair to pause",
+                        "hook": "receipt hook",
+                        "bound_chapter_orders": ["2"],
+                    },
+                ],
+                "retired": [],
+            },
+            [
+                {
+                    "chapter_order": 1,
+                    "event_pool_id": "evt_b",
+                    "title": "Bookshop",
+                    "status": "planned",
+                    "external_event": "bookshop mixup forces the pair to pause",
+                    "trigger_event": "bookshop mixup forces the pair to pause",
+                },
+                {
+                    "chapter_order": 4,
+                    "event_pool_id": "evt_a",
+                    "title": "Station",
+                    "status": "planned",
+                    "external_event": "old station delay forces a route choice",
+                    "trigger_event": "old station delay forces a route choice",
+                },
+            ],
+            "modern_daily",
+        )
+        by_id = {item["id"]: item for item in pool["active"]}
+
+        self.assertEqual(by_id["evt_a"]["bound_chapter_orders"], ["4"])
+        self.assertEqual(by_id["evt_a"]["bound_chapter_titles"], ["Station"])
+        self.assertEqual(by_id["evt_b"]["bound_chapter_orders"], ["1"])
+        self.assertEqual(by_id["evt_b"]["bound_chapter_titles"], ["Bookshop"])
+
+    def test_story_event_for_chapter_prefers_bound_event_id_over_order(self) -> None:
+        pool = {
+            "version": 1,
+            "setting_type": "modern_daily",
+            "active": [
+                {"id": "evt_order", "place": "first", "event": "first event", "hook": "first hook"},
+                {"id": "evt_bound", "place": "bound", "event": "bound event", "hook": "bound hook"},
+            ],
+            "retired": [],
+        }
+
+        selected = story_event_for_chapter(pool, {"chapter_order": 1, "event_pool_id": "evt_bound"}, "modern_daily")
+
+        self.assertEqual(selected["id"], "evt_bound")
+
+    def test_story_event_for_chapter_can_read_retired_bound_event(self) -> None:
+        pool = {
+            "version": 1,
+            "setting_type": "modern_daily",
+            "active": [
+                {"id": "evt_active", "place": "active", "event": "active event", "hook": "active hook"},
+            ],
+            "retired": [
+                {
+                    "id": "evt_retired",
+                    "place": "retired",
+                    "event": "retired event",
+                    "hook": "retired hook",
+                    "bound_chapter_orders": ["2"],
+                },
+            ],
+        }
+
+        selected = story_event_for_chapter(pool, {"chapter_order": 2, "event_pool_id": "evt_retired"}, "modern_daily")
+
+        self.assertEqual(selected["id"], "evt_retired")
+
+    def test_free_event_is_not_auto_bound(self) -> None:
+        chapters = [
+            {
+                "chapter_order": 1,
+                "title": "Rain",
+                "status": "planned",
+                "external_event": "rain station delay forces a route choice",
+                "trigger_event": "rain station delay forces a route choice",
+            },
+        ]
+        pool = bind_story_event_pool_to_chapters(
+            {
+                "version": 1,
+                "setting_type": "modern_daily",
+                "active": [
+                    {
+                        "id": "evt_free",
+                        "place": "rain station",
+                        "event": "rain station delay forces a route choice",
+                        "hook": "rain station hook",
+                        "use_mode": "free",
+                    },
+                    {
+                        "id": "evt_guide",
+                        "place": "bookshop",
+                        "event": "bookshop mixup forces a route choice",
+                        "hook": "bookshop hook",
+                        "use_mode": "guide",
+                    },
+                ],
+                "retired": [],
+            },
+            chapters,
+            "modern_daily",
+        )
+
+        self.assertNotEqual(chapters[0].get("event_pool_id"), "evt_free")
+        guide = next(item for item in pool["active"] if item["id"] == "evt_guide")
+        self.assertEqual(guide["bound_chapter_orders"], ["1"])
+
+    def test_event_pool_delta_add_replaces_unbound_fallback_when_full(self) -> None:
+        raw = normalize_story_event_pool({}, "modern_daily")
+        updated = apply_story_event_pool_delta(
+            raw,
+            {
+                "add": [
+                    {
+                        "id": "evt_remote_fresh",
+                        "place": "湖边步道",
+                        "event": "临时降雨让两人改变原本去湖边看夜景的路线",
+                        "hook": "远处传来民谣声，打断了未说完的问题",
+                        "tags": {
+                            "event_type": ["external_interrupt"],
+                            "anchors": ["湖边", "夜景", "民谣"],
+                            "relationship_motion": ["shared_context"],
+                            "boundary_risk": "low",
+                        },
+                        "source_reason": "命中湖边夜景和民谣偏好",
+                    }
+                ]
+            },
+            "modern_daily",
+        )
+        ids = [item["id"] for item in updated["active"]]
+
+        self.assertEqual(len(updated["active"]), 10)
+        self.assertIn("evt_remote_fresh", ids)
+        selected = next(item for item in updated["active"] if item["id"] == "evt_remote_fresh")
+        self.assertEqual(selected["source"], "remote")
+        self.assertEqual(selected["tags"]["boundary_risk"], "low")
+
+    def test_event_pool_delta_preserves_time_and_theme_tags(self) -> None:
+        raw = normalize_story_event_pool({}, "modern_daily")
+        updated = apply_story_event_pool_delta(
+            raw,
+            {
+                "add": [
+                    {
+                        "id": "evt_theme_time",
+                        "place": "lake path",
+                        "time_anchor": "Saturday 18:40, before the lake lights turn on",
+                        "event": "a folk song rehearsal blocks the lake path and asks them to choose a quieter route",
+                        "hook": "one unfinished question stays between them",
+                        "tags": {
+                            "event_type": ["external_interrupt"],
+                            "anchors": ["lake", "folk song"],
+                            "theme_markers": ["lake", "folk song", "quiet route"],
+                            "tone_markers": ["warm", "restrained"],
+                            "relationship_motion": ["slow_trust"],
+                            "boundary_risk": "low",
+                        },
+                        "source_reason": "matches lake night and folk-song project theme",
+                    }
+                ]
+            },
+            "modern_daily",
+        )
+        selected = next(item for item in updated["active"] if item["id"] == "evt_theme_time")
+
+        self.assertEqual(selected["time_anchor"], "Saturday 18:40, before the lake lights turn on")
+        self.assertEqual(selected["tags"]["theme_markers"], ["lake", "folk song", "quiet route"])
+        self.assertEqual(selected["tags"]["tone_markers"], ["warm", "restrained"])
+
+    def test_event_pool_edit_and_binding_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            app = create_app(storage=storage, characters=CharacterStore())
+            client = TestClient(app)
+            session = client.post("/api/sessions", json={"visitor_id": "event-api", "character_id": "lin_wanzhi"})
+            self.assertEqual(session.status_code, 200)
+            project_response = client.post(
+                f"/api/sessions/{session.json()['session_id']}/novel/projects",
+                json={"title": "Event API", "genre": "modern_daily", "tone": "quiet"},
+            )
+            self.assertEqual(project_response.status_code, 200)
+            project_id = project_response.json()["id"]
+            chapter_id = project_response.json()["chapters"][0]["id"]
+
+            created = client.post(
+                f"/api/novel/projects/{project_id}/event-pool/events",
+                json={
+                    "place": "manual pier",
+                    "time_anchor": "Saturday 18:40",
+                    "event": "manual pier delay forces one choice",
+                    "hook": "the pier light cuts off before the answer",
+                    "motifs": ["pier light"],
+                    "use_mode": "guide",
+                    "source_reason": "manual test",
+                    "tags": {"theme_markers": ["pier"], "tone_markers": ["quiet"]},
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            event = next(item for item in created.json()["story_canvas"]["event_pool"]["active"] if item["place"] == "manual pier")
+            self.assertEqual(event["use_mode"], "guide")
+
+            patched = client.patch(
+                f"/api/novel/projects/{project_id}/event-pool/events/{event['id']}",
+                json={
+                    "place": "manual pier revised",
+                    "time_anchor": "Saturday 18:50",
+                    "event": "manual pier revision forces one choice",
+                    "hook": "the revised hook remains",
+                    "motifs": ["revised"],
+                    "use_mode": "flavor",
+                    "source_reason": "manual patch",
+                    "tags": {"theme_markers": ["pier"], "tone_markers": ["quiet"]},
+                },
+            )
+            self.assertEqual(patched.status_code, 200)
+            patched_event = next(item for item in patched.json()["story_canvas"]["event_pool"]["active"] if item["id"] == event["id"])
+            self.assertEqual(patched_event["place"], "manual pier revised")
+            self.assertEqual(patched_event["use_mode"], "flavor")
+
+            bound = client.post(
+                f"/api/novel/projects/{project_id}/chapters/{chapter_id}/event-pool-binding",
+                json={"event_id": event["id"], "use_mode": "strict"},
+            )
+            self.assertEqual(bound.status_code, 200)
+            self.assertEqual(bound.json()["story_canvas"]["chapters"][0]["event_pool_id"], event["id"])
+            bound_event = next(item for item in bound.json()["story_canvas"]["event_pool"]["active"] if item["id"] == event["id"])
+            self.assertEqual(bound_event["use_mode"], "strict")
+
+            blocked_delete = client.delete(f"/api/novel/projects/{project_id}/event-pool/events/{event['id']}")
+            self.assertEqual(blocked_delete.status_code, 400)
+
+            cleared = client.post(
+                f"/api/novel/projects/{project_id}/chapters/{chapter_id}/event-pool-binding",
+                json={"event_id": None},
+            )
+            self.assertEqual(cleared.status_code, 200)
+            retired = client.post(f"/api/novel/projects/{project_id}/event-pool/events/{event['id']}/retire")
+            self.assertEqual(retired.status_code, 200)
+            self.assertTrue(any(item["id"] == event["id"] for item in retired.json()["story_canvas"]["event_pool"]["retired"]))
+
+    def test_story_event_score_prefers_theme_and_time_anchor(self) -> None:
+        chapter = {
+            "chapter_order": 2,
+            "status": "planned",
+            "title": "Lake Night",
+            "goal": "The lake night folk-song scene forces a small shared choice.",
+            "external_event": "lake night folk song interruption",
+            "trigger_event": "lake night folk song interruption",
+            "ending_hook": "one unfinished question stays between them",
+        }
+        context = {
+            "project": {
+                "title": "Lake Folk Case",
+                "genre": "modern daily longform",
+                "tone": "warm restrained daily",
+                "worldview": "lake night, folk songs, quiet routes",
+                "relationship_setup": "slow trust through shared choices",
+                "outline": "lake evening scenes",
+            },
+            "story_bible": {"confirmed_facts": ["folk songs matter"], "relationships": ["slow trust"]},
+            "materials": [],
+            "novel_state": {"open_threads": ["unfinished question"]},
+        }
+        themed = {
+            "id": "evt_themed",
+            "place": "lake path",
+            "time_anchor": "Saturday 18:40, before the lake lights turn on",
+            "event": "a folk song rehearsal blocks the lake path and asks them to choose a quieter route",
+            "hook": "one unfinished question stays between them",
+            "source": "remote",
+            "tags": {
+                "theme_markers": ["lake", "folk song", "quiet route"],
+                "tone_markers": ["warm", "restrained"],
+                "relationship_motion": ["slow trust"],
+                "boundary_risk": "low",
+            },
+        }
+        generic = {
+            "id": "evt_generic",
+            "place": "cafe",
+            "event": "ordinary misunderstanding lets them chat",
+            "hook": "they talk again later",
+            "source": "remote",
+            "tags": {"boundary_risk": "low"},
+        }
+        old_shape = {
+            "id": "evt_old",
+            "place": "lake path",
+            "event": "a folk song rehearsal blocks the lake path",
+            "hook": "one unfinished question stays between them",
+            "source": "manual",
+            "tags": {"boundary_risk": "low"},
+        }
+
+        themed_score = score_story_event(themed, chapter, context, "modern_daily")
+        generic_score = score_story_event(generic, chapter, context, "modern_daily")
+        old_score = score_story_event(old_shape, chapter, context, "modern_daily")
+
+        self.assertGreater(themed_score["score"], generic_score["score"])
+        self.assertGreater(themed_score["score"], old_score["score"])
+        self.assertIn("命中主题", themed_score["reasons"][0])
+        self.assertTrue(any("具体时间" in reason for reason in themed_score["reasons"]))
+
+    def test_character_seed_flavor_cannot_outscore_project_continuity(self) -> None:
+        chapter = {
+            "chapter_order": 3,
+            "status": "planned",
+            "goal": "At the lake, the previous unfinished question returns during a folk-song rehearsal.",
+            "external_event": "lake night folk song interruption",
+            "ending_hook": "unfinished question",
+        }
+        context = {
+            "project": {
+                "title": "Lake Folk Case",
+                "genre": "modern daily longform",
+                "tone": "warm restrained",
+                "worldview": "lake night, folk songs, quiet routes",
+                "relationship_setup": "slow trust through shared choices",
+            },
+            "story_bible": {"confirmed_facts": ["folk songs matter"]},
+            "novel_state": {"open_threads": ["unfinished question"]},
+            "character": {
+                "story_seed_pool": {
+                    "motifs": ["folded note", "rain light"],
+                    "event_seeds": ["a familiar default meeting repeats"],
+                    "hook_seeds": ["a folded note becomes a reason to meet"],
+                }
+            },
+        }
+        project_event = {
+            "id": "evt_project",
+            "place": "lake path",
+            "time_anchor": "Saturday 18:40",
+            "event": "a folk song rehearsal blocks the lake path and asks them to choose a quieter route",
+            "hook": "unfinished question",
+            "source": "remote",
+            "tags": {
+                "theme_markers": ["lake", "folk songs"],
+                "tone_markers": ["warm", "restrained"],
+                "relationship_motion": ["shared choice"],
+                "boundary_risk": "low",
+            },
+        }
+        character_seed_event = {
+            "id": "evt_character",
+            "place": "old default doorway",
+            "time_anchor": "Saturday 18:40",
+            "event": "a familiar default meeting repeats around the folded note and rain light",
+            "hook": "a folded note becomes a reason to meet",
+            "source": "character_seed",
+            "tags": {
+                "theme_markers": ["folded note", "rain light"],
+                "tone_markers": ["quiet"],
+                "relationship_motion": ["familiar motif"],
+                "boundary_risk": "low",
+            },
+        }
+
+        project_score = score_story_event(project_event, chapter, context, "modern_daily")
+        character_score = score_story_event(character_seed_event, chapter, context, "modern_daily")
+
+        self.assertGreater(project_score["score"], character_score["score"])
+        self.assertIn("character flavor seed", character_score["reasons"])
+
+    def test_story_event_score_blocks_campus_defaults_in_non_campus(self) -> None:
+        scored = score_story_event(
+            {
+                "id": "evt_library",
+                "place": "library",
+                "time_anchor": "Friday 19:00",
+                "event": "a club announcement on the library board changes the class plan",
+                "hook": "the class notice leaves one missing name",
+                "tags": {
+                    "theme_markers": ["library", "club"],
+                    "tone_markers": ["quiet"],
+                    "boundary_risk": "low",
+                    "forbidden_defaults": ["library"],
+                },
+            },
+            {"chapter_order": 1, "status": "planned", "external_event": "library announcement"},
+            {"project": {"genre": "xianxia wuxia", "worldview": "mountain sect and medicine"}},
+            "xianxia_wuxia",
+        )
+
+        self.assertTrue(scored["blocked"])
+        self.assertEqual(scored["score"], 0)
+
+    def test_compact_canvas_rebinds_mismatched_event_pool_id_and_marks_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            canvas = {
+                "version": 1,
+                "mode": "story_canvas",
+                "event_pool": {
+                    "version": 1,
+                    "setting_type": "modern_daily",
+                    "active": [
+                        {"id": "evt_1", "place": "街角咖啡店", "event": "咖啡店临时变更。", "hook": "路灯亮起。"},
+                        {"id": "evt_2", "place": "社区书店", "event": "书店错拿让两人停下处理误会。", "hook": "收据背面多出时间。"},
+                    ],
+                    "retired": [],
+                },
+                "chapters": [
+                    {
+                        "id": "canvas_ch_1",
+                        "act_id": "act_1",
+                        "chapter_order": 1,
+                        "event_pool_id": "evt_1",
+                        "title": "第一章",
+                        "external_event": "书店错拿让两人停下处理误会。",
+                        "trigger_event": "书店错拿让两人停下处理误会。",
+                        "goal": "",
+                        "scene_ids": ["scene_1"],
+                    }
+                ],
+                "scenes": [{"id": "scene_1", "chapter_id": "canvas_ch_1", "scene_order": 1}],
+                "acts": [{"id": "act_1", "order": 1, "title": "阶段", "chapter_ids": ["canvas_ch_1"]}],
+                "threads": [],
+                "diagnostics": {"setting_type": "modern_daily"},
+            }
+
+            compacted = service._compact_story_canvas(canvas)
+            chapter = compacted["chapters"][0]
+            bound_event = next(item for item in compacted["event_pool"]["active"] if item["id"] == "evt_2")
+
+            self.assertEqual(chapter["event_pool_id"], "evt_2")
+            self.assertEqual(bound_event["status"], "planned")
+            self.assertEqual(bound_event["bound_chapter_orders"], ["1"])
+
+    def test_extend_canvas_runs_event_pool_update_in_parallel(self) -> None:
+        class FakeParallelCanvasLlm:
+            def __init__(self, retire_id: str) -> None:
+                self.retire_id = retire_id
+                self.active_calls = 0
+                self.max_active_calls = 0
+                self.system_prompts: list[str] = []
+                self.last_chat_error = None
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                self.system_prompts.append(messages[0]["content"])
+                self.active_calls += 1
+                self.max_active_calls = max(self.max_active_calls, self.active_calls)
+                await asyncio.sleep(0.02)
+                self.active_calls -= 1
+                system = messages[0]["content"]
+                if "long-form novel project event pool" in system:
+                    return json.dumps({
+                        "event_pool_delta": {
+                            "retire": [{"id": self.retire_id}],
+                            "add": [
+                                {
+                                    "id": "evt_parallel_new",
+                                    "place": "parallel rain stop",
+                                    "time_anchor": "Friday 19:10, after the last tram alert",
+                                    "event": "a delayed tram gives both characters one concrete problem to solve",
+                                    "hook": "the route map reveals one missing stop",
+                                    "motifs": ["rain map"],
+                                    "tags": {
+                                        "event_type": ["external_interrupt", "shared_route"],
+                                        "anchors": ["delayed tram", "route map"],
+                                        "theme_markers": ["tram delay", "route map", "rain"],
+                                        "tone_markers": ["restrained", "quiet"],
+                                        "relationship_motion": ["shared_context", "slow_trust"],
+                                        "boundary_risk": "low",
+                                        "freshness": ["new_location"],
+                                        "continuity": ["unresolved route clue"],
+                                        "forbidden_defaults": [],
+                                    },
+                                    "source_reason": "parallel event pool update",
+                                }
+                            ],
+                        }
+                    })
+                return json.dumps({
+                    "version": 1,
+                    "mode": "story_canvas",
+                    "acts": [{"id": "act_remote", "order": 2, "title": "remote arc", "chapter_ids": ["remote_ch_1", "remote_ch_2"]}],
+                    "chapters": [
+                        {
+                            "id": "remote_ch_1",
+                            "act_id": "act_remote",
+                            "chapter_order": 2,
+                            "title": "Chapter 2",
+                            "goal": "The two characters handle the delayed tram and keep one question unresolved.",
+                            "external_event": "a delayed tram gives both characters one concrete problem to solve",
+                            "trigger_event": "a delayed tram gives both characters one concrete problem to solve",
+                            "immediate_reaction": "They first solve the visible problem.",
+                            "obstacle_escalation": "The route information conflicts.",
+                            "counterpart_reaction": "The other character checks the map.",
+                            "character_choice": "The protagonist chooses to wait.",
+                            "scene_consequence": "They gain one shared clue.",
+                            "relationship_shift": "They become slightly more coordinated.",
+                            "ending_hook": "the route map reveals one missing stop",
+                            "target_length": 1800,
+                            "status": "planned",
+                            "emotion_curve": "steady",
+                            "scene_ids": ["remote_scene_1"],
+                        },
+                        {
+                            "id": "remote_ch_2",
+                            "act_id": "act_remote",
+                            "chapter_order": 3,
+                            "title": "Chapter 3",
+                            "goal": "A second scene follows the clue without resolving it too early.",
+                            "external_event": "a saved receipt points to the wrong meeting time",
+                            "trigger_event": "a saved receipt points to the wrong meeting time",
+                            "immediate_reaction": "They compare the receipt.",
+                            "obstacle_escalation": "The time does not match.",
+                            "counterpart_reaction": "The other character stays cautious.",
+                            "character_choice": "The protagonist asks one direct question.",
+                            "scene_consequence": "The clue remains active.",
+                            "relationship_shift": "Trust grows slowly.",
+                            "ending_hook": "one name on the receipt is missing",
+                            "target_length": 1800,
+                            "status": "planned",
+                            "emotion_curve": "steady",
+                            "scene_ids": ["remote_scene_2"],
+                        },
+                    ],
+                    "scenes": [
+                        {
+                            "id": "remote_scene_1",
+                            "chapter_id": "remote_ch_1",
+                            "scene_order": 1,
+                            "current_scene": "parallel rain stop",
+                            "pov": "limited third person",
+                            "present_characters": "protagonist and counterpart",
+                            "surface_event": "a delayed tram gives both characters one concrete problem to solve",
+                            "character_desire": "solve the visible problem",
+                            "tension": "the route information conflicts",
+                            "required_facts": [],
+                            "forbidden_progress": [],
+                            "ending_beat": "the route map reveals one missing stop",
+                            "linked_material_ids": [],
+                        },
+                        {
+                            "id": "remote_scene_2",
+                            "chapter_id": "remote_ch_2",
+                            "scene_order": 1,
+                            "current_scene": "receipt counter",
+                            "pov": "limited third person",
+                            "present_characters": "protagonist and counterpart",
+                            "surface_event": "a saved receipt points to the wrong meeting time",
+                            "character_desire": "compare the receipt",
+                            "tension": "the time does not match",
+                            "required_facts": [],
+                            "forbidden_progress": [],
+                            "ending_beat": "one name on the receipt is missing",
+                            "linked_material_ids": [],
+                        },
+                    ],
+                    "threads": [],
+                    "quality_rules": [],
+                    "diagnostics": {"source": "remote", "mode": "rolling_extend"},
+                })
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            card = CharacterStore().get("lin_wanzhi")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            retire_id = project.story_canvas["event_pool"]["active"][0]["id"]
+            llm = FakeParallelCanvasLlm(retire_id)
+
+            asyncio.run(service.extend_canvas(llm, project.id, from_chapter_order=1, count=2))
+            updated = storage.get_novel_project(project.id)
+            assert updated is not None
+            canvas = json.loads(updated["story_canvas_json"])
+            active_ids = [item["id"] for item in canvas["event_pool"]["active"]]
+            retired_ids = [item["id"] for item in canvas["event_pool"]["retired"]]
+
+            self.assertGreaterEqual(llm.max_active_calls, 2)
+            self.assertIn("evt_parallel_new", active_ids)
+            self.assertIn(retire_id, retired_ids)
+            selected = next(item for item in canvas["event_pool"]["active"] if item["id"] == "evt_parallel_new")
+            self.assertGreater(selected["selection_score"], 0)
+            self.assertTrue(selected["selection_reasons"])
+            self.assertEqual(selected["time_anchor"], "Friday 19:10, after the last tram alert")
+            self.assertEqual(selected["tags"]["boundary_risk"], "low")
+            self.assertEqual(selected["tags"]["theme_markers"], ["tram delay", "route map", "rain"])
+            self.assertEqual(canvas["diagnostics"]["event_pool_update_source"], "remote")
+            self.assertTrue(canvas["diagnostics"]["parallel_event_pool_update"])
+
+    def test_canvas_extend_api_preserves_time_anchor_and_theme_tags(self) -> None:
+        class FakeApiCanvasLlm:
+            last_chat_error = None
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                system = messages[0]["content"]
+                if "long-form novel project event pool" in system:
+                    return json.dumps({
+                        "event_pool_delta": {
+                            "add": [
+                                {
+                                    "id": "evt_api_theme",
+                                    "place": "lake bus stop",
+                                    "time_anchor": "Saturday 18:40, before the lake lights turn on",
+                                    "event": "a folk-song busker blocks the lake stop and forces one route choice",
+                                    "hook": "the unfinished melody repeats the question they avoided",
+                                    "motifs": ["folk melody"],
+                                    "tags": {
+                                        "event_type": ["external_interrupt"],
+                                        "anchors": ["lake stop", "folk melody"],
+                                        "theme_markers": ["lake", "folk melody", "route choice"],
+                                        "tone_markers": ["warm", "restrained"],
+                                        "relationship_motion": ["slow_trust"],
+                                        "boundary_risk": "low",
+                                        "freshness": ["new_time_anchor"],
+                                        "continuity": ["unfinished question"],
+                                        "forbidden_defaults": [],
+                                    },
+                                    "source_reason": "uses the lake, folk music, and restrained tone",
+                                }
+                            ]
+                        }
+                    })
+                return json.dumps({
+                    "version": 1,
+                    "mode": "story_canvas",
+                    "acts": [{"id": "act_api", "order": 2, "title": "api arc", "chapter_ids": ["api_ch_2"]}],
+                    "chapters": [
+                        {
+                            "id": "api_ch_2",
+                            "act_id": "act_api",
+                            "chapter_order": 2,
+                            "title": "Lake Stop",
+                            "goal": "The lake bus stop folk-song interruption forces one route choice and leaves the melody unresolved.",
+                            "external_event": "a folk-song busker blocks the lake stop and forces one route choice",
+                            "trigger_event": "a folk-song busker blocks the lake stop and forces one route choice",
+                            "immediate_reaction": "They check the stop together.",
+                            "obstacle_escalation": "The bus stop route is blocked.",
+                            "counterpart_reaction": "The counterpart stays cautious.",
+                            "character_choice": "The protagonist chooses the quieter route.",
+                            "scene_consequence": "They keep moving without forcing intimacy.",
+                            "relationship_shift": "Slow trust becomes easier to notice.",
+                            "ending_hook": "the unfinished melody repeats the question they avoided",
+                            "target_length": 1800,
+                            "status": "planned",
+                            "emotion_curve": "restrained",
+                            "scene_ids": ["api_scene_2"],
+                        }
+                    ],
+                    "scenes": [
+                        {
+                            "id": "api_scene_2",
+                            "chapter_id": "api_ch_2",
+                            "scene_order": 1,
+                            "current_scene": "lake bus stop",
+                            "pov": "limited third person",
+                            "present_characters": "protagonist and counterpart",
+                            "surface_event": "a folk-song busker blocks the lake stop and forces one route choice",
+                            "character_desire": "choose a route",
+                            "tension": "the blocked stop delays them",
+                            "required_facts": [],
+                            "forbidden_progress": [],
+                            "ending_beat": "the unfinished melody repeats the question they avoided",
+                            "linked_material_ids": [],
+                        }
+                    ],
+                    "threads": [],
+                    "quality_rules": [],
+                    "diagnostics": {"source": "remote", "mode": "rolling_extend"},
+                })
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            app = create_app(storage=storage, characters=CharacterStore(), llm=FakeApiCanvasLlm())
+            client = TestClient(app)
+            visitor_id = "canvas-api-tester"
+            session = client.post("/api/sessions", json={"visitor_id": visitor_id, "character_id": "lin_wanzhi"})
+            self.assertEqual(session.status_code, 200)
+            project_response = client.post(f"/api/sessions/{session.json()['session_id']}/novel/projects", json={
+                "title": "Lake Folk Case",
+                "genre": "modern daily longform",
+                "tone": "warm restrained daily",
+                "worldview": "lake night, folk songs, quiet routes",
+                "relationship_setup": "slow trust through shared choices",
+            })
+            self.assertEqual(project_response.status_code, 200)
+
+            extended = client.post(
+                f"/api/novel/projects/{project_response.json()['id']}/canvas/extend",
+                json={"from_chapter_order": 1, "count": 2, "instruction": "extend with theme-aware event pool"},
+            )
+            self.assertEqual(extended.status_code, 200)
+            canvas = extended.json()["story_canvas"]
+            selected = next(item for item in canvas["event_pool"]["active"] if item["id"] == "evt_api_theme")
+            chapter = next(item for item in canvas["story_canvas"]["chapters"] if item["chapter_order"] == 2) if "story_canvas" in canvas else next(item for item in canvas["chapters"] if item["chapter_order"] == 2)
+
+            self.assertEqual(selected["time_anchor"], "Saturday 18:40, before the lake lights turn on")
+            self.assertEqual(selected["tags"]["theme_markers"], ["lake", "folk melody", "route choice"])
+            self.assertGreater(selected["selection_score"], 0)
+            self.assertEqual(chapter["event_pool_id"], "evt_api_theme")
+            self.assertEqual(canvas["diagnostics"]["event_pool_update_source"], "remote")
+
+    def test_completed_chapter_advances_project_event_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            card = CharacterStore().get("lin_wanzhi")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            first_chapter = storage.list_novel_chapters(project.id)[0]
+            canvas = project.story_canvas
+            canvas["chapters"][0]["event_pool_id"] = canvas["event_pool"]["active"][0]["id"]
+            storage.update_novel_project(project.id, {"story_canvas": canvas})
+
+            service._update_canvas_from_completed_chapter(
+                project.id,
+                first_chapter,
+                {"current_scene": "updated scene", "surface_event": "updated event"},
+                {"title": "done", "summary": "chapter done", "body": "body"},
+            )
+            updated = storage.get_novel_project(project.id)
+            updated_canvas = json.loads(updated["story_canvas_json"])
+
+            self.assertEqual(len(updated_canvas["event_pool"]["active"]), 10)
+            self.assertEqual(updated_canvas["event_pool"]["retired"][0]["id"], canvas["chapters"][0]["event_pool_id"])
+            self.assertEqual(updated_canvas["event_pool"]["retired"][0]["status"], "retired")
+
+    def test_completed_chapter_advances_event_pool_without_bound_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            card = CharacterStore().get("lin_wanzhi")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            first_chapter = storage.list_novel_chapters(project.id)[0]
+            canvas = project.story_canvas
+            canvas["chapters"][0]["event_pool_id"] = ""
+            expected_retired_id = canvas["event_pool"]["active"][0]["id"]
+            storage.update_novel_project(project.id, {"story_canvas": canvas})
+
+            service._update_canvas_from_completed_chapter(
+                project.id,
+                first_chapter,
+                {"current_scene": "雨后人行道", "surface_event": "雨后路面碎水让同行路线改变。"},
+                {"title": "第一章", "summary": "第一章完成。", "body": "正文"},
+            )
+            updated = storage.get_novel_project(project.id)
+            assert updated is not None
+            updated_canvas = json.loads(updated["story_canvas_json"])
+
+            self.assertEqual(len(updated_canvas["event_pool"]["active"]), 10)
+            self.assertEqual(updated_canvas["event_pool"]["retired"][0]["id"], expected_retired_id)
+            self.assertEqual(updated_canvas["event_pool"]["retired"][0]["status"], "retired")
+
     def test_novel_project_draft_collapses_soft_wrapped_outline(self) -> None:
         class FakeWrappedDraftLlm(LlmClient):
             def configured(self) -> bool:
@@ -434,6 +1803,7 @@ class CampusLiteCoreTest(unittest.TestCase):
         })
 
         self.assertLess(parsed["interaction_policy"]["initiative_level"], 0.5)
+        self.assertEqual(parsed["interaction_policy"]["action_density"], "")
         self.assertGreaterEqual(len(parsed["voice"]["sample_lines"]), 4)
         self.assertIn("Nia", parsed["mes_example"])
 
@@ -1701,6 +3071,132 @@ class CampusLiteCoreTest(unittest.TestCase):
             rebuilt = self.run_async(service.build_canvas(CanvasFallbackLlm(), project.id))
             self.assertEqual(rebuilt.story_canvas.get("mode"), "story_canvas")
 
+    def test_novel_build_canvas_resets_existing_event_pool_on_fallback(self) -> None:
+        class CanvasFallbackLlm:
+            last_chat_error = None
+
+            def configured(self) -> bool:
+                return False
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            old_canvas = dict(project.story_canvas)
+            old_canvas["event_pool"] = {
+                "version": 1,
+                "setting_type": "modern_daily",
+                "active": [
+                    {
+                        "id": "evt_old_rebuild_leak",
+                        "place": "old dock",
+                        "event": "DO_NOT_KEEP_OLD_POOL",
+                        "hook": "old hook",
+                        "status": "planned",
+                        "source": "remote",
+                        "bound_chapter_orders": [3],
+                    }
+                ],
+                "retired": [],
+            }
+            storage.update_novel_project(project.id, {"story_canvas": old_canvas})
+
+            rebuilt = self.run_async(service.build_canvas(CanvasFallbackLlm(), project.id))
+            combined = json.dumps(rebuilt.story_canvas.get("event_pool", {}), ensure_ascii=False)
+
+            self.assertNotIn("evt_old_rebuild_leak", combined)
+            self.assertNotIn("DO_NOT_KEEP_OLD_POOL", combined)
+            self.assertEqual(rebuilt.story_canvas["diagnostics"]["mode"], "initial_rolling")
+            self.assertTrue(rebuilt.story_canvas["diagnostics"]["event_pool_reset"])
+
+    def test_novel_build_canvas_remote_prompt_does_not_include_existing_event_pool(self) -> None:
+        class CanvasLlm:
+            last_chat_error = None
+
+            def __init__(self) -> None:
+                self.user_source = ""
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                self.user_source = messages[1]["content"]
+                return json.dumps({
+                    "version": 1,
+                    "mode": "story_canvas",
+                    "acts": [{"id": "act_1", "order": 1, "title": "Fresh act", "purpose": "Fresh start", "chapter_ids": ["canvas_ch_1"]}],
+                    "chapters": [
+                        {
+                            "id": "canvas_ch_1",
+                            "act_id": "act_1",
+                            "chapter_order": 1,
+                            "title": "Chapter 1 Fresh Start",
+                            "goal": "A fresh visible event starts the new canvas.",
+                            "external_event": "A fresh visible event",
+                            "trigger_event": "A fresh visible event",
+                            "immediate_reaction": "The protagonist handles the new event.",
+                            "obstacle_escalation": "A time limit interrupts the conversation.",
+                            "counterpart_reaction": "The counterpart gives a bounded response.",
+                            "character_choice": "The protagonist makes a small choice.",
+                            "scene_consequence": "The scene leaves a new hook.",
+                            "relationship_shift": "They gain one shared reference.",
+                            "ending_hook": "A fresh hook remains.",
+                            "target_length": 1800,
+                            "status": "planned",
+                            "emotion_curve": "calm -> pressure -> held",
+                            "scene_ids": ["scene_1"],
+                        }
+                    ],
+                    "scenes": [
+                        {
+                            "id": "scene_1",
+                            "chapter_id": "canvas_ch_1",
+                            "scene_order": 1,
+                            "current_scene": "fresh place",
+                            "pov": "third person limited",
+                            "present_characters": "protagonist, counterpart",
+                            "surface_event": "A fresh visible event",
+                            "character_desire": "Handle the event without overexplaining.",
+                            "tension": "A time limit interrupts the conversation.",
+                            "required_facts": [],
+                            "forbidden_progress": [],
+                            "ending_beat": "A fresh hook remains.",
+                            "linked_material_ids": [],
+                        }
+                    ],
+                    "threads": [],
+                    "quality_rules": [],
+                    "diagnostics": {"source": "remote"},
+                }, ensure_ascii=False)
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            old_canvas = dict(project.story_canvas)
+            old_canvas["event_pool"] = {
+                "version": 1,
+                "setting_type": "modern_daily",
+                "active": [{"id": "evt_old_prompt_leak", "place": "old place", "event": "DO_NOT_KEEP_OLD_POOL", "hook": "old hook"}],
+                "retired": [],
+            }
+            storage.update_novel_project(project.id, {"story_canvas": old_canvas})
+
+            llm = CanvasLlm()
+            rebuilt = self.run_async(service.build_canvas(llm, project.id))
+            combined = json.dumps(rebuilt.story_canvas.get("event_pool", {}), ensure_ascii=False)
+
+            self.assertNotIn("DO_NOT_KEEP_OLD_POOL", llm.user_source)
+            self.assertNotIn("evt_old_prompt_leak", combined)
+            self.assertNotIn("DO_NOT_KEEP_OLD_POOL", combined)
+            self.assertTrue(rebuilt.story_canvas["diagnostics"]["event_pool_reset"])
+
     def test_novel_build_canvas_uses_remote_when_configured(self) -> None:
         class CanvasLlm:
             last_chat_error = None
@@ -1870,7 +3366,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual([item["chapter_order"] for item in generated.story_canvas["chapters"]], [1, 2, 3])
             self.assertEqual([item.chapter_order for item in generated.chapters], [1, 2, 3])
             self.assertEqual(generated.story_canvas["diagnostics"]["mode"], "rolling_extend")
-            self.assertEqual(llm.calls, 5)
+            self.assertEqual(llm.calls, 6)
             raw_project = storage.get_novel_project(project.id)
             assert raw_project is not None
             prior_to_second = service._novel_state_until(raw_project, 1)
@@ -2351,6 +3847,65 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(restored_card["generation_instruction"], "old instruction")
             self.assertEqual(restored_card["active_version_id"], old_version["id"])
             self.assertEqual(json.loads(restored["source_material_ids_json"]), ["mat-old"])
+
+    def test_chapter_version_snapshot_restores_canvas_event_binding(self) -> None:
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+            chapter = storage.get_novel_chapter(project.chapters[0].id)
+            assert chapter is not None
+            canvas = project.story_canvas
+            old_event = canvas["event_pool"]["active"][0]
+            old_event["use_mode"] = "strict"
+            canvas["chapters"][0]["event_pool_id"] = old_event["id"]
+            canvas["chapters"][0]["event_pool_score"] = 88
+            canvas["chapters"][0]["event_pool_reasons"] = ["old reason"]
+            canvas["scenes"][0]["current_scene"] = "old canvas scene"
+            storage.update_novel_project(project.id, {"story_canvas": canvas})
+
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "Old version",
+                "goal": "old goal",
+                "summary": "old summary",
+                "body": "old body",
+                "scene_card": {"current_scene": "old scene", "chapter_handoff": {"happened": ["old"]}, "handoff_source": "remote"},
+            }, "remote")
+            old_version = storage.list_novel_versions(chapter["id"])[0]
+            snapshot = json.loads(old_version["planning_snapshot_json"])
+            self.assertEqual(snapshot["event_pool_id"], old_event["id"])
+            self.assertEqual(snapshot["event_pool_event"]["use_mode"], "strict")
+            self.assertEqual(snapshot["canvas_scene"]["current_scene"], "old canvas scene")
+
+            changed = storage.get_novel_project(project.id)
+            changed_canvas = json.loads(changed["story_canvas_json"])
+            new_event = changed_canvas["event_pool"]["active"][1]
+            changed_canvas["chapters"][0]["event_pool_id"] = new_event["id"]
+            changed_canvas["chapters"][0]["event_pool_score"] = 41
+            changed_canvas["chapters"][0]["event_pool_reasons"] = ["new reason"]
+            changed_canvas["scenes"][0]["current_scene"] = "new canvas scene"
+            storage.update_novel_project(project.id, {"story_canvas": changed_canvas})
+            storage.update_novel_chapter(chapter["id"], {
+                "title": "New version",
+                "goal": "new goal",
+                "summary": "new summary",
+                "body": "new body",
+                "scene_card": {"current_scene": "new scene", "chapter_handoff": {"happened": ["new"]}, "handoff_source": "remote"},
+            }, "remote")
+
+            self.assertTrue(storage.restore_novel_version(old_version["id"]))
+            restored_project = storage.get_novel_project(project.id)
+            restored_canvas = json.loads(restored_project["story_canvas_json"])
+            restored_chapter = restored_canvas["chapters"][0]
+            restored_event = next(item for item in restored_canvas["event_pool"]["active"] if item["id"] == old_event["id"])
+            self.assertEqual(restored_chapter["event_pool_id"], old_event["id"])
+            self.assertEqual(restored_chapter["event_pool_score"], 88)
+            self.assertEqual(restored_chapter["event_pool_reasons"], ["old reason"])
+            self.assertEqual(restored_canvas["scenes"][0]["current_scene"], "old canvas scene")
+            self.assertEqual(restored_event["use_mode"], "strict")
 
     def test_delete_novel_chapter_reorders_and_cascades_versions(self) -> None:
         card = CharacterStore().get("lin_wanzhi")

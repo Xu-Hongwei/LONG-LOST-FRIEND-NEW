@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from .event_pool import story_event_for_chapter, sync_story_event_pool_display_bindings
+from .setting_profiles import infer_novel_setting_type, novel_setting_profile
+
 
 class NovelGenerationContextMixin:
     def _chapter_source(
@@ -113,12 +116,17 @@ class NovelGenerationContextMixin:
         previous_summary = str(previous[-1]["summary"] or previous[-1]["goal"] or "")[:220] if previous else ""
         protagonist = project["protagonist"] or project["title"]
         tone = project["tone"] or "温柔、克制、日常"
-        _canvas_chapter, canvas_scene = self._canvas_for_chapter(project, chapter)
+        setting_type = infer_novel_setting_type(project)
+        profile = novel_setting_profile(setting_type)
+        canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
+        canvas_chapter, canvas_scene = self._canvas_for_chapter(project, chapter)
+        event_pool = sync_story_event_pool_display_bindings(canvas.get("event_pool"), self._canvas_chapters(canvas), setting_type)
+        pool_event = story_event_for_chapter(event_pool, canvas_chapter or {"chapter_order": int(chapter["chapter_order"]), "event_pool_id": ""}, setting_type)
         defaults = {
-            "current_scene": f"{tone}的校园日常场景，承接上一章但直接进入可感知的地点、光线和动作。",
+            "current_scene": pool_event.get("place") or f"{tone}的{profile['label']}场景，承接上一章但直接进入可感知的地点、光线和动作。",
             "pov": f"贴近{protagonist}与对方的第三人称限知视角，避免上帝视角总结。",
             "present_characters": protagonist,
-            "surface_event": self._scene_surface_event(instruction),
+            "surface_event": self._scene_surface_event(instruction) if self._usable_instruction(instruction) else (pool_event.get("event") or self._scene_surface_event(instruction)),
             "character_desire": "人物想把话说清一点，但仍希望保留安全距离和选择余地。",
             "tension": "两个人都意识到某些话还没到能说破的时候，越想靠近，越需要把分寸放稳。",
             "required_facts": facts or ([previous_summary] if previous_summary else []),

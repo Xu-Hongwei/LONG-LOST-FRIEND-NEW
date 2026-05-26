@@ -12,7 +12,7 @@ JSON_LIMITS = {
     "novel_state_json": 24000,
     "scene_card_json": 8000,
     "state_delta_json": 8000,
-    "planning_snapshot_json": 12000,
+    "planning_snapshot_json": 24000,
 }
 
 UNTRUSTED_VERSION_SOURCES = {"mock", "manual", "create", "system", "canvas", "restore"}

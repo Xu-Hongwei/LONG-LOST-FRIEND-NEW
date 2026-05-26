@@ -192,6 +192,7 @@ const {
   isInitialCanvasRebuildLocked,
   activeCanvasChapter,
   activeCanvasScenes,
+  activeCanvasEvent,
   activeCanvasActionChain,
   activeNovelPriorStateEntries,
   novelStateSummary,
@@ -273,6 +274,13 @@ const {
   saveNovelChapter,
   generateActiveChapter,
   checkActiveContinuity,
+  createEventPoolEventFromPrompt,
+  editEventPoolEventFromPrompt,
+  retireEventPoolEventAction,
+  deleteEventPoolEventAction,
+  bindEventToActiveChapter,
+  clearActiveChapterEventBinding,
+  rebindActiveChapterEventFromPrompt,
   restoreVersion,
   deleteVersion,
   unlockNovelProgress
@@ -686,9 +694,17 @@ function downloadNovelProjectMarkdown() {
               :canvas-build-progress-label="canvasBuildProgressLabel"
               :canvas-build-percent="canvasBuildPercent"
               :canvas-build-step-class="canvasBuildStepClass"
+              :event-pool="storyCanvasDraft.event_pool"
+              :active-canvas-chapter="activeCanvasChapter"
               :novel-state-summary="novelStateSummary"
               :novel-state-last-handoff-text="novelStateLastHandoffText"
               :novel-state-open-threads="novelStateOpenThreads"
+              :novel-project-busy="novelProjectBusy"
+              @add-event="createEventPoolEventFromPrompt"
+              @edit-event="editEventPoolEventFromPrompt"
+              @retire-event="retireEventPoolEventAction"
+              @delete-event="deleteEventPoolEventAction"
+              @bind-event="bindEventToActiveChapter"
             />
             <CanvasChaptersView
               v-else-if="storyCanvasView === 'chapters'"
@@ -729,6 +745,7 @@ function downloadNovelProjectMarkdown() {
             v-model:project-chapter-target-length="projectChapterTargetLength"
             :active-novel-chapter="activeNovelChapter"
             :active-canvas-chapter="activeCanvasChapter"
+            :active-canvas-event="activeCanvasEvent"
             :active-canvas-action-chain="activeCanvasActionChain"
             :scene-card-fields="sceneCardFields"
             :novel-chapter-status-options="novelChapterStatusOptions"
@@ -746,6 +763,8 @@ function downloadNovelProjectMarkdown() {
             @delete-chapter="deleteActiveNovelChapter"
             @generate-chapter="generateActiveChapter"
             @optimize-instruction="applyOptimizedChapterInstruction"
+            @clear-event-binding="clearActiveChapterEventBinding"
+            @rebind-event="rebindActiveChapterEventFromPrompt"
           />
 
           <p v-if="novelStudioMode === 'quick' && messages.length < 2" class="empty">当前会话消息太少，先聊几轮再生成。</p>

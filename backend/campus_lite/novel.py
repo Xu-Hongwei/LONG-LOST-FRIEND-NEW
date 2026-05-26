@@ -17,6 +17,7 @@ from .features.novel.generation_context import NovelGenerationContextMixin
 from .features.novel.generation_mock import NovelGenerationMockMixin
 from .features.novel.generation_postprocess import NovelGenerationPostprocessMixin
 from .features.novel.generation_response import NovelGenerationResponseMixin
+from .features.novel.event_pool_edit import NovelEventPoolEditMixin
 from .features.novel.optimizer import NovelInstructionOptimizerMixin
 from .features.novel.project import NovelProjectMixin
 from .features.novel.project_draft import NovelProjectDraftMixin
@@ -43,6 +44,7 @@ class NovelService(
     NovelGenerationBeatsMixin,
     NovelGenerationContextMixin,
     NovelGenerationMockMixin,
+    NovelEventPoolEditMixin,
     NovelInstructionOptimizerMixin,
     NovelQualityMixin,
     NovelAuditMixin,

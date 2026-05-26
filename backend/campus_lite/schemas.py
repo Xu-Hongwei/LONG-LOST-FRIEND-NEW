@@ -15,6 +15,18 @@ MemoryType = Literal[
 ]
 
 MemoryScope = Literal["global", "character", "session"]
+SettingType = Literal[
+    "campus",
+    "modern_daily",
+    "workplace",
+    "xianxia_wuxia",
+    "urban_fantasy",
+    "mystery",
+    "sci_fi",
+    "historical",
+    "fantasy_adventure",
+    "custom",
+]
 
 
 class ResolveVisitorRequest(BaseModel):
@@ -32,6 +44,8 @@ class CharacterCard(BaseModel):
     archetype: str
     tagline: str
     gender: str = "unknown"
+    setting_type: SettingType = "modern_daily"
+    setting_notes: str = ""
     bio: str
     speech_style: str
     likes: list[str] = Field(default_factory=list)
@@ -48,6 +62,7 @@ class CharacterCard(BaseModel):
     interaction_policy: dict[str, Any] = Field(default_factory=dict)
     anti_patterns: list[str] = Field(default_factory=list)
     backstory: dict[str, Any] = Field(default_factory=dict)
+    story_seed_pool: dict[str, Any] = Field(default_factory=dict)
     voice: dict[str, Any] = Field(default_factory=dict)
     visual: dict[str, Any] = Field(default_factory=dict)
     origin: Literal["builtin", "custom"] = "builtin"
@@ -60,6 +75,8 @@ class CharacterWriteRequest(BaseModel):
     archetype: str = Field(default="", max_length=120)
     tagline: str = Field(default="", max_length=160)
     gender: str = Field(default="unknown", max_length=32)
+    setting_type: SettingType = "modern_daily"
+    setting_notes: str = Field(default="", max_length=800)
     bio: str = Field(default="", max_length=1200)
     speech_style: str = Field(default="", max_length=800)
     likes: list[str] = Field(default_factory=list)
@@ -75,6 +92,7 @@ class CharacterWriteRequest(BaseModel):
     post_history_instructions: str = Field(default="", max_length=2000)
     interaction_policy: dict[str, Any] = Field(default_factory=dict)
     anti_patterns: list[str] = Field(default_factory=list)
+    story_seed_pool: dict[str, Any] = Field(default_factory=dict)
     voice: dict[str, Any] = Field(default_factory=dict)
     visual: dict[str, Any] = Field(default_factory=dict)
 
@@ -82,6 +100,9 @@ class CharacterWriteRequest(BaseModel):
 class CharacterDraftGenerateRequest(BaseModel):
     visitor_id: str
     prompt: str = Field(min_length=2, max_length=2000)
+    setting_type: SettingType = "modern_daily"
+    setting_notes: str = Field(default="", max_length=800)
+    draft_mode: Literal["complete", "rewrite"] = "complete"
     template: dict[str, Any] | None = None
 
 
@@ -181,7 +202,7 @@ class NovelChapter(BaseModel):
 
 class NovelProjectCreateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=120)
-    genre: str = Field(default="校园日常长篇", max_length=80)
+    genre: str = Field(default="现代日常长篇", max_length=80)
     tone: str = Field(default="温柔、克制、日常", max_length=120)
     protagonist: str = Field(default="", max_length=120)
     worldview: str = Field(default="", max_length=2000)
@@ -260,6 +281,25 @@ class NovelInstructionOptimizeResponse(BaseModel):
     instruction: str
     source: Literal["remote", "fallback"] = "fallback"
     diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+StoryEventUseMode = Literal["strict", "guide", "flavor", "free"]
+
+
+class StoryEventPoolEventWriteRequest(BaseModel):
+    place: str = Field(default="", max_length=180)
+    time_anchor: str = Field(default="", max_length=120)
+    event: str = Field(default="", max_length=360)
+    hook: str = Field(default="", max_length=260)
+    motifs: list[str] = Field(default_factory=list)
+    use_mode: StoryEventUseMode = "guide"
+    source_reason: str = Field(default="", max_length=220)
+    tags: dict[str, Any] = Field(default_factory=dict)
+
+
+class StoryEventPoolBindingRequest(BaseModel):
+    event_id: str | None = Field(default=None, max_length=80)
+    use_mode: StoryEventUseMode | None = None
 
 
 class NovelContinuityIssue(BaseModel):

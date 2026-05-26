@@ -2,7 +2,7 @@ import type { ComputedRef, Ref } from "vue";
 import { optimizeNovelInstruction } from "./api";
 import type { CanvasActionKey } from "./constants";
 import type { ChapterDraft } from "./useNovelProject";
-import type { NovelChapter, NovelProject, StoryCanvasChapter } from "../../types";
+import type { NovelChapter, NovelProject, StoryCanvasChapter, StoryCanvasEvent } from "../../types";
 
 type PriorStateEntry = { chapter: NovelChapter };
 
@@ -45,6 +45,38 @@ export function useNovelInstruction(options: {
     return compactInstructionText(String(options.activeCanvasChapter.value?.[key] || ""));
   }
 
+  function activeBoundEvent(): StoryCanvasEvent | null {
+    const chapter = options.activeCanvasChapter.value;
+    const pool = options.activeNovelProject.value?.story_canvas?.event_pool;
+    const active = pool?.active || [];
+    const retired = pool?.retired || [];
+    const events = [...active, ...retired];
+    if (!chapter || !events.length) return null;
+    const id = String(chapter.event_pool_id || "");
+    const byId = id ? events.find((item) => item.id === id) : null;
+    if (byId) return byId;
+    return events.find((item) => (item.bound_chapter_orders || []).map(String).includes(String(chapter.chapter_order))) || null;
+  }
+
+  function boundEventInstructionLines(event: StoryCanvasEvent | null) {
+    if (!event) return [];
+    const tags = (event.tags || {}) as Record<string, unknown>;
+    const tagList = (key: string) => Array.isArray(tags[key])
+      ? (tags[key] as unknown[]).map(String).filter(Boolean).slice(0, 4).join("、")
+      : "";
+    return [
+      `事件池ID：${event.id}`,
+      event.time_anchor ? `时间锚点：${event.time_anchor}` : "",
+      event.place ? `地点：${event.place}` : "",
+      event.event ? `外部事件：${event.event}` : "",
+      event.hook ? `结尾钩子：${event.hook}` : "",
+      event.motifs?.length ? `意象：${event.motifs.slice(0, 4).join("、")}` : "",
+      tagList("theme_markers") ? `主题命中：${tagList("theme_markers")}` : "",
+      tagList("tone_markers") ? `基调命中：${tagList("tone_markers")}` : "",
+      event.selection_reasons?.length ? `选择原因：${event.selection_reasons.slice(0, 3).join("；")}` : ""
+    ].filter(Boolean);
+  }
+
   function optimizedChapterInstruction() {
     const goal = compactInstructionText(options.chapterDraft.value.goal) || "承接前文，完成一个具体事件中的关系推进";
     const current = options.activeChapterWordCount.value;
@@ -70,6 +102,8 @@ export function useNovelInstruction(options: {
       relationshipShift: canvasActionInstructionValue("relationship_shift"),
       endingHook: canvasActionInstructionValue("ending_hook")
     };
+    const boundEvent = activeBoundEvent();
+    const boundEventLines = boundEventInstructionLines(boundEvent);
     let mode = "精修当前章";
     let lengthDirective = `当前正文约 ${current} 字，接近目标区间。请保持已有节奏，补强场景连贯性和章节收束。`;
     if (!current) {
@@ -128,6 +162,10 @@ export function useNovelInstruction(options: {
         "如果一次无法写满目标长度，也必须先达到最低可接受长度，并停在可继续续写的自然钩子上。"
       ]),
       instructionSection("本章剧情概述", [goal]),
+      instructionSection("项目事件池绑定", boundEventLines.length ? [
+        ...boundEventLines,
+        "事件池决定这一章发生什么；场景卡只补镜头、视角、人物欲望和边界，不能把本章改成另一个无关事件。"
+      ] : []),
       instructionSection("画布动作链", actionTaskLines),
       instructionSection("场景镜头与边界", sceneTaskLines),
       instructionSection("场景展开顺序", [

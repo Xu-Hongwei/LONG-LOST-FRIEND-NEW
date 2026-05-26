@@ -211,6 +211,8 @@ class NovelChapterStorageMixin:
         state_delta = self._novel_version_state_delta(existing, next_title, str(updates["body"]), next_summary, version_source, next_scene_card)
         if version_source == "mock" and not state_delta.get("handoff_source"):
             state_delta["handoff_source"] = "skipped_mock"
+        project_row = conn.execute("SELECT story_canvas_json FROM novel_projects WHERE id = ?", (existing["project_id"],)).fetchone()
+        project_story_canvas = self._json_dict(project_row["story_canvas_json"] if project_row else "{}")
         planning_snapshot = self._novel_planning_snapshot(
             existing,
             next_title,
@@ -219,6 +221,7 @@ class NovelChapterStorageMixin:
             next_status,
             next_scene_card,
             next_source_material_ids,
+            project_story_canvas,
         )
         version_id = self._insert_novel_version(
             conn,

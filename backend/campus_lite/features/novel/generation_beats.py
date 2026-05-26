@@ -5,6 +5,8 @@ import re
 from typing import Any
 
 from .config import NOVEL_PLANNING_TIMEOUT_MS
+from .event_pool import story_event_for_chapter, sync_story_event_pool_display_bindings
+from .setting_profiles import infer_novel_setting_type, novel_setting_profile
 
 
 class NovelGenerationBeatsMixin:
@@ -87,7 +89,7 @@ class NovelGenerationBeatsMixin:
             "[硬约束]",
             "必须按本章场面推进链生成 beats：触发事件 -> 即时反应 -> 阻碍升级 -> 对方反应 -> 人物选择 -> 场景后果 -> 结尾钩子。"
             "第一拍必须自然承接上一章尾段或上一章交接单的未解决点，不要重演上一章已经完成的动作。"
-            "保持一个连续大场景，但可以在场景内部新增一到两个校园日常小事件，例如广播、借书卡、值日生、突来的雨、掉落的物件或路过同学造成的打断。"
+            "保持一个连续大场景，但可以在场景内部新增一到两个符合项目题材的小事件、道具、旁观者、误会、延误或场面压力。"
             "素材只是熟悉感锚点，不要把全部素材塞进 beats；优先让读者看到具体动作、对白、阻碍和选择。"
             "至少安排两轮自然对白；结尾必须是具体钩子。"
             "不要输出“关系变化”“张力”“两人还不熟”等分析语言，只输出可见动作、对白和内心转折。",
@@ -214,27 +216,35 @@ class NovelGenerationBeatsMixin:
     def _mock_scene_beats(self, project: Any, chapter: Any, scene_card: dict[str, Any]) -> list[dict[str, Any]]:
         protagonist = project["protagonist"] or project["title"]
         canvas_chapter, _canvas_scene = self._canvas_for_chapter(project, chapter)
-        place = self._clean_beat_text(str(scene_card.get("current_scene") or "图书馆门口的傍晚走廊"))
-        if "校园日常" in place or "场景" in place:
-            place = "图书馆门口的傍晚走廊"
-        event = self._clean_beat_text(str(scene_card.get("surface_event") or "晚风把几张夹页从书里掀出来"))
-        ending = self._clean_beat_text(str(scene_card.get("ending_beat") or "她在借阅单背面看见一行刚写下的字"))
+        setting_type = infer_novel_setting_type(project)
+        profile = novel_setting_profile(setting_type)
+        canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
+        event_pool = sync_story_event_pool_display_bindings(canvas.get("event_pool"), self._canvas_chapters(canvas), setting_type)
+        pool_event = story_event_for_chapter(event_pool, canvas_chapter or {"chapter_order": int(chapter["chapter_order"]), "event_pool_id": ""}, setting_type)
+        fallback_place = pool_event.get("place") or profile["places"][0]
+        fallback_event = pool_event.get("event") or profile["events"][0]
+        fallback_ending = pool_event.get("hook") or profile["endings"][0]
+        place = self._clean_beat_text(str(scene_card.get("current_scene") or fallback_place))
+        if "场景" in place:
+            place = fallback_place
+        event = self._clean_beat_text(str(scene_card.get("surface_event") or fallback_event))
+        ending = self._clean_beat_text(str(scene_card.get("ending_beat") or fallback_ending))
         trigger = self._clean_beat_text(str(canvas_chapter.get("trigger_event") or event)) or event
-        immediate = self._clean_beat_text(str(canvas_chapter.get("immediate_reaction") or "她蹲下去捡书，先把露出来的夹页按住。"))
-        escalation = self._clean_beat_text(str(canvas_chapter.get("obstacle_escalation") or "借书处的铃声响起，身后有人催着还书，夹页却被风推到对方脚边。"))
-        counterpart = self._clean_beat_text(str(canvas_chapter.get("counterpart_reaction") or "对方没有追问夹页上的字，只把它反扣着递回来。"))
-        choice = self._clean_beat_text(str(canvas_chapter.get("character_choice") or "她本来可以道谢后离开，却停下来把掉出的借阅单也递给他确认。"))
-        consequence = self._clean_beat_text(str(canvas_chapter.get("scene_consequence") or "她把这个名字默默放在心里，没有急着再问第二句。"))
+        immediate = self._clean_beat_text(str(canvas_chapter.get("immediate_reaction") or "主角先处理眼前变化，没有急着解释自己的在意。"))
+        escalation = self._clean_beat_text(str(canvas_chapter.get("obstacle_escalation") or "时间压力和信息差一起压过来，让人物不能把话说完整。"))
+        counterpart = self._clean_beat_text(str(canvas_chapter.get("counterpart_reaction") or "对方没有替主角做决定，只用一个具体动作把局面接住。"))
+        choice = self._clean_beat_text(str(canvas_chapter.get("character_choice") or "主角本来可以退开，却停下来完成一个不越界的小选择。"))
+        consequence = self._clean_beat_text(str(canvas_chapter.get("scene_consequence") or "这次选择让两人多了一件可回望的共同经历。"))
         if len(consequence) < 10 or "彼此了" in consequence or "记住" in consequence:
-            consequence = "她把这个名字默默放在心里，没有急着再问第二句。"
+            consequence = "这次选择让两人多了一件可回望的共同经历。"
         hook = self._clean_beat_text(str(canvas_chapter.get("ending_hook") or ending)) or ending
         if "记住" in hook:
-            hook = "她把便签夹回书页时，背面露出一行小字。"
+            hook = fallback_ending
         return [
             {
                 "type": "establish",
                 "purpose": "建立地点、人物和可见动作",
-                "visible_action": f"{place}，闭馆前的提示音刚响过，{protagonist}抱着几本书从感应门旁经过。",
+                "visible_action": f"{place}，{protagonist}进入这场外部事件之前，周围的声音和光线先把气氛压低了一点。",
                 "dialogue": [],
                 "inner_turn": "她没有立刻回头，只把那句关心压回很轻的呼吸里。",
             },
@@ -249,21 +259,21 @@ class NovelGenerationBeatsMixin:
                 "type": "pressure",
                 "purpose": "制造阻碍和旁观压力",
                 "visible_action": escalation,
-                "dialogue": ["同学，借阅证别落下。", "我马上。"],
-                "inner_turn": "她越想快一点，指尖越容易碰乱书页。",
+                "dialogue": ["先别急。", "我知道。"],
+                "inner_turn": "越想快一点，细节越容易出错。",
             },
             {
                 "type": "first_exchange",
                 "purpose": "让对方用动作回应而不是解释",
                 "visible_action": counterpart,
-                "dialogue": ["这个是你的吧？", "谢谢。"],
-                "inner_turn": "她接过来时才发现，对方把有字的一面避开了。",
+                "dialogue": ["这个交给你决定。", "谢谢。"],
+                "inner_turn": "主角接过选择权时，才意识到对方没有越过边界。",
             },
             {
                 "type": "second_exchange",
                 "purpose": "完成人物的小选择",
                 "visible_action": choice,
-                "dialogue": ["不用急，我只是怕你忘在这里。", "那你呢？这张借阅单也是你的吗？"],
+                "dialogue": ["不用现在回答。", "那就先把眼前这一步做完。"],
                 "inner_turn": "这句话出口以后，她才意识到自己没有立刻逃开。",
             },
             {

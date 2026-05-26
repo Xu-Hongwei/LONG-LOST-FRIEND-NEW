@@ -78,10 +78,11 @@ class NovelVersionStorageMixin:
         status: str,
         scene_card: dict[str, Any],
         source_material_ids: list[Any],
+        project_story_canvas: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         chapter_order = int(chapter["chapter_order"]) if chapter and "chapter_order" in chapter.keys() else 0
         chapter_id = str(chapter["id"]) if chapter and "id" in chapter.keys() else ""
-        return {
+        snapshot = {
             "chapter_id": chapter_id,
             "chapter_order": chapter_order,
             "title": title.strip()[:120],
@@ -91,6 +92,62 @@ class NovelVersionStorageMixin:
             "scene_card": self._strip_runtime_scene_card_fields(scene_card if isinstance(scene_card, dict) else {}),
             "source_material_ids": [str(item).strip() for item in source_material_ids if str(item).strip()][:24],
         }
+        snapshot.update(self._novel_canvas_planning_snapshot(chapter, chapter_order, project_story_canvas))
+        return snapshot
+
+    def _novel_canvas_planning_snapshot(
+        self,
+        chapter: sqlite3.Row | None,
+        chapter_order: int,
+        project_story_canvas: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        canvas = project_story_canvas if isinstance(project_story_canvas, dict) else {}
+        if not canvas and chapter and "project_id" in chapter.keys():
+            project = self.get_novel_project(chapter["project_id"])
+            canvas = self._json_dict(project["story_canvas_json"] if project and "story_canvas_json" in project.keys() else "{}")
+        if not canvas:
+            return {}
+        chapters = canvas.get("chapters") if isinstance(canvas.get("chapters"), list) else []
+        canvas_chapter = next((item for item in chapters if isinstance(item, dict) and int(item.get("chapter_order") or 0) == chapter_order), {})
+        scenes = canvas.get("scenes") if isinstance(canvas.get("scenes"), list) else []
+        scene_ids = canvas_chapter.get("scene_ids") if isinstance(canvas_chapter.get("scene_ids"), list) else []
+        scene_id = str(scene_ids[0]) if scene_ids else ""
+        canvas_scene = next(
+            (
+                item for item in scenes
+                if isinstance(item, dict)
+                and (str(item.get("id") or "") == scene_id or str(item.get("chapter_id") or "") == str(canvas_chapter.get("id") or ""))
+            ),
+            {},
+        )
+        event_pool = canvas.get("event_pool") if isinstance(canvas.get("event_pool"), dict) else {}
+        active = event_pool.get("active") if isinstance(event_pool.get("active"), list) else []
+        retired = event_pool.get("retired") if isinstance(event_pool.get("retired"), list) else []
+        event_id = str(canvas_chapter.get("event_pool_id") or "").strip()
+        order_text = str(chapter_order)
+        event = next((item for item in [*active, *retired] if isinstance(item, dict) and str(item.get("id") or "") == event_id), {})
+        if not event:
+            event = next(
+                (
+                    item for item in [*active, *retired]
+                    if isinstance(item, dict)
+                    and order_text in [str(value) for value in item.get("bound_chapter_orders", [])]
+                ),
+                {},
+            )
+        result: dict[str, Any] = {}
+        if canvas_chapter:
+            result["canvas_chapter"] = json.loads(json.dumps(canvas_chapter, ensure_ascii=False))
+            result["event_pool_id"] = str(canvas_chapter.get("event_pool_id") or "")
+            result["event_pool_score"] = int(canvas_chapter.get("event_pool_score") or 0)
+            result["event_pool_reasons"] = canvas_chapter.get("event_pool_reasons") if isinstance(canvas_chapter.get("event_pool_reasons"), list) else []
+            result["event_pool_penalties"] = canvas_chapter.get("event_pool_penalties") if isinstance(canvas_chapter.get("event_pool_penalties"), list) else []
+        if canvas_scene:
+            result["canvas_scene"] = json.loads(json.dumps(canvas_scene, ensure_ascii=False))
+        if event:
+            result["event_pool_event"] = json.loads(json.dumps(event, ensure_ascii=False))
+            result["event_use_mode"] = str(event.get("use_mode") or "guide")
+        return result
 
     def add_novel_version(
         self,
@@ -213,7 +270,7 @@ class NovelVersionStorageMixin:
         if handoff:
             scene_card["chapter_handoff"] = handoff
             scene_card["handoff_source"] = state_delta.get("handoff_source") or scene_card.get("handoff_source") or ""
-        return self.update_novel_chapter(
+        restored = self.update_novel_chapter(
             version["chapter_id"],
             {
                 "title": version["title"],
@@ -227,3 +284,64 @@ class NovelVersionStorageMixin:
             "restore",
             create_version=False,
         )
+        if restored:
+            self._restore_novel_canvas_planning_snapshot(version["project_id"], planning_snapshot)
+        return restored
+
+    def _restore_novel_canvas_planning_snapshot(self, project_id: str, planning_snapshot: dict[str, Any]) -> None:
+        canvas_chapter = planning_snapshot.get("canvas_chapter") if isinstance(planning_snapshot.get("canvas_chapter"), dict) else {}
+        canvas_scene = planning_snapshot.get("canvas_scene") if isinstance(planning_snapshot.get("canvas_scene"), dict) else {}
+        event = planning_snapshot.get("event_pool_event") if isinstance(planning_snapshot.get("event_pool_event"), dict) else {}
+        if not canvas_chapter and not canvas_scene and not event:
+            return
+        project = self.get_novel_project(project_id)
+        if not project:
+            return
+        canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
+        if not canvas:
+            return
+        next_canvas = json.loads(json.dumps(canvas, ensure_ascii=False))
+        order = int(planning_snapshot.get("chapter_order") or canvas_chapter.get("chapter_order") or 0)
+        chapters = next_canvas.get("chapters") if isinstance(next_canvas.get("chapters"), list) else []
+        next_canvas["chapters"] = chapters
+        chapter_index = next((index for index, item in enumerate(chapters) if isinstance(item, dict) and int(item.get("chapter_order") or 0) == order), -1)
+        if canvas_chapter:
+            if chapter_index >= 0:
+                chapters[chapter_index] = {**chapters[chapter_index], **canvas_chapter}
+            else:
+                chapters.append(canvas_chapter)
+                chapter_index = len(chapters) - 1
+        target_chapter = chapters[chapter_index] if chapter_index >= 0 else {}
+        if target_chapter and planning_snapshot.get("event_pool_id") is not None:
+            target_chapter["event_pool_id"] = str(planning_snapshot.get("event_pool_id") or "")
+            target_chapter["event_pool_score"] = int(planning_snapshot.get("event_pool_score") or 0)
+            target_chapter["event_pool_reasons"] = planning_snapshot.get("event_pool_reasons") if isinstance(planning_snapshot.get("event_pool_reasons"), list) else []
+            target_chapter["event_pool_penalties"] = planning_snapshot.get("event_pool_penalties") if isinstance(planning_snapshot.get("event_pool_penalties"), list) else []
+        if canvas_scene:
+            scenes = next_canvas.get("scenes") if isinstance(next_canvas.get("scenes"), list) else []
+            next_canvas["scenes"] = scenes
+            scene_id = str(canvas_scene.get("id") or "")
+            scene_index = next((index for index, item in enumerate(scenes) if isinstance(item, dict) and str(item.get("id") or "") == scene_id), -1)
+            if scene_index >= 0:
+                scenes[scene_index] = {**scenes[scene_index], **canvas_scene}
+            else:
+                scenes.append(canvas_scene)
+        if event:
+            event_pool = next_canvas.get("event_pool") if isinstance(next_canvas.get("event_pool"), dict) else {}
+            active = event_pool.get("active") if isinstance(event_pool.get("active"), list) else []
+            retired = event_pool.get("retired") if isinstance(event_pool.get("retired"), list) else []
+            event_id = str(event.get("id") or planning_snapshot.get("event_pool_id") or "")
+            active = [item for item in active if not (isinstance(item, dict) and str(item.get("id") or "") == event_id)]
+            retired = [item for item in retired if not (isinstance(item, dict) and str(item.get("id") or "") == event_id)]
+            if str(event.get("status") or "") == "retired":
+                retired.append(event)
+            else:
+                active.append(event)
+                if len(active) > 10:
+                    drop_index = next((index for index in range(len(active) - 1, -1, -1) if str(active[index].get("id") or "") != event_id and not active[index].get("bound_chapter_orders")), -1)
+                    if drop_index >= 0:
+                        active.pop(drop_index)
+            event_pool["active"] = active[:10]
+            event_pool["retired"] = retired[-40:]
+            next_canvas["event_pool"] = event_pool
+        self.update_novel_project(project_id, {"story_canvas": next_canvas})

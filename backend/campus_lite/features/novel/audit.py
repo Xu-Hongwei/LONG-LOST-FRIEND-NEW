@@ -214,6 +214,6 @@ class NovelAuditMixin:
             parsed.get("body", ""),
             "[输出]",
             "只输出 JSON 对象，字段为 title, summary, body, source_material_ids。正文只能是小说场景。"
-            "允许补入合理的校园小事件来制造推进，但不要新增重大关系进展。",
+            "允许补入符合项目题材的小事件来制造推进，但不要新增重大关系进展。",
         ])
 

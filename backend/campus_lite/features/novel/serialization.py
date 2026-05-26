@@ -6,11 +6,20 @@ from typing import Any
 
 from ...schemas import NovelChapter, NovelMaterial, NovelProjectResponse, NovelVersion
 from ...storage import Storage
+from .event_pool import sync_story_event_pool_display_bindings
 
 
 class NovelSerializationMixin:
     def _project_from_row(self, row: Any) -> NovelProjectResponse:
         storage = self._require_storage()
+        story_canvas = self._json_dict(row["story_canvas_json"] if "story_canvas_json" in row.keys() else "{}")
+        if isinstance(story_canvas.get("event_pool"), dict):
+            setting_type = str(self._json_dict(story_canvas.get("diagnostics")).get("setting_type") or story_canvas.get("event_pool", {}).get("setting_type") or "modern_daily")
+            story_canvas["event_pool"] = sync_story_event_pool_display_bindings(
+                story_canvas.get("event_pool"),
+                self._canvas_chapters(story_canvas),
+                setting_type,
+            )
         return NovelProjectResponse(
             id=row["id"],
             session_id=row["session_id"],
@@ -24,7 +33,7 @@ class NovelSerializationMixin:
             relationship_setup=row["relationship_setup"],
             outline=row["outline"],
             story_bible=self._json_dict(row["story_bible_json"]),
-            story_canvas=self._json_dict(row["story_canvas_json"] if "story_canvas_json" in row.keys() else "{}"),
+            story_canvas=story_canvas,
             novel_state=self._json_dict(row["novel_state_json"] if "novel_state_json" in row.keys() else "{}"),
             status=row["status"],
             created_at=row["created_at"],

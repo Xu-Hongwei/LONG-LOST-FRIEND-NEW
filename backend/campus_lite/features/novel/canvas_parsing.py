@@ -3,8 +3,40 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters, normalize_story_event_pool
+
 
 class NovelCanvasParsingMixin:
+    def _parse_event_pool_delta_response(self, text: str) -> dict[str, Any]:
+        raw = self._load_llm_json_object(text, "event_pool_delta")
+        delta = raw.get("event_pool_delta") if isinstance(raw.get("event_pool_delta"), dict) else raw
+        if not isinstance(delta, dict):
+            return {}
+        cleaned: dict[str, Any] = {}
+        for key in ["add", "update", "retire"]:
+            value = delta.get(key)
+            if not isinstance(value, list):
+                continue
+            if key == "retire":
+                cleaned[key] = [
+                    item for item in value
+                    if isinstance(item, (str, int, float)) or (isinstance(item, dict) and str(item.get("id") or "").strip())
+                ][:10]
+            else:
+                cleaned[key] = [item for item in value if isinstance(item, dict)][:10]
+        return cleaned
+
+    def _merge_event_pool_deltas(self, first: Any, second: Any) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for key in ["add", "update", "retire"]:
+            items: list[Any] = []
+            for source in [first, second]:
+                if isinstance(source, dict) and isinstance(source.get(key), list):
+                    items.extend(source.get(key) or [])
+            if items:
+                merged[key] = items[:20]
+        return merged
+
     def _parse_canvas_response(self, text: str, fallback: dict[str, Any]) -> dict[str, Any]:
         raw = self._load_llm_json_object(text, "canvas")
         if not isinstance(raw, dict):
@@ -43,6 +75,7 @@ class NovelCanvasParsingMixin:
                 "id": chapter_id,
                 "act_id": str(item.get("act_id") or base.get("act_id") or "act_1"),
                 "chapter_order": index + 1,
+                "event_pool_id": str(item.get("event_pool_id") or base.get("event_pool_id") or ""),
                 "title": self._normalize_chapter_title(str(item.get("title") or base.get("title") or ""), index + 1),
                 "goal": str(item.get("goal") or base.get("goal") or "")[:500],
                 "external_event": str(item.get("external_event") or base.get("external_event") or "")[:500],
@@ -118,6 +151,12 @@ class NovelCanvasParsingMixin:
 
         quality_rules = canvas.get("quality_rules") if isinstance(canvas.get("quality_rules"), list) else fallback.get("quality_rules", [])
         diagnostics = self._json_dict(canvas.get("diagnostics"))
+        fallback_diagnostics = self._json_dict(fallback.get("diagnostics"))
+        setting_type = str(diagnostics.get("setting_type") or fallback_diagnostics.get("setting_type") or "modern_daily")
+        event_pool_source = canvas.get("event_pool") if isinstance(canvas.get("event_pool"), dict) else fallback.get("event_pool")
+        event_pool = normalize_story_event_pool(event_pool_source, setting_type)
+        event_pool = apply_story_event_pool_delta(event_pool, canvas.get("event_pool_delta"), setting_type)
+        event_pool = bind_story_event_pool_to_chapters(event_pool, chapters, setting_type)
         if derived_scenes:
             diagnostics = {**diagnostics, "scene_source": "derived_from_chapters"}
         if invalid_scene_tension_count:
@@ -134,6 +173,7 @@ class NovelCanvasParsingMixin:
             "scenes": scenes,
             "threads": threads or fallback.get("threads", []),
             "quality_rules": [str(value)[:240] for value in quality_rules],
+            "event_pool": event_pool,
             "diagnostics": diagnostics,
         }
 

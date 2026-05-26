@@ -65,7 +65,7 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
   const novelProjectBusy = ref(false);
   const projectDraft = ref<ProjectDraft>({
     title: "",
-    genre: "校园日常长篇",
+    genre: "现代日常长篇",
     tone: "温柔、克制、日常",
     protagonist: "",
     worldview: "",
@@ -215,7 +215,7 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
   function syncProjectDraft(project: NovelProject | null) {
     projectDraft.value = {
       title: project?.title || "",
-      genre: project?.genre || "校园日常长篇",
+      genre: project?.genre || "现代日常长篇",
       tone: project?.tone || "温柔、克制、日常",
       protagonist: project?.protagonist || activeCharacter.value?.name || "",
       worldview: project?.worldview || "",

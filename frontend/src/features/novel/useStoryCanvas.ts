@@ -2,7 +2,7 @@ import { computed, ref, type ComputedRef } from "vue";
 import { canvasActionChainFields, canvasBuildSteps, type CanvasBuildStage } from "./constants";
 import { emptyStoryCanvas, normalizeStoryCanvas } from "./canvas";
 import { formatNovelChapterTitle } from "./chapterTitle";
-import type { NovelChapter, NovelProject, StoryCanvas, StoryCanvasChapter, StoryCanvasScene } from "../../types";
+import type { NovelChapter, NovelProject, StoryCanvas, StoryCanvasChapter, StoryCanvasEvent, StoryCanvasScene } from "../../types";
 
 export type StoryCanvasView = "flow" | "chapters" | "scenes" | "threads";
 
@@ -146,6 +146,18 @@ export function useStoryCanvas(
     const chapterId = activeCanvasChapter.value?.id || "";
     return storyCanvasDraft.value.scenes.filter((scene) => scene.chapter_id === chapterId);
   });
+  const activeCanvasEvent = computed<StoryCanvasEvent | null>(() => {
+    const chapter = activeCanvasChapter.value;
+    const pool = storyCanvasDraft.value.event_pool;
+    if (!chapter || !pool) return null;
+    const events = [...(pool.active || []), ...(pool.retired || [])];
+    const eventId = String(chapter.event_pool_id || "");
+    if (eventId) {
+      const byId = events.find((item) => item.id === eventId);
+      if (byId) return byId;
+    }
+    return events.find((item) => (item.bound_chapter_orders || []).map(String).includes(String(chapter.chapter_order))) || null;
+  });
   const activeCanvasActionChain = computed(() => {
     const chapter = activeCanvasChapter.value;
     if (!chapter) return [];
@@ -222,6 +234,7 @@ export function useStoryCanvas(
     isInitialCanvasRebuildLocked,
     activeCanvasChapter,
     activeCanvasScenes,
+    activeCanvasEvent,
     activeCanvasActionChain,
     activeNovelPriorStateEntries,
     novelStateSummary,

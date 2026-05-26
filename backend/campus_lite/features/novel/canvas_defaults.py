@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...schemas import StoryItem
+from ...schemas import CharacterCard, StoryItem
+from .event_pool import build_story_event_pool, story_event_for_order
+from .setting_profiles import infer_novel_setting_type, novel_setting_profile, project_story_seed_pool
 
 
 class NovelCanvasDefaultMixin:
@@ -14,7 +16,17 @@ class NovelCanvasDefaultMixin:
         protagonist: str,
         story_bible: dict[str, Any],
         story_items: list[StoryItem],
+        character: CharacterCard | None = None,
     ) -> dict[str, Any]:
+        setting_type = infer_novel_setting_type({
+            "genre": genre,
+            "worldview": story_bible.get("worldview", "") if isinstance(story_bible, dict) else "",
+            "relationship_setup": story_bible.get("relationship_setup", "") if isinstance(story_bible, dict) else "",
+        }, character)
+        seed_pool, seed_pool_source = project_story_seed_pool(character, setting_type)
+        event_pool = build_story_event_pool(setting_type, seed_pool if setting_type != "campus" else None)
+        if setting_type != "campus":
+            return self._profile_story_canvas(title, genre, tone, protagonist, story_bible, story_items, setting_type, seed_pool, event_pool, seed_pool_source)
         lead = protagonist or title or "主角"
         inspirations = [item.content for item in story_items if item.kind in {"story_beat", "relationship_texture"}][:3]
         unresolved = [
@@ -118,7 +130,7 @@ class NovelCanvasDefaultMixin:
                 "scene_1",
                 "canvas_ch_1",
                 1,
-                f"{genre or '校园日常'}的傍晚，图书馆门口或教学楼走廊，氛围{tone or '温柔克制'}。",
+                f"傍晚，图书馆门口或教学楼走廊，氛围{tone or '温柔克制'}。",
                 lead,
                 "林晚栀抱着书经过时，书本被风吹散，对方帮她捡起，两人第一次正式说话。",
                 "她想自然地道谢，也想确认对方是不是注意到了自己的慌乱。",
@@ -190,6 +202,7 @@ class NovelCanvasDefaultMixin:
         return {
             "version": 1,
             "mode": "story_canvas",
+            "event_pool": event_pool,
             "acts": acts,
             "chapters": chapters,
             "scenes": scenes,
@@ -201,6 +214,124 @@ class NovelCanvasDefaultMixin:
                 "结尾必须留下具体可续写钩子。",
             ],
             "diagnostics": {"source": "local"},
+        }
+
+    def _profile_story_canvas(
+        self,
+        title: str,
+        genre: str,
+        tone: str,
+        protagonist: str,
+        story_bible: dict[str, Any],
+        story_items: list[StoryItem],
+        setting_type: str,
+        seed_pool: dict[str, list[str]] | None = None,
+        event_pool: dict[str, Any] | None = None,
+        seed_pool_source: str = "setting_profile",
+    ) -> dict[str, Any]:
+        profile = novel_setting_profile(setting_type)
+        lead = protagonist or title or "主角"
+        seed_pool = seed_pool or {}
+        event_pool = event_pool or build_story_event_pool(setting_type, seed_pool)
+        titles = profile["titles"]
+        inspirations = [item.content for item in story_items if item.kind in {"story_beat", "relationship_texture"}][:3]
+        unresolved = [
+            item.content
+            for item in story_items
+            if item.kind in {"open_thread", "motif"} and item.status in {"seed", "active"}
+        ][:3]
+        facts = [str(item).strip() for item in story_bible.get("confirmed_facts", []) if str(item).strip()][:3]
+        boundaries = [str(item).strip() for item in story_bible.get("boundaries", []) if str(item).strip()][:3]
+        hook = unresolved[0] if unresolved else (inspirations[0] if inspirations else "上一段未完成的话题还没有真正落地。")
+        acts = [
+            {"id": "act_1", "order": 1, "title": "相遇与规则", "purpose": "用题材内的可见事件建立人物关系和世界规则。", "chapter_ids": ["canvas_ch_1"]},
+            {"id": "act_2", "order": 2, "title": "协作与误差", "purpose": "让人物在共同处理外部事件时产生张力。", "chapter_ids": ["canvas_ch_2"]},
+            {"id": "act_3", "order": 3, "title": "选择与代价", "purpose": "把关系变化落到一次具体选择上。", "chapter_ids": ["canvas_ch_3"]},
+            {"id": "act_4", "order": 4, "title": "回收与新钩子", "purpose": "回收前文线索，并留下下一阶段问题。", "chapter_ids": ["canvas_ch_4"]},
+        ]
+        chapters: list[dict[str, Any]] = []
+        scenes: list[dict[str, Any]] = []
+        for index in range(4):
+            order = index + 1
+            chapter_id = f"canvas_ch_{order}"
+            scene_id = f"scene_{order}"
+            pool_event = story_event_for_order(event_pool, order, setting_type, seed_pool)
+            place = pool_event.get("place") or profile["places"][index % len(profile["places"])]
+            event = pool_event.get("event") or profile["events"][index % len(profile["events"])]
+            ending = pool_event.get("hook") or profile["endings"][index % len(profile["endings"])]
+            chapter_title = f"第{order}章 {titles[index % len(titles)]}"
+            chapters.append({
+                "id": chapter_id,
+                "act_id": f"act_{order}",
+                "chapter_order": order,
+                "event_pool_id": str(pool_event.get("id") or ""),
+                "title": chapter_title,
+                "goal": f"本章发生在{place}：{event}{lead}需要在眼前事件、未完成话题和关系边界之间做出小选择；结尾以“{ending}”留下可续写钩子。",
+                "external_event": event,
+                "trigger_event": event,
+                "immediate_reaction": f"{lead}先处理眼前局面，没有急着把情绪或关系结论说满。",
+                "obstacle_escalation": "时间压力、信息差或外部打断让人物不能立刻把话说完整。",
+                "counterpart_reaction": "对方用符合题材语境的行动接住局面，但不替主角做决定。",
+                "character_choice": f"{lead}做出一个不越界的小选择，让关系有可感知的推进。",
+                "scene_consequence": "外部事件被暂时处理，人物之间多了一件可回望的共同经历。",
+                "relationship_shift": "关系从旁观或试探，推进到能在一个具体事件里短暂协作。",
+                "ending_hook": ending,
+                "target_length": 1800 + index * 120,
+                "status": "planned",
+                "emotion_curve": f"{tone or profile['label']} -> 受阻 -> 选择 -> 留钩子",
+                "scene_ids": [scene_id],
+            })
+            scenes.append(self._canvas_scene(
+                scene_id,
+                chapter_id,
+                1,
+                place,
+                lead,
+                event,
+                f"{lead}想确认眼前选择是否会改变双方的信任和边界。",
+                "外部压力与信息差让人物不能直接说出真正担心的事。",
+                facts,
+                boundaries,
+                ending,
+            ))
+        return {
+            "version": 1,
+            "mode": "story_canvas",
+            "event_pool": event_pool,
+            "acts": acts,
+            "chapters": chapters,
+            "scenes": scenes,
+            "threads": [
+                {
+                    "id": "thread_1",
+                    "kind": "foreshadowing",
+                    "label": "未完成的题材线索",
+                    "setup_chapter_id": "canvas_ch_1",
+                    "payoff_chapter_id": "canvas_ch_4",
+                    "status": "seed",
+                    "notes": hook,
+                },
+                {
+                    "id": "thread_2",
+                    "kind": "relationship",
+                    "label": "协作中的信任边界",
+                    "setup_chapter_id": "canvas_ch_1",
+                    "payoff_chapter_id": "canvas_ch_3",
+                    "status": "active",
+                    "notes": "关系推进必须通过题材内事件、行动、对话和选择体现。",
+                },
+            ],
+            "quality_rules": [
+                "每章至少一个符合题材的外部事件。",
+                "每章至少两轮人物对话。",
+                "每章至少一个人物小选择。",
+                "结尾必须留下具体可续写钩子。",
+            ],
+            "diagnostics": {
+                "source": "local",
+                "setting_type": setting_type,
+                "seed_pool_source": seed_pool_source if seed_pool else "setting_profile",
+            },
         }
 
     def _canvas_scene(

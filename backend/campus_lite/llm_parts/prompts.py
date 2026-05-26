@@ -40,7 +40,7 @@ class LlmPromptMixin:
 
     def character_state_system_prompt(self) -> str:
         return (
-            "你是校园陪伴聊天的轻量角色状态评分器。你只根据给定对话和证据判断当前互动状态，"
+            "你是当前角色关系语境下的轻量角色状态评分器。你只根据给定对话和证据判断当前互动状态，"
             "不要创作回复，不要推进剧情，不要把助手单方面建议当作关系进展。只输出 JSON 对象。"
             "\n\n你需要输出字段："
             "\n- mood：角色当前心境标签，短句。"
@@ -77,7 +77,7 @@ class LlmPromptMixin:
             "\n- shared_context needs a concrete shared fact, pact, or recalled event named by the user; a generic continuation is not enough."
         )
         return (
-            "你是校园陪伴聊天的关系事件抽取器。你只判断本轮是否出现可落地的“用户 × 当前角色”关系事件。"
+            "你是当前角色关系语境下的关系事件抽取器。你只判断本轮是否出现可落地的“用户 × 当前角色”关系事件。"
             "不要创作回复，不要推进剧情，不要输出关系阶段，不要输出任何评分、分数变化或自由数值 confidence。"
             "只输出 JSON 数组；没有可用事件时输出 []。"
             "\n\n每条事件只能包含：event_type, evidence_grade, evidence_text。"
@@ -113,7 +113,7 @@ class LlmPromptMixin:
 
     def turn_analysis_system_prompt(self) -> str:
         return (
-            "你是校园陪伴聊天的一体化后处理分析器。你只做结构化分析，不创作角色回复。"
+            "你是当前角色关系语境下的一体化后处理分析器。你只做结构化分析，不创作角色回复。"
             "一次性输出 JSON 对象，包含 state、bond、memories 三个字段，不要输出解释文字。"
             "\n\n顶层 JSON 结构必须是："
             "\n{"

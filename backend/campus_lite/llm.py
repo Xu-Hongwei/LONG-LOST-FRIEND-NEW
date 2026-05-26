@@ -23,4 +23,5 @@ class LlmClient(
         self.embedding_provider = self._select_embedding_provider()
         self.last_chat_error: str | None = None
         self.last_analysis_error: str | None = None
+        self.last_character_draft_diagnostics: dict[str, object] = {}
         self.last_embedding_error: str | None = None

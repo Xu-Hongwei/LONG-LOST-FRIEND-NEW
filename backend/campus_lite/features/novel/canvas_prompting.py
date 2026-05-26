@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .event_pool import story_event_pool_prompt
+from .setting_profiles import character_story_seed_pool, infer_novel_setting_type, novel_setting_guidance, project_story_seed_pool
+
 
 class NovelCanvasPromptMixin:
     def _canvas_system_prompt(self) -> str:
         return (
             "你是长篇小说 Story Canvas 规划师。你的任务是根据作品设定、Story Bible 和素材，"
             "生成结构化故事画布，不写正文。画布必须让后续章节能写成有事件、有阻碍、有选择、有钩子的小说。"
-            "素材只作为熟悉感锚点，可以自由新增合理的校园日常事件、道具、误会和场面压力；"
+            "素材只作为熟悉感锚点，可以自由新增符合项目题材的日常事件、道具、误会和场面压力；"
             "不得改变已确认事实，不得把未发生线索写成已经发生。"
             "只输出严格 JSON 对象，不要 Markdown，不要注释，不要代码块，不要省略双引号。"
             "字段必须包含 version, mode, acts, chapters, scenes, threads, quality_rules, diagnostics。"
@@ -28,6 +31,7 @@ class NovelCanvasPromptMixin:
             "你是长篇小说滚动规划师。你的任务不是重写全书画布，而是基于已经发生的正文状态，"
             "规划下一组连续章节。必须承接 Novel State、上一章交接单和上一章结尾，不推翻已写章节。"
             "输出严格 JSON 对象，字段同 Story Canvas：version, mode, acts, chapters, scenes, threads, quality_rules, diagnostics。"
+            "可以额外输出 event_pool_delta 对项目活动事件池进行 add/update/retire；不要把它写成正文。"
             "chapters 每项必须包含 id, act_id, chapter_order, title, goal, external_event, trigger_event, immediate_reaction, "
             "obstacle_escalation, counterpart_reaction, character_choice, scene_consequence, relationship_shift, ending_hook, "
             "target_length, status, emotion_curve, scene_ids。"
@@ -56,6 +60,8 @@ class NovelCanvasPromptMixin:
             self._canvas_identity_mapping(project),
             f"世界观：{self._clean_material_text(project['worldview'])}",
             f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
+            "[题材事件池]",
+            self._canvas_setting_guidance(project),
             "[Story Bible]",
             self._story_bible_prompt(story_bible),
             "[可用素材]",
@@ -66,8 +72,8 @@ class NovelCanvasPromptMixin:
             "重新生成完整故事画布，从第 1 章开始编号，生成 4-6 章，不要续写旧画布，不要从第 5 章或后续章节开始。"
             "每章必须有一个具体外部事件、一个阻碍升级、一个人物小选择和一个具体结尾钩子。"
             "不要按聊天顺序把“晚饭、听歌、出去玩”等问答流水账改成章节。"
-            "素材只允许作为 1-2 个熟悉锚点、道具、地点或伏笔，其余剧情必须自由创作具体校园事件。"
-            "优先使用图书馆、走廊、公告栏、社团活动、课程误会、遗失物、雨天、便签、借书卡等可见事件承载关系推进。"
+            "素材只允许作为 1-2 个熟悉锚点、道具、地点或伏笔，其余剧情必须自由创作符合题材的具体外部事件。"
+            "优先使用题材事件池中的场域和可见事件承载关系推进；只有校园题材才使用图书馆、公告栏、社团和课程误会。"
             f"角色名必须准确，主角只能写作“{project['protagonist']}”；不要写错别字或相近名字。"
             "场景卡必须写可见事件，不要写“关系变近”“两人还不熟”这类分析句。"
             "acts, chapters, scenes, threads 必须是数组。diagnostics.source 写 remote。",
@@ -90,6 +96,8 @@ class NovelCanvasPromptMixin:
             self._canvas_identity_mapping(project),
             f"世界观：{self._clean_material_text(project['worldview'])}",
             f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
+            "[题材事件池]",
+            self._canvas_setting_guidance(project),
             "[Story Bible]",
             self._story_bible_prompt(story_bible),
             "[Novel State 长期摘要]",
@@ -103,7 +111,7 @@ class NovelCanvasPromptMixin:
             "每章都必须像可直接写正文的章节交接单：有具体外部事件、即时反应、阻碍升级、对方反应、人物选择、场景后果、关系变化和结尾钩子。",
             "每章 goal 必须比一句目标更具体：用 60-140 字写出本章剧情概述，至少包含“场面/事件 + 主角想法或需求 + 具体阻碍 + 小选择 + 关系落点”，不能写成生成指令。",
             "每章至少绑定 1 张 scene card；scene.tension 必须是具体阻碍文字，不允许数字、等级或抽象标签。",
-            "素材只作为熟悉感锚点，最多露出一到两个线索；剧情可以自由新增合理校园事件，不要把聊天素材按顺序改成流水账。",
+            "素材只作为熟悉感锚点，最多露出一到两个线索；剧情可以自由新增符合题材的事件，不要把聊天素材按顺序改成流水账。",
             "第一章也要按滚动章节的密度写：不要写总纲，不要写阶段说明，不要写关系分析句。",
             "diagnostics.source 写 remote，diagnostics.mode 写 initial_rolling。",
         ])
@@ -112,8 +120,129 @@ class NovelCanvasPromptMixin:
         return (
             "acts: 4 个阶段对象；chapters: 4-6 个章节对象，chapter_order 必须为 1..N；"
             "scenes: 至少每章 1 个场景对象，chapter_id 必须指向章节 id；"
-            "threads: 线索对象数组，可为空；quality_rules: 字符串数组。"
+            "threads: 线索对象数组，可为空；quality_rules: 字符串数组；"
+            "event_pool_delta: 可选对象，字段 add/update/retire，用来维护项目活动事件池。"
         )
+
+    def _event_pool_delta_system_prompt(self) -> str:
+        return (
+            "You maintain a long-form novel project event pool. Return strict JSON only. "
+            "Do not write chapters or prose. Output an object with event_pool_delta: "
+            "{add: [], update: [], retire: []}. Each add/update item should include id when updating, "
+            "place, time_anchor, event, hook, motifs, source_reason, and tags. Retire items should include id. "
+            "time_anchor must be specific, for example 'Saturday 18:40, before the lake lights turn on'. "
+            "tags must be an object: {event_type: string[], anchors: string[], theme_markers: string[], "
+            "tone_markers: string[], relationship_motion: string[], boundary_risk: 'low'|'medium'|'high', "
+            "freshness: string[], continuity: string[], forbidden_defaults: string[]}. "
+            "Every add/update must include at least 2 theme_markers and at least 1 tone_markers. "
+            "Events must express the project genre, tone, worldview, and relationship_setup through visible details. "
+            "Priority is fixed: written prose and Novel State first, current project event pool second, Project/Story Bible third, character story_seed_pool only as translatable flavor, global setting profile last. "
+            "The character story_seed_pool must not decide what happens next, overwrite bound chapters, or drag the project back to the character's default setting. "
+            "Do not output numeric scores, confidence, or deltas. "
+            "Avoid generic events such as ordinary misunderstanding, vague chat, or random cafe unless the project is explicitly modern daily and the event has a concrete thematic anchor. "
+            "Suggest concrete visible events only; do not repeat retired or already used events."
+        )
+
+    def _event_pool_delta_source(
+        self,
+        project: Any,
+        current_canvas: dict[str, Any],
+        chapters: list[Any],
+        from_order: int,
+        count: int,
+        instruction: str,
+    ) -> str:
+        story_bible = self._json_dict(project["story_bible_json"])
+        novel_state = self._novel_state_until(project, from_order)
+        materials = self._require_storage().list_novel_materials(str(project["id"]))[:12]
+        material_lines = "\n".join(self._canvas_material_line(row) for row in materials) or "None"
+        active_pool = story_event_pool_prompt(current_canvas.get("event_pool")) if isinstance(current_canvas.get("event_pool"), dict) else "None"
+        character_seed_lines = self._event_pool_character_seed_prompt(project)
+        recent_chapters = "\n".join(
+            f"- chapter {row['chapter_order']}: {self._clean_material_text(row['summary'] or row['goal'])}"
+            for row in chapters
+            if int(row["chapter_order"]) <= from_order
+        ) or "None"
+        return "\n\n".join([
+            "[Project]",
+            f"title: {project['title']}",
+            f"genre: {project['genre']}",
+            f"tone: {project['tone']}",
+            f"protagonist: {project['protagonist']}",
+            f"worldview: {self._clean_material_text(project['worldview'])}",
+            f"relationship_setup: {self._clean_material_text(project['relationship_setup'])}",
+            "[Story Bible]",
+            self._story_bible_prompt(story_bible),
+            "[Novel State]",
+            self._novel_state_prompt(novel_state),
+            "[Current Active Event Pool]",
+            active_pool,
+            "[Character Story Seed Pool - translatable flavor only]",
+            character_seed_lines,
+            "[Materials]",
+            material_lines,
+            "[Recent Written Chapters]",
+            recent_chapters,
+            "[Rolling Target]",
+            f"Plan support events for chapters {from_order + 1} to {from_order + count}.",
+            instruction or "Keep continuity with the completed chapter, add fresh visible external events, and avoid replaying old scenes.",
+            "[Rules]",
+            "Prefer events that can carry action, obstacle, choice, and ending hook. "
+            "Each add/update must include a concrete time_anchor and tags.theme_markers/tone_markers derived from Project genre/tone/worldview/relationship_setup. "
+            "Do not add generic reusable incidents; make the time, place, object, and pressure specific to this project. "
+            "Use written chapters, Novel State, and handoff as hard continuity; use Story Bible as hard constraints; use Materials as light familiar anchors; use character story_seed_pool only to create translated variants when the active pool is thin, stale, duplicated, or off-theme. "
+            "Never copy character default places/events directly when they conflict with the project setting. "
+            "If existing active events are still useful, do not update them. Add only genuinely useful fresh candidates. "
+            "If an active event is stale, duplicate, or conflicts with boundaries, retire it by id.",
+        ])
+
+    def _event_pool_character_seed_prompt(self, project: Any) -> str:
+        try:
+            character_id = str(project["character_id"] or "").strip()
+            visitor_id = str(project["visitor_id"] or "").strip()
+        except Exception:
+            return "None"
+        if not character_id:
+            return "None"
+        try:
+            card = self._require_storage().get_character_card(character_id, visitor_id)
+        except Exception:
+            card = None
+        if not card:
+            return "None"
+        setting_type = infer_novel_setting_type(project, card)
+        seed_pool, seed_source = project_story_seed_pool(card, setting_type)
+        raw_pool = character_story_seed_pool(card)
+        if not seed_pool and not raw_pool:
+            return "None"
+        return json.dumps({
+            "role": "flavor_only",
+            "seed_pool_source": seed_source,
+            "project_setting_type": setting_type,
+            "usable_translated_seed_pool": seed_pool,
+            "raw_character_seed_pool": raw_pool,
+            "rules": [
+                "Do not let this decide the next chapter.",
+                "Do not overwrite written prose, Novel State, Story Bible, or bound project events.",
+                "Use it only for motifs, translated event variants, and character-specific flavor.",
+            ],
+        }, ensure_ascii=False)
+
+    def _canvas_setting_guidance(self, project: Any) -> str:
+        setting_type = infer_novel_setting_type(project)
+        try:
+            canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
+        except Exception:
+            canvas = {}
+        pool = story_event_pool_prompt(canvas.get("event_pool")) if isinstance(canvas.get("event_pool"), dict) else ""
+        if not pool:
+            return novel_setting_guidance(setting_type)
+        return "\n".join([
+            novel_setting_guidance(setting_type),
+            "项目活动事件池固定维护 10 条 active 事件；优先从这些事件中选择、变体或推进，不要照搬成流水账。",
+            pool,
+            "如果新增了更贴合当前前文的事件，请在 event_pool_delta.add 中结构化返回；如果事件已经用完或不再适合，请在 event_pool_delta.retire 中标记。",
+        ])
 
     def _canvas_identity_mapping(self, project: Any) -> str:
         protagonist = str(project["protagonist"] or project["title"] or "主角").strip()
@@ -179,6 +308,8 @@ class NovelCanvasPromptMixin:
             self._canvas_identity_mapping(project),
             f"世界观：{self._clean_material_text(project['worldview'])}",
             f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
+            "[题材事件池]",
+            self._canvas_setting_guidance(project),
             "[Story Bible]",
             self._story_bible_prompt(story_bible),
             "[可信前文边界]",
@@ -198,14 +329,14 @@ class NovelCanvasPromptMixin:
             self._canvas_schema_hint(),
             "[滚动规划目标]",
             f"从第 {from_order + 1} 章开始，连续规划后续 {count} 章。chapter_order 必须依次为 {from_order + 1} 到 {from_order + count}。",
-            instruction or "承接已写正文，规划下一组有事件、有协作、有轻微阻碍和具体钩子的校园日常章节。",
+            instruction or "承接已写正文，规划下一组有事件、有协作、有轻微阻碍和具体钩子的题材内章节。",
             "[硬约束]",
             "不要重写第 1 章到当前章节，不要让后续章节重复已经发生的偶遇、找话题或相同打断。"
             "每章必须从上一章未解决问题或结尾钩子里自然生长。"
             "后续已保留章节只能作为不要直接覆盖正文、需要重新接合的约束；不得把它们的旧交接单当作可信前文。"
             "每章 goal 必须写成 60-140 字的本章剧情概述，包含场面/事件、人物需求、阻碍、选择、关系落点；不要写成“生成/扩写/续写”指令。"
             "每章只能推进一个小关系变化，必须通过外部事件、动作、对白和选择体现。"
-            "允许自由新增校园事件，但熟悉线索只露出一小部分，不要把素材列表流水账化。"
+            "允许自由新增符合题材的外部事件，但熟悉线索只露出一小部分，不要把素材列表流水账化。"
             "diagnostics.source 写 remote，diagnostics.mode 写 rolling_extend。",
         ])
 

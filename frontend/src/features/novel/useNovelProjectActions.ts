@@ -2,10 +2,13 @@ import { ref, type ComputedRef, type Ref } from "vue";
 import {
   buildStoryCanvas,
   checkNovelContinuity,
+  bindStoryEventPoolEvent,
   createNovelChapter,
   createNovelProject,
+  createStoryEventPoolEvent,
   deleteNovelChapter,
   deleteNovelProject,
+  deleteStoryEventPoolEvent,
   deleteNovelVersion,
   extendStoryCanvas,
   generateNovelProjectDraft,
@@ -13,8 +16,10 @@ import {
   getNovelProject,
   listNovelProjects,
   listNovelVersions,
+  retireStoryEventPoolEvent,
   restoreNovelVersion,
   saveNovelChapterDraft,
+  updateStoryEventPoolEvent,
   updateNovelProject
 } from "./api";
 import {
@@ -35,7 +40,9 @@ import type {
   NovelProject,
   NovelVersion,
   StoryCanvas,
-  StoryCanvasChapter
+  StoryCanvasChapter,
+  StoryCanvasEvent,
+  StoryEventPoolEventWriteRequest
 } from "../../types";
 
 type NovelStudioMode = "select" | "quick" | "project";
@@ -57,6 +64,39 @@ function normalizeDraftOutline(text: string) {
   const listLikeCount = lines.filter(isOutlineListLine).length;
   if (listLikeCount >= 2) return lines.join("\n");
   return lines.join("").replace(/\s{2,}/g, " ").trim();
+}
+
+function eventPoolPayloadFromPrompt(event?: StoryCanvasEvent): StoryEventPoolEventWriteRequest | null {
+  const seed: StoryEventPoolEventWriteRequest = {
+    place: event?.place || "",
+    time_anchor: event?.time_anchor || "",
+    event: event?.event || "",
+    hook: event?.hook || "",
+    motifs: event?.motifs || [],
+    use_mode: (event?.use_mode as StoryEventPoolEventWriteRequest["use_mode"]) || "guide",
+    source_reason: event?.source_reason || "",
+    tags: event?.tags || {}
+  };
+  const raw = window.prompt("编辑事件 JSON", JSON.stringify(seed, null, 2));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<StoryEventPoolEventWriteRequest>;
+    return {
+      place: String(parsed.place || ""),
+      time_anchor: String(parsed.time_anchor || ""),
+      event: String(parsed.event || ""),
+      hook: String(parsed.hook || ""),
+      motifs: Array.isArray(parsed.motifs) ? parsed.motifs.map(String).filter(Boolean) : [],
+      use_mode: ["strict", "guide", "flavor", "free"].includes(String(parsed.use_mode || ""))
+        ? parsed.use_mode as StoryEventPoolEventWriteRequest["use_mode"]
+        : "guide",
+      source_reason: String(parsed.source_reason || ""),
+      tags: parsed.tags && typeof parsed.tags === "object" ? parsed.tags : {}
+    };
+  } catch {
+    window.alert("事件 JSON 格式不正确");
+    return null;
+  }
 }
 
 export function useNovelProjectActions(options: {
@@ -554,6 +594,79 @@ export function useNovelProjectActions(options: {
     }
   }
 
+  async function applyEventPoolProjectUpdate(action: () => Promise<NovelProject>) {
+    if (options.novelProjectBusy.value) return;
+    options.novelProjectBusy.value = true;
+    options.error.value = "";
+    try {
+      const project = await action();
+      options.replaceNovelProject(project);
+      options.syncStoryCanvasDraft(project);
+      options.syncChapterDraft(options.activeNovelChapter.value);
+      await loadChapterVersions();
+    } catch (err) {
+      options.error.value = readableError(err);
+    } finally {
+      options.novelProjectBusy.value = false;
+    }
+  }
+
+  async function createEventPoolEventFromPrompt() {
+    const project = options.activeNovelProject.value;
+    if (!project) return;
+    const payload = eventPoolPayloadFromPrompt();
+    if (!payload) return;
+    await applyEventPoolProjectUpdate(() => createStoryEventPoolEvent(project.id, payload));
+  }
+
+  async function editEventPoolEventFromPrompt(event: StoryCanvasEvent) {
+    const project = options.activeNovelProject.value;
+    if (!project || !event.id) return;
+    const payload = eventPoolPayloadFromPrompt(event);
+    if (!payload) return;
+    await applyEventPoolProjectUpdate(() => updateStoryEventPoolEvent(project.id, event.id, payload));
+  }
+
+  async function retireEventPoolEventAction(event: StoryCanvasEvent) {
+    const project = options.activeNovelProject.value;
+    if (!project || !event.id) return;
+    if (!window.confirm("退休这条事件？")) return;
+    await applyEventPoolProjectUpdate(() => retireStoryEventPoolEvent(project.id, event.id));
+  }
+
+  async function deleteEventPoolEventAction(event: StoryCanvasEvent) {
+    const project = options.activeNovelProject.value;
+    if (!project || !event.id) return;
+    if (!window.confirm("删除这条未绑定事件？")) return;
+    await applyEventPoolProjectUpdate(() => deleteStoryEventPoolEvent(project.id, event.id));
+  }
+
+  async function bindEventToActiveChapter(event: StoryCanvasEvent) {
+    const project = options.activeNovelProject.value;
+    const chapter = options.activeNovelChapter.value;
+    if (!project || !chapter || !event.id) return;
+    await applyEventPoolProjectUpdate(() => bindStoryEventPoolEvent(project.id, chapter.id, {
+      event_id: event.id,
+      use_mode: ["strict", "guide", "flavor", "free"].includes(String(event.use_mode || "")) ? event.use_mode as "strict" | "guide" | "flavor" | "free" : "guide"
+    }));
+  }
+
+  async function clearActiveChapterEventBinding() {
+    const project = options.activeNovelProject.value;
+    const chapter = options.activeNovelChapter.value;
+    if (!project || !chapter) return;
+    await applyEventPoolProjectUpdate(() => bindStoryEventPoolEvent(project.id, chapter.id, { event_id: null }));
+  }
+
+  async function rebindActiveChapterEventFromPrompt() {
+    const project = options.activeNovelProject.value;
+    const chapter = options.activeNovelChapter.value;
+    if (!project || !chapter) return;
+    const eventId = window.prompt("输入要绑定的事件 ID，留空则取消绑定", options.activeCanvasChapter.value?.event_pool_id || "");
+    if (eventId === null) return;
+    await applyEventPoolProjectUpdate(() => bindStoryEventPoolEvent(project.id, chapter.id, { event_id: eventId.trim() || null }));
+  }
+
   async function pollChapterPostprocess(projectId: string, chapterId: string) {
     for (let attempt = 0; attempt < 24; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 5000));
@@ -668,6 +781,13 @@ export function useNovelProjectActions(options: {
     generateActiveChapter,
     checkActiveContinuity,
     loadChapterVersions,
+    createEventPoolEventFromPrompt,
+    editEventPoolEventFromPrompt,
+    retireEventPoolEventAction,
+    deleteEventPoolEventAction,
+    bindEventToActiveChapter,
+    clearActiveChapterEventBinding,
+    rebindActiveChapterEventFromPrompt,
     restoreVersion,
     deleteVersion,
     unlockNovelProgress

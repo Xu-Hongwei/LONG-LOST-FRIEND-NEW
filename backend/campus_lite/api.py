@@ -75,13 +75,22 @@ def create_app(
     @app.post("/api/characters/draft", response_model=CharacterDraftGenerateResponse)
     async def generate_character_draft(payload: CharacterDraftGenerateRequest) -> CharacterDraftGenerateResponse:
         storage.resolve_visitor(payload.visitor_id)
-        character = await llm.generate_character_draft(payload.prompt, payload.template)
-        return CharacterDraftGenerateResponse(
-            character=character,
-            diagnostics={
+        character = await llm.generate_character_draft(
+            payload.prompt,
+            payload.template,
+            payload.setting_type,
+            payload.setting_notes,
+            payload.draft_mode,
+        )
+        diagnostics = getattr(llm, "last_character_draft_diagnostics", None)
+        if not diagnostics:
+            diagnostics = {
                 "source": "remote" if llm.provider and not llm.last_analysis_error else "fallback",
                 "error": llm.last_analysis_error,
-            },
+            }
+        return CharacterDraftGenerateResponse(
+            character=character,
+            diagnostics=diagnostics,
         )
 
     @app.post("/api/characters")

@@ -29,7 +29,7 @@ defineEmits<{
     <dl>
       <div>
         <dt>Scenario</dt>
-        <dd>{{ activeCharacter.scenario || "校园轻陪伴聊天" }}</dd>
+        <dd>{{ activeCharacter.scenario || "当前角色关系语境" }}</dd>
       </div>
       <div>
         <dt>Rhythm</dt>
