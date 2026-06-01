@@ -1,21 +1,20 @@
 # Campus Pulse Lite
 
-Campus Pulse Lite is a lightweight experiment focused on stable character personas, useful memory, and explainable context assembly.
+Campus Pulse Lite 是一个本地优先的角色聊天、长期关系记忆和小说工坊实验项目。当前结构可以按“四块能力”理解：
 
-It intentionally leaves out the heavier scoring and director machinery from the older `chat` project:
+- `characters`：角色卡和角色工坊，负责自建 AI 角色、题材类型和可转译故事素材。
+- `chat`：会话、消息收发、prompt slots 和 Story Pane 入口。
+- `relationship`：memory、短期 state、长期 bond、关系事件 reducer 和 postprocess diagnostics。
+- `novel`：短篇草稿、长篇项目、Story Canvas、项目事件池、章节版本和 Novel State。
 
-- no affection score judging
-- no plot pressure
-- no QuickJudge
-- no local high-value-turn rules
-- no complex scene director
+项目不是只服务校园题材。校园轻伴是内置模板之一，新的自建角色和小说项目可以使用现代日常、职场、武侠修仙、悬疑、科幻、奇幻旅伴等题材。
 
 ## Stack
 
 - Backend: Python, FastAPI, SQLite
 - Frontend: Vite, Vue 3, TypeScript
-- LLM providers: an OpenAI-compatible routing endpoint, DashScope, DeepSeek, or ARK-compatible OpenAI chat APIs
-- Retrieval fallback: SQLite FTS plus lightweight keyword ranking
+- LLM: OpenAI-compatible router first, then DashScope / DeepSeek / ARK-compatible providers
+- Retrieval fallback: SQLite FTS plus keyword ranking; embeddings are optional
 
 ## Layout
 
@@ -23,7 +22,6 @@ It intentionally leaves out the heavier scoring and director machinery from the 
 backend/
   campus_lite/
     api.py
-    app.py
     characters.py
     composer.py
     features/
@@ -31,52 +29,38 @@ backend/
       novel/
       relationship/
     llm_parts/
-    llm.py
-    memory.py
-    schemas.py
-    bond.py
-    state.py
     storage_parts/
-    storage.py
 characters/
-  lin_wanzhi.json
-  xu_zhaomu.json
-  shen_yan.json
-  gu_yao.json
-  zhou_ran.json
+  *.json
 frontend/
   src/
     features/
+      characters/
       chat/
       novel/
       relationship/
+scripts/
+data/
 ```
 
-Detailed notes live beside each module. Start with `backend/README.md`,
-`frontend/README.md`, and the README inside the feature folder you are changing.
+Detailed notes live beside each module. Start with `backend/README.md`, `frontend/README.md`, then the README inside the feature folder you are changing.
 
-## Domains
+## Main Flows
 
-项目最外层按三个业务域理解。它们共享同一个 Vue 入口和同一个 FastAPI 后端，但状态和写入边界分开：
-
-- `chat`：visitor、角色、session、消息收发、story pane 入口和 prompt composition。
-- `relationship`：memory、当前 state、长期 bond、postprocess diagnostics 和恋爱人格测试。
-- `novel`：剧情素材、Quick Draft、长篇项目、Story Canvas、章节、版本和 Novel State。
-
-## Flow Sketch
-
-1. Chat 创建或恢复 `visitor_id + character_id` session。
-2. 用户消息先进入主回复链路：召回上下文、组装 prompt slots、保存 assistant 回复并立即返回前端。
-3. Relationship postprocess 在后台分阶段处理 memory、state 和 bond，失败阶段只写 diagnostics。
-4. Story Pane 把聊天沉淀成剧情素材，Novel Studio 再按短篇或长篇路径消费这些素材。
+1. Character Workshop creates or edits standard `CharacterCard` JSON, including `setting_type`, `setting_notes`, behavior policy, voice, and `story_seed_pool`.
+2. Chat creates or restores a `visitor_id + character_id` session, recalls memory, composes prompt slots, saves the assistant reply, and returns quickly.
+3. Relationship postprocess runs in background stages: memory, state, and bond. Bond uses remote JSON extraction only for relationship events; local reducer decides scores, stages, and freezing.
+4. Story Pane turns chat into reusable story material. Novel Studio consumes chat, memory, story items, character seeds, and project settings.
+5. Long-form novel generation first chooses or binds a project event, builds an `event_contract`, syncs chapter canvas and scene card, optimizes the generation instruction, then generates body text.
 
 ## Read Next
 
-- Frontend composition and domain boundaries: `frontend/README.md`, `frontend/src/features/README.md`
-- Backend composition and storage boundaries: `backend/README.md`, `backend/campus_lite/storage_parts/README.md`
-- Chat details: `frontend/src/features/chat/README.md`, `backend/campus_lite/features/chat/README.md`
-- Relationship details: `frontend/src/features/relationship/README.md`, `backend/campus_lite/features/relationship/README.md`
-- Novel details: `frontend/src/features/novel/README.md`, `backend/campus_lite/features/novel/README.md`
+- Frontend domains: `frontend/README.md`, `frontend/src/features/README.md`
+- Backend domains: `backend/README.md`
+- Chat: `frontend/src/features/chat/README.md`, `backend/campus_lite/features/chat/README.md`
+- Relationship: `frontend/src/features/relationship/README.md`, `backend/campus_lite/features/relationship/README.md`
+- Novel: `frontend/src/features/novel/README.md`, `backend/campus_lite/features/novel/README.md`
+- Character cards: `characters/README.md`, `frontend/src/features/characters/README.md`
 
 ## Run
 
@@ -107,91 +91,73 @@ npm install
 npm run dev
 ```
 
-The backend defaults to `http://127.0.0.1:8766`.
+The backend defaults to `http://127.0.0.1:8766`; the frontend dev server uses `http://127.0.0.1:5176`.
 
-Backend tests from the project root:
+## Test
+
+Backend tests:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-backend.ps1
 ```
 
+Frontend build:
+
+```powershell
+cd frontend
+npm run build
+```
+
 ## Environment
 
-The provider layer checks these chat variables in order:
+The provider layer checks chat providers in this order:
 
 - `LLM_ROUTER_API_KEY`, `LLM_ROUTER_BASE_URL`, `LLM_ROUTER_MODEL`
-  - `LLM_ROUTER_MODEL` defaults to `auto`, so a gateway that accepts an automatic route name can be configured with only the key and base URL.
-  - Set `LLM_ROUTER_MODEL` when the gateway expects a concrete model alias or route name.
-
 - `DASHSCOPE_API_KEY`, `DASHSCOPE_BASE_URL`, `DASHSCOPE_MODEL`
 - `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`
 - `ARK_API_KEY`, `ARK_BASE_URL`, `ARK_MODEL`
 
-When `LLM_ROUTER_*` is configured it wins over the direct chat providers, so chat, story, relationship analysis, and novel generation can all be routed by one OpenAI-compatible gateway without changing business code. `/api/health` reports the selected chat and embedding provider names.
+When `LLM_ROUTER_*` is configured it wins over direct providers, so chat, story extraction, relationship analysis, character draft generation, and novel generation can share one OpenAI-compatible gateway. `/api/health` reports selected chat and embedding provider names.
 
-Embedding uses the same provider layer when available:
+Embedding is optional:
 
-- `LLM_ROUTER_EMBEDDING_MODEL` when the routing endpoint also exposes an OpenAI-compatible embeddings route. Optional `LLM_ROUTER_EMBEDDING_API_KEY`, `LLM_ROUTER_EMBEDDING_BASE_URL`, and `LLM_ROUTER_EMBEDDING_TIMEOUT_MS` override the chat router values.
-- `DASHSCOPE_EMBEDDING_MODEL`, defaults to `text-embedding-v4` when `DASHSCOPE_API_KEY` is present.
-- `ARK_EMBEDDING_MODEL` when using an ARK embedding endpoint.
-- `DEEPSEEK_EMBEDDING_MODEL` only if you explicitly configure a compatible embedding endpoint.
+- `LLM_ROUTER_EMBEDDING_MODEL` uses the router embedding endpoint.
+- `DASHSCOPE_EMBEDDING_MODEL` defaults to `text-embedding-v4` when `DASHSCOPE_API_KEY` is present.
+- `ARK_EMBEDDING_MODEL` and `DEEPSEEK_EMBEDDING_MODEL` can be configured for compatible endpoints.
 
-If no provider is configured or a request fails, the app falls back to a local persona-shaped mock reply and does not write unverified LLM-extracted memories.
-
-## Memory Model
-
-Durable memory is scoped by type:
-
-- `stable_user_info` and `user_preference` are global to the visitor and can be recalled across characters.
-- `relationship_progress` is scoped to the visitor plus current character.
-- `open_thread` and `recent_emotion` stay scoped to the current session.
-
-Each memory stores `memory_scope`, `confidence`, `importance`, and a normalized key for conservative deduplication. Replies always receive a small profile set first, then query-relevant recall, and the frontend shows both the memory pane and the prompt stack used for the current turn.
-
-Recall is hybrid:
-
-- profile memories are always considered first
-- SQLite FTS and keyword matching handle exact or near-exact references
-- embeddings are stored in SQLite when the embedding provider works
-- semantic cosine similarity is merged with keyword, scope, type, importance, and confidence scores
-- if embedding fails, FTS and keyword recall continue normally
-
-The frontend memory pane supports filtering by `global`, `character`, `session`, and last recall. Individual memories can be edited or deleted, including scope, type, content, and importance.
+If no embedding provider works, memory recall continues with SQLite FTS and keyword ranking.
 
 ## Character Cards
 
-Character JSON files follow a lightweight SillyTavern-inspired shape:
+Character cards follow a lightweight SillyTavern-inspired shape plus project-specific fields:
 
-- `bio` / `personality` for durable identity and temperament
-- `scenario` for the current conversational setting
-- `mes_example` for style examples
-- `creator_notes`, `system_prompt`, and `post_history_instructions` for behavior control
-- `interaction_policy` for dynamic action density, action style, comfort style, question style, and memory style
-- `anti_patterns` for things the role should avoid, such as repeated props or fixed gestures
-- `voice` and `backstory` for concrete speech rhythm, habits, places, and boundaries
+- Stable identity: `name`, `archetype`, `bio`, `personality`, `scenario`.
+- Setting: `setting_type`, `setting_notes`.
+- Conversation behavior: `speech_style`, `relationship_pace`, `opening_line`, `interaction_policy`, `anti_patterns`.
+- Story support: `story_seed_pool` as a default translatable material pack, not fixed plot.
+- Voice and visual: `voice`, `visual`, `mes_example`.
 
-The backend maps these fields into separate persona context slots instead of merging everything into one prompt block.
-Scene actions are intentionally not fixed in the character cards. The model may generate at most one light action per turn from the current context, and it can also use no action when direct dialogue is better.
+The backend maps character card sections into separate prompt slots. Novel Studio may translate `story_seed_pool` into project-specific events, but project state and chapter contracts still decide what happens in the current novel.
 
-## Character State and Bond
+## Relationship Model
 
-The app keeps short-term state and long-term growth separate:
+The app separates short-term state and long-term relationship growth:
 
-- `sessions.character_state_json` stores the current turn-level state: mood, tone, focus, energy, behavior mapping, and the latest evidence.
-- `character_bonds` stores durable `visitor_id + character_id` growth: familiarity stage, long-term resonance baseline, trust notes, boundaries, interaction preferences, and milestones.
+- `sessions.character_state_json` stores current turn-level mood, tone, focus, energy, and behavior mapping.
+- `character_bonds` stores durable `visitor_id + character_id` relationship context.
+- `relationship_events` records accepted relationship events and local deltas.
 
-The LLM scores both with explicit rubrics. Local code only validates JSON, clamps deltas, and persists the result. Main reply prompts do not receive raw scores. They receive behavior-facing slots:
+Remote LLM extraction may return structured relationship events, but local code validates evidence, applies fixed weights, clamps dimensions, decides stage changes, and records diagnostics. Frontend panels show stage counts and reducer effects; raw event payloads remain in structured backend diagnostics and storage.
 
-- `persona.live_state` for current pacing and initiative.
-- `persona.relationship_memory` for long-term relationship context.
+## Novel Model
 
-The two visible resonance values intentionally mean different things:
+Long-form projects use layered planning:
 
-- State `Live Resonance` is the current session's short-term interaction fit and can move after state scoring.
-- Bond `Bond Baseline` is the slower `visitor_id + character_id` long-term relationship baseline and only moves after a worthwhile bond update.
+- Story Bible and materials preserve stable facts from chat and memory.
+- Story Canvas stores acts, chapters, scenes, threads, and project event pool.
+- Project event pool stores active candidates with score reasons, time anchors, theme markers, and use modes.
+- A chapter `event_contract` records the event actually adopted by the current chapter.
+- Scene card stages how the chapter plays out.
+- Generation instruction compiles the current canvas, event contract, scene card, handoff, and Novel State.
 
-They are not expected to match. A bond timeout or `should_update=false` can leave the long-term baseline behind a lively current session state.
-
-Per chat turn, the backend returns after the main reply call and queues relationship postprocess work. The postprocess task runs `memory`, `state`, and `bond` as separate diagnostics stages, so a timeout in one stage can surface as `partial` without blocking the user-facing reply or discarding stages that already succeeded.
-
-When a visitor reopens a character, `POST /api/sessions` restores the latest messages for that existing `visitor_id + character_id` session. The fixed character opening line is only used to initialize a truly empty session, so refreshes do not reset the visible chat back to the opening message.
+Chapter versions are immutable. `planning_snapshot` stores the current chapter planning state, including canvas chapter, scene card, bound event, and event contract, so restoring a version can roll back the chapter plan without replacing the whole project canvas.

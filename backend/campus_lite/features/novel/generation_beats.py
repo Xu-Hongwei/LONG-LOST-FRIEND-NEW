@@ -55,6 +55,7 @@ class NovelGenerationBeatsMixin:
     ) -> str:
         canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
         canvas_chapter, _canvas_scene = self._canvas_for_chapter(project, chapter)
+        event_contract = self._chapter_event_contract(canvas_chapter)
         action_chain = self._chapter_action_chain_prompt(canvas_chapter)
         material_lines = "\n".join(self._material_prompt_line(row) for row in materials[:12]) or "无"
         history = self._history_chapters(chapters, chapter)
@@ -72,6 +73,8 @@ class NovelGenerationBeatsMixin:
             f"{project['title']}｜{project['genre']}｜{project['tone']}",
             "[故事画布]",
             self._canvas_prompt(canvas, canvas_chapter),
+            "[当前章节事件契约]",
+            self._event_contract_prompt(event_contract),
             "[本章场面推进链]",
             action_chain,
             "[场景卡]",
@@ -221,9 +224,10 @@ class NovelGenerationBeatsMixin:
         canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
         event_pool = sync_story_event_pool_display_bindings(canvas.get("event_pool"), self._canvas_chapters(canvas), setting_type)
         pool_event = story_event_for_chapter(event_pool, canvas_chapter or {"chapter_order": int(chapter["chapter_order"]), "event_pool_id": ""}, setting_type)
-        fallback_place = pool_event.get("place") or profile["places"][0]
-        fallback_event = pool_event.get("event") or profile["events"][0]
-        fallback_ending = pool_event.get("hook") or profile["endings"][0]
+        event_contract = self._chapter_event_contract(canvas_chapter)
+        fallback_place = event_contract.get("place") or pool_event.get("place") or profile["places"][0]
+        fallback_event = event_contract.get("external_event") or pool_event.get("event") or profile["events"][0]
+        fallback_ending = event_contract.get("hook") or pool_event.get("hook") or profile["endings"][0]
         place = self._clean_beat_text(str(scene_card.get("current_scene") or fallback_place))
         if "场景" in place:
             place = fallback_place

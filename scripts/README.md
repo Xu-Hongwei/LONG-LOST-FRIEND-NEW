@@ -12,19 +12,33 @@
 
 ## 常用命令
 
+启动本地开发环境：
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start-dev.ps1
 ```
+
+停止本地开发环境：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\stop-dev.ps1
 ```
 
+运行后端全量测试：
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-backend.ps1
 ```
+
+运行前端构建：
 
 ```powershell
 cd frontend
 npm run build
 ```
+
+## 修改原则
+
+- 脚本应保持 Windows PowerShell 友好。
+- 默认端口和 README 总览保持一致：后端 `8766`，前端 `5176`。
+- 新增脚本时说明用途、是否会写文件、是否会停止进程。

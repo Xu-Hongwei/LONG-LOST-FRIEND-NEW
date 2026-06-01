@@ -52,9 +52,24 @@ export function useNovelInstruction(options: {
     const retired = pool?.retired || [];
     const events = [...active, ...retired];
     if (!chapter || !events.length) return null;
-    const id = String(chapter.event_pool_id || "");
+    const contract = chapter.event_contract && typeof chapter.event_contract === "object"
+      ? chapter.event_contract as Record<string, unknown>
+      : {};
+    const id = String(contract.event_id || chapter.event_pool_id || "");
     const byId = id ? events.find((item) => item.id === id) : null;
-    if (byId) return byId;
+    if (byId) {
+      return {
+        ...byId,
+        place: String(contract.place || byId.place || ""),
+        time_anchor: String(contract.time_anchor || byId.time_anchor || ""),
+        event: String(contract.external_event || byId.event || ""),
+        hook: String(contract.hook || byId.hook || ""),
+        motifs: Array.isArray(contract.motifs) ? contract.motifs.map(String).filter(Boolean) : byId.motifs,
+        use_mode: String(contract.use_mode || byId.use_mode || "guide"),
+        selection_score: Number(contract.score || byId.selection_score || chapter.event_pool_score || 0),
+        selection_reasons: Array.isArray(contract.reasons) ? contract.reasons.map(String).filter(Boolean) : byId.selection_reasons
+      };
+    }
     return events.find((item) => (item.bound_chapter_orders || []).map(String).includes(String(chapter.chapter_order))) || null;
   }
 

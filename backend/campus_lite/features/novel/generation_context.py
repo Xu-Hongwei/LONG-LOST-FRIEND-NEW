@@ -29,6 +29,7 @@ class NovelGenerationContextMixin:
         canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
         novel_state = self._novel_state_until(project, int(chapter["chapter_order"]) - 1)
         canvas_chapter, _canvas_scene = self._canvas_for_chapter(project, chapter)
+        event_contract = self._chapter_event_contract(canvas_chapter)
         current_body = str(chapter["body"] or "").strip()
         current_body_excerpt = current_body[-1600:] if current_body else "无"
         previous_tail = self._previous_chapter_tail(chapters, chapter, novel_state)
@@ -45,6 +46,8 @@ class NovelGenerationContextMixin:
             project["outline"],
             "[故事画布]",
             self._canvas_prompt(canvas, canvas_chapter),
+            "[当前章节事件契约]",
+            self._event_contract_prompt(event_contract),
             "[设定档案]",
             self._story_bible_prompt(self._json_dict(project["story_bible_json"])),
             "[Novel State 长期摘要]",
@@ -120,22 +123,61 @@ class NovelGenerationContextMixin:
         profile = novel_setting_profile(setting_type)
         canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
         canvas_chapter, canvas_scene = self._canvas_for_chapter(project, chapter)
+        event_contract = self._chapter_event_contract(canvas_chapter)
         event_pool = sync_story_event_pool_display_bindings(canvas.get("event_pool"), self._canvas_chapters(canvas), setting_type)
         pool_event = story_event_for_chapter(event_pool, canvas_chapter or {"chapter_order": int(chapter["chapter_order"]), "event_pool_id": ""}, setting_type)
+        contract_place = str(event_contract.get("place") or "").strip()
+        contract_event = str(event_contract.get("external_event") or "").strip()
+        contract_hook = str(event_contract.get("hook") or "").strip()
         defaults = {
-            "current_scene": pool_event.get("place") or f"{tone}的{profile['label']}场景，承接上一章但直接进入可感知的地点、光线和动作。",
+            "current_scene": contract_place or pool_event.get("place") or f"{tone}的{profile['label']}场景，承接上一章但直接进入可感知的地点、光线和动作。",
             "pov": f"贴近{protagonist}与对方的第三人称限知视角，避免上帝视角总结。",
             "present_characters": protagonist,
-            "surface_event": self._scene_surface_event(instruction) if self._usable_instruction(instruction) else (pool_event.get("event") or self._scene_surface_event(instruction)),
+            "surface_event": contract_event or (self._scene_surface_event(instruction) if self._usable_instruction(instruction) else (pool_event.get("event") or self._scene_surface_event(instruction))),
             "character_desire": "人物想把话说清一点，但仍希望保留安全距离和选择余地。",
             "tension": "两个人都意识到某些话还没到能说破的时候，越想靠近，越需要把分寸放稳。",
             "required_facts": facts or ([previous_summary] if previous_summary else []),
             "forbidden_progress": boundaries or ["不得突然承诺、表白、亲密越界或把伏笔写成已经发生。"],
-            "ending_beat": "停在一个自然可续写的动作、对白或沉默上。",
+            "ending_beat": contract_hook or "停在一个自然可续写的动作、对白或沉默上。",
         }
         if canvas_scene:
             defaults.update({key: value for key, value in canvas_scene.items() if key in defaults and value})
         return defaults
+
+    def _chapter_event_contract(self, canvas_chapter: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(canvas_chapter, dict):
+            return {}
+        contract = canvas_chapter.get("event_contract")
+        if isinstance(contract, dict):
+            return contract
+        event_id = str(canvas_chapter.get("event_pool_id") or "").strip()
+        if not event_id:
+            return {}
+        return {
+            "event_id": event_id,
+            "use_mode": "guide",
+            "external_event": str(canvas_chapter.get("external_event") or canvas_chapter.get("trigger_event") or ""),
+            "hook": str(canvas_chapter.get("ending_hook") or ""),
+            "score": int(canvas_chapter.get("event_pool_score") or 0),
+            "reasons": canvas_chapter.get("event_pool_reasons") if isinstance(canvas_chapter.get("event_pool_reasons"), list) else [],
+            "penalties": canvas_chapter.get("event_pool_penalties") if isinstance(canvas_chapter.get("event_pool_penalties"), list) else [],
+        }
+
+    def _event_contract_prompt(self, contract: dict[str, Any]) -> str:
+        if not contract:
+            return "无"
+        motifs = contract.get("motifs") if isinstance(contract.get("motifs"), list) else []
+        reasons = contract.get("reasons") if isinstance(contract.get("reasons"), list) else []
+        return "\n".join([
+            f"- event_id: {contract.get('event_id') or ''} / use_mode: {contract.get('use_mode') or 'guide'} / score: {contract.get('score') or 0}",
+            f"- 地点: {contract.get('place') or '未设定'}",
+            f"- 时间锚点: {contract.get('time_anchor') or '未设定'}",
+            f"- 外部事件: {contract.get('external_event') or '未设定'}",
+            f"- 结尾钩子: {contract.get('hook') or '未设定'}",
+            f"- 意象: {'、'.join(str(item) for item in motifs if str(item).strip()) or '无'}",
+            f"- 选择原因: {'；'.join(str(item) for item in reasons if str(item).strip()) or '无'}",
+            "- 优先级：事件契约决定本章发生什么；场景卡只补镜头、人物欲望和边界；生成指令只控制写法、篇幅和补救策略。",
+        ])
 
     def _scene_card_prompt(self, scene_card: dict[str, Any]) -> str:
         labels = {

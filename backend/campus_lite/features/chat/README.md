@@ -4,8 +4,9 @@ chat 域负责会话和用户可见消息链路，前端入口在 `frontend/src/
 
 ## 文件
 
-- `routes.py`：注册 session、chat send、story pane 和 export 路由。
+- `routes.py`：注册 session、chat send、story pane、memory 兼容路由和 export 路由。
 - `service.py`：创建/恢复会话、召回上下文、组装 prompt、生成主回复、排队 relationship postprocess。
+- `time_awareness.py`：根据上一条消息时间生成轻量时间感上下文。
 
 ## 主流程
 
@@ -35,6 +36,7 @@ memory 路由仍在 chat 路由文件注册以保持 URL 不变，但处理者�
 
 ## 边界
 
-- chat 域不实现 memory 编辑、state 评分或 bond 持久化规则。
+- chat 域不实现 memory 编辑、state 评分或 bond reducer。
 - 主回复不能等待 relationship 后处理结束。
-- story pane 是聊天沉淀出的素材窗口，但章节、版本和 Novel State 不回写到 chat 状态。
+- Story Pane 是聊天沉淀出的素材窗口，但章节、版本、事件池和 Novel State 不回写到 chat 状态。
+- 角色卡题材和 persona slots 由 composer 使用；chat 域不直接生成或修改角色卡。

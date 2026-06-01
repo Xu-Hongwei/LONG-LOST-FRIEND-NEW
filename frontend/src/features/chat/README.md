@@ -18,6 +18,7 @@
 
 ## 不放这里
 
+- 角色工坊、AI 扩写和角色卡表单，归 `characters/`。
 - 记忆过滤、编辑、冻结和 Prompt Stack 展开，归 `relationship/`。
 - 恋爱人格测试，归 `relationship/personalityTest/`。
-- Story Canvas、章节和版本，归 `novel/`。
+- Story Canvas、项目事件池、章节和版本，归 `novel/`。

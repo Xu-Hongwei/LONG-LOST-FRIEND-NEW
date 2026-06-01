@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { StoryCanvasChapter, StoryCanvasEvent, StoryCanvasEventPool, StoryEventPoolEventWriteRequest } from "../../types";
 import type { CanvasBuildStage } from "./constants";
 import { canvasBuildSteps } from "./constants";
@@ -79,8 +79,13 @@ function payloadFromDraft(draft: EventDraft): StoryEventPoolEventWriteRequest {
 const editingEvent = ref<StoryCanvasEvent | null>(null);
 const eventDraftMode = ref<"create" | "edit" | "">("");
 const eventDraft = ref<EventDraft>(draftFromEvent());
+const bindingEvent = ref<StoryCanvasEvent | null>(null);
+const bindingUseMode = ref<EventUseMode>("guide");
+const bindingSubmitted = ref(false);
+const bindingStage = ref<"idle" | "contract" | "sync" | "refresh" | "done">("idle");
+const bindingTimers: number[] = [];
 
-defineProps<{
+const props = defineProps<{
   canvasBuildSummary: string;
   canvasFlowMetrics: {
     acts: number;
@@ -102,13 +107,41 @@ defineProps<{
   novelProjectBusy: boolean;
 }>();
 
+const eventPoolSourceSummary = computed(() => {
+  const active = props.eventPool?.active || [];
+  if (!active.length) return "";
+  const counts = active.reduce<Record<string, number>>((acc, item) => {
+    const label = eventSourceLabel(item);
+    acc[label] = (acc[label] || 0) + 1;
+    return acc;
+  }, {});
+  const order = ["滚动新增", "项目", "手动", "角色素材", "角色转译", "题材兜底"];
+  return order
+    .filter((label) => counts[label])
+    .map((label) => `${label} ${counts[label]}`)
+    .join(" / ");
+});
+
 const emit = defineEmits<{
   addEvent: [payload: StoryEventPoolEventWriteRequest];
   editEvent: [event: StoryCanvasEvent, payload: StoryEventPoolEventWriteRequest];
   retireEvent: [event: StoryCanvasEvent];
   deleteEvent: [event: StoryCanvasEvent];
-  bindEvent: [event: StoryCanvasEvent];
+  bindEvent: [event: StoryCanvasEvent, useMode: EventUseMode];
 }>();
+
+const eventUseModeOptions: { value: EventUseMode; label: string; detail: string }[] = [
+  { value: "strict", label: "strict", detail: "必须采用地点、时间、外部事件和钩子" },
+  { value: "guide", label: "guide", detail: "作为主要方向，首次同步画布和场景卡" },
+  { value: "flavor", label: "flavor", detail: "只借地点、意象、气氛或钩子" },
+  { value: "free", label: "free", detail: "只作为灵感，不自动同步" }
+];
+
+function normalizeUseMode(value: unknown): EventUseMode {
+  return (["strict", "guide", "flavor", "free"].includes(String(value || ""))
+    ? String(value)
+    : "guide") as EventUseMode;
+}
 
 function openEventCreator() {
   editingEvent.value = null;
@@ -127,6 +160,51 @@ function closeEventEditor() {
   eventDraftMode.value = "";
   eventDraft.value = draftFromEvent();
 }
+
+function openBindingPanel(item: StoryCanvasEvent) {
+  bindingEvent.value = item;
+  bindingUseMode.value = normalizeUseMode(item.use_mode);
+}
+
+function closeBindingPanel() {
+  bindingTimers.splice(0).forEach((timer) => window.clearTimeout(timer));
+  bindingEvent.value = null;
+  bindingUseMode.value = "guide";
+  bindingSubmitted.value = false;
+  bindingStage.value = "idle";
+}
+
+function submitBinding() {
+  if (!bindingEvent.value) return;
+  bindingSubmitted.value = true;
+  bindingStage.value = "contract";
+  bindingTimers.splice(0).forEach((timer) => window.clearTimeout(timer));
+  bindingTimers.push(window.setTimeout(() => {
+    if (bindingSubmitted.value && bindingStage.value !== "done") bindingStage.value = "sync";
+  }, 320));
+  bindingTimers.push(window.setTimeout(() => {
+    if (bindingSubmitted.value && bindingStage.value !== "done") bindingStage.value = "refresh";
+  }, 760));
+  emit("bindEvent", bindingEvent.value, bindingUseMode.value);
+}
+
+function bindingStepClass(step: "contract" | "sync" | "refresh" | "done") {
+  const order = ["contract", "sync", "refresh", "done"];
+  const current = order.indexOf(bindingStage.value);
+  const target = order.indexOf(step);
+  return {
+    active: bindingStage.value === step,
+    done: current > target || bindingStage.value === "done"
+  };
+}
+
+watch(
+  () => props.novelProjectBusy,
+  (busy) => {
+    if (!bindingSubmitted.value || busy) return;
+    bindingStage.value = "done";
+  }
+);
 
 function submitEventDraft() {
   const payload = payloadFromDraft(eventDraft.value);
@@ -193,6 +271,7 @@ function submitEventDraft() {
           <strong>项目事件池</strong>
         </div>
         <div class="story-event-pool-actions">
+          <small v-if="eventPoolSourceSummary">{{ eventPoolSourceSummary }}</small>
           <span>{{ eventPool?.active.length || 0 }} / {{ eventPool?.target_active || 10 }} active</span>
           <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="openEventCreator">新增事件</button>
         </div>
@@ -203,7 +282,6 @@ function submitEventDraft() {
             <p class="eyebrow">{{ eventDraftMode === "edit" ? "Edit Event" : "New Event" }}</p>
             <strong>{{ eventDraftMode === "edit" ? "编辑项目事件" : "新增项目事件" }}</strong>
           </div>
-          <button type="button" class="ghost muted" @click="closeEventEditor">关闭</button>
         </div>
         <div class="story-event-editor-grid">
           <label>
@@ -235,7 +313,7 @@ function submitEventDraft() {
               <option value="free">free · 自由发挥</option>
             </select>
           </label>
-          <label class="wide">
+          <label class="story-event-source-field">
             <span>来源说明</span>
             <input v-model="eventDraft.source_reason" placeholder="例如：根据当前章节节奏手动添加" />
           </label>
@@ -245,6 +323,54 @@ function submitEventDraft() {
           <button type="submit" :disabled="novelProjectBusy || (!eventDraft.place && !eventDraft.event && !eventDraft.hook)">
             {{ eventDraftMode === "edit" ? "保存事件" : "新增事件" }}
           </button>
+        </div>
+      </form>
+      <form v-if="bindingEvent" class="story-event-bind-panel" @submit.prevent="submitBinding">
+        <div class="story-event-bind-head">
+          <div>
+            <p class="eyebrow">Bind Event</p>
+            <strong>选择本章采用强度</strong>
+          </div>
+          <button type="button" class="ghost muted" :disabled="bindingSubmitted && bindingStage !== 'done'" @click="closeBindingPanel">关闭</button>
+        </div>
+        <div class="story-event-bind-summary">
+          <span>{{ bindingEvent.time_anchor || "未设定时间" }}</span>
+          <strong>{{ bindingEvent.place || "未设定地点" }}</strong>
+          <p>{{ bindingEvent.event || "暂无事件描述" }}</p>
+          <em>{{ bindingEvent.hook || "暂无钩子" }}</em>
+        </div>
+        <div class="story-event-mode-grid">
+          <label
+            v-for="option in eventUseModeOptions"
+            :key="option.value"
+            :class="{ active: bindingUseMode === option.value }"
+          >
+            <input v-model="bindingUseMode" type="radio" name="story-event-bind-mode" :value="option.value" :disabled="bindingSubmitted" />
+            <strong>{{ option.label }}</strong>
+            <span>{{ option.detail }}</span>
+          </label>
+        </div>
+        <ol v-if="bindingSubmitted" class="story-event-bind-progress">
+          <li :class="bindingStepClass('contract')">
+            <i>1</i>
+            <span>写入本章事件契约</span>
+          </li>
+          <li :class="bindingStepClass('sync')">
+            <i>2</i>
+            <span>按模式同步画布与场景卡</span>
+          </li>
+          <li :class="bindingStepClass('refresh')">
+            <i>3</i>
+            <span>刷新项目事件池和章节状态</span>
+          </li>
+          <li :class="bindingStepClass('done')">
+            <i>4</i>
+            <span>完成，返回结果见当前章节采用事件</span>
+          </li>
+        </ol>
+        <div class="story-event-editor-actions">
+          <button type="button" class="ghost muted" :disabled="bindingSubmitted && bindingStage !== 'done'" @click="closeBindingPanel">取消</button>
+          <button type="submit" :disabled="novelProjectBusy || bindingSubmitted || !activeCanvasChapter">绑定本章</button>
         </div>
       </form>
       <div v-if="eventPool?.active.length" class="story-event-pool-grid">
@@ -275,7 +401,7 @@ function submitEventDraft() {
           </div>
           <div class="story-event-controls">
             <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="openEventEditor(item)">编辑</button>
-            <button type="button" class="ghost muted" :disabled="novelProjectBusy || !activeCanvasChapter" @click="$emit('bindEvent', item)">绑定本章</button>
+            <button type="button" class="ghost muted" :disabled="novelProjectBusy || !activeCanvasChapter" @click="openBindingPanel(item)">绑定本章</button>
             <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="$emit('retireEvent', item)">退休</button>
             <button type="button" class="ghost muted danger" :disabled="novelProjectBusy" @click="$emit('deleteEvent', item)">删除</button>
           </div>

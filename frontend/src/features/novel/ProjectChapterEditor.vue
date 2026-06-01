@@ -50,6 +50,76 @@ defineEmits<{
   clearEventBinding: [];
   rebindEvent: [];
 }>();
+
+function eventSyncLabel(chapter: StoryCanvasChapter | null) {
+  const sync = chapter?.event_sync;
+  if (!sync || typeof sync !== "object") return "未同步";
+  const data = sync as Record<string, unknown>;
+  const fields = data.fields;
+  const sceneFields = data.scene_fields;
+  const fieldCount = fields && typeof fields === "object" ? Object.keys(fields).length : 0;
+  const sceneCount = sceneFields && typeof sceneFields === "object" ? Object.keys(sceneFields).length : 0;
+  return `${String(data.mode || "guide")} · 画布 ${fieldCount} 项 · 场景卡 ${sceneCount} 项`;
+}
+
+const canvasSyncLabels: Record<string, string> = {
+  external_event: "外部事件",
+  trigger_event: "触发事件",
+  ending_hook: "结尾钩子",
+  goal: "章节目标",
+  obstacle_escalation: "阻碍升级",
+  scene_consequence: "场景后果"
+};
+
+const sceneSyncLabels: Record<string, string> = {
+  current_scene: "当前场景",
+  surface_event: "表层事件",
+  ending_beat: "结尾落点"
+};
+
+function syncFieldEntries(chapter: StoryCanvasChapter | null, key: "fields" | "scene_fields") {
+  const sync = chapter?.event_sync;
+  if (!sync || typeof sync !== "object") return [];
+  const data = sync as Record<string, unknown>;
+  const fields = data[key];
+  if (!fields || typeof fields !== "object") return [];
+  const labels = key === "fields" ? canvasSyncLabels : sceneSyncLabels;
+  return Object.entries(fields as Record<string, unknown>)
+    .map(([field, value]) => ({
+      field,
+      label: labels[field] || field,
+      value: String(value || "").trim()
+    }))
+    .filter((item) => item.value);
+}
+
+function eventContractReturnRows(chapter: StoryCanvasChapter | null) {
+  const contract = chapter?.event_contract;
+  if (!contract || typeof contract !== "object") return [];
+  const data = contract as Record<string, unknown>;
+  return [
+    ["event_id", data.event_id],
+    ["source", data.source],
+    ["status", data.status],
+    ["updated_at", data.updated_at]
+  ]
+    .map(([label, value]) => ({ label: String(label), value: String(value || "").trim() }))
+    .filter((item) => item.value);
+}
+
+function eventSyncReturnRows(chapter: StoryCanvasChapter | null) {
+  const sync = chapter?.event_sync;
+  if (!sync || typeof sync !== "object") return [];
+  const data = sync as Record<string, unknown>;
+  return [
+    ["sync_source", data.source],
+    ["remote_status", data.remote_status],
+    ["remote_reason", data.remote_reason],
+    ["source_note", data.source_note]
+  ]
+    .map(([label, value]) => ({ label: String(label), value: String(value || "").trim() }))
+    .filter((item) => item.value);
+}
 </script>
 
 <template>
@@ -104,8 +174,42 @@ defineEmits<{
         <strong>{{ activeCanvasEvent.selection_score || activeCanvasChapter?.event_pool_score || 0 }}</strong>
         <span>Reasons</span>
         <p>{{ (activeCanvasEvent.selection_reasons || activeCanvasChapter?.event_pool_reasons || []).join("；") || "暂无原因" }}</p>
+        <span>同步</span>
+        <p>{{ eventSyncLabel(activeCanvasChapter) }}</p>
       </div>
-      <p v-else class="chapter-event-empty">未绑定项目事件</p>
+      <div v-if="activeCanvasEvent && activeCanvasChapter?.event_sync" class="chapter-event-sync-detail">
+        <div>
+          <p class="eyebrow">Returned Sync</p>
+          <strong>后端返回结果</strong>
+        </div>
+        <div class="chapter-event-sync-meta">
+          <span v-for="row in eventContractReturnRows(activeCanvasChapter)" :key="row.label">
+            {{ row.label }}: {{ row.value }}
+          </span>
+          <span v-for="row in eventSyncReturnRows(activeCanvasChapter)" :key="row.label">
+            {{ row.label }}: {{ row.value }}
+          </span>
+        </div>
+        <article>
+          <span>画布生成/同步</span>
+          <p v-if="syncFieldEntries(activeCanvasChapter, 'fields').length">
+            <b v-for="item in syncFieldEntries(activeCanvasChapter, 'fields')" :key="item.field">
+              {{ item.label }}：{{ item.value }}
+            </b>
+          </p>
+          <em v-else>本次没有写入画布字段，可能是 free/flavor 模式，或已有手写字段被保护。</em>
+        </article>
+        <article>
+          <span>场景卡生成/同步</span>
+          <p v-if="syncFieldEntries(activeCanvasChapter, 'scene_fields').length">
+            <b v-for="item in syncFieldEntries(activeCanvasChapter, 'scene_fields')" :key="item.field">
+              {{ item.label }}：{{ item.value }}
+            </b>
+          </p>
+          <em v-else>本次没有写入场景卡字段，可能是 free 模式，或场景卡字段已被用户改写。</em>
+        </article>
+      </div>
+      <p v-if="!activeCanvasEvent" class="chapter-event-empty">未绑定项目事件</p>
       <div class="chapter-event-actions">
         <button type="button" class="ghost muted" :disabled="novelProjectBusy" @click="$emit('rebindEvent')">重新绑定</button>
         <button type="button" class="ghost muted danger" :disabled="novelProjectBusy || !activeCanvasEvent" @click="$emit('clearEventBinding')">取消绑定</button>

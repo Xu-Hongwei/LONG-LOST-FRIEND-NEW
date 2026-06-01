@@ -258,11 +258,18 @@ class NovelProjectMixin:
         lines: list[str] = []
         for chapter in self._canvas_chapters(canvas)[:8]:
             prefix = "当前章节" if chapter.get("id") == current_chapter.get("id") else f"第{chapter.get('chapter_order', '?')}章"
+            contract = chapter.get("event_contract") if isinstance(chapter.get("event_contract"), dict) else {}
+            contract_part = ""
+            if contract:
+                contract_part = (
+                    f"；事件契约={contract.get('time_anchor') or ''} {contract.get('place') or ''} "
+                    f"{contract.get('external_event') or ''}；契约钩子={contract.get('hook') or ''}"
+                )
             lines.append(
                 f"- {prefix}《{chapter.get('title', '')}》：触发={chapter.get('trigger_event') or chapter.get('external_event', '')}；"
                 f"反应={chapter.get('immediate_reaction', '')}；升级={chapter.get('obstacle_escalation', '')}；"
                 f"对方={chapter.get('counterpart_reaction', '')}；选择={chapter.get('character_choice', '')}；"
-                f"后果={chapter.get('scene_consequence') or chapter.get('relationship_shift', '')}；钩子={chapter.get('ending_hook', '')}"
+                f"后果={chapter.get('scene_consequence') or chapter.get('relationship_shift', '')}；钩子={chapter.get('ending_hook', '')}{contract_part}"
             )
         threads = canvas.get("threads", [])
         if isinstance(threads, list) and threads:

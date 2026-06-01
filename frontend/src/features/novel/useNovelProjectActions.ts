@@ -66,39 +66,6 @@ function normalizeDraftOutline(text: string) {
   return lines.join("").replace(/\s{2,}/g, " ").trim();
 }
 
-function eventPoolPayloadFromPrompt(event?: StoryCanvasEvent): StoryEventPoolEventWriteRequest | null {
-  const seed: StoryEventPoolEventWriteRequest = {
-    place: event?.place || "",
-    time_anchor: event?.time_anchor || "",
-    event: event?.event || "",
-    hook: event?.hook || "",
-    motifs: event?.motifs || [],
-    use_mode: (event?.use_mode as StoryEventPoolEventWriteRequest["use_mode"]) || "guide",
-    source_reason: event?.source_reason || "",
-    tags: event?.tags || {}
-  };
-  const raw = window.prompt("编辑事件 JSON", JSON.stringify(seed, null, 2));
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as Partial<StoryEventPoolEventWriteRequest>;
-    return {
-      place: String(parsed.place || ""),
-      time_anchor: String(parsed.time_anchor || ""),
-      event: String(parsed.event || ""),
-      hook: String(parsed.hook || ""),
-      motifs: Array.isArray(parsed.motifs) ? parsed.motifs.map(String).filter(Boolean) : [],
-      use_mode: ["strict", "guide", "flavor", "free"].includes(String(parsed.use_mode || ""))
-        ? parsed.use_mode as StoryEventPoolEventWriteRequest["use_mode"]
-        : "guide",
-      source_reason: String(parsed.source_reason || ""),
-      tags: parsed.tags && typeof parsed.tags === "object" ? parsed.tags : {}
-    };
-  } catch {
-    window.alert("事件 JSON 格式不正确");
-    return null;
-  }
-}
-
 export function useNovelProjectActions(options: {
   sessionId: Ref<string>;
   activeCharacter: ComputedRef<CharacterCard | null>;
@@ -611,19 +578,15 @@ export function useNovelProjectActions(options: {
     }
   }
 
-  async function createEventPoolEventFromPrompt() {
+  async function createEventPoolEvent(payload: StoryEventPoolEventWriteRequest) {
     const project = options.activeNovelProject.value;
     if (!project) return;
-    const payload = eventPoolPayloadFromPrompt();
-    if (!payload) return;
     await applyEventPoolProjectUpdate(() => createStoryEventPoolEvent(project.id, payload));
   }
 
-  async function editEventPoolEventFromPrompt(event: StoryCanvasEvent) {
+  async function editEventPoolEvent(event: StoryCanvasEvent, payload: StoryEventPoolEventWriteRequest) {
     const project = options.activeNovelProject.value;
     if (!project || !event.id) return;
-    const payload = eventPoolPayloadFromPrompt(event);
-    if (!payload) return;
     await applyEventPoolProjectUpdate(() => updateStoryEventPoolEvent(project.id, event.id, payload));
   }
 
@@ -641,13 +604,16 @@ export function useNovelProjectActions(options: {
     await applyEventPoolProjectUpdate(() => deleteStoryEventPoolEvent(project.id, event.id));
   }
 
-  async function bindEventToActiveChapter(event: StoryCanvasEvent) {
+  async function bindEventToActiveChapter(event: StoryCanvasEvent, useMode?: "strict" | "guide" | "flavor" | "free") {
     const project = options.activeNovelProject.value;
     const chapter = options.activeNovelChapter.value;
     if (!project || !chapter || !event.id) return;
+    const mode = useMode || (["strict", "guide", "flavor", "free"].includes(String(event.use_mode || ""))
+      ? event.use_mode as "strict" | "guide" | "flavor" | "free"
+      : "guide");
     await applyEventPoolProjectUpdate(() => bindStoryEventPoolEvent(project.id, chapter.id, {
       event_id: event.id,
-      use_mode: ["strict", "guide", "flavor", "free"].includes(String(event.use_mode || "")) ? event.use_mode as "strict" | "guide" | "flavor" | "free" : "guide"
+      use_mode: mode
     }));
   }
 
@@ -781,8 +747,8 @@ export function useNovelProjectActions(options: {
     generateActiveChapter,
     checkActiveContinuity,
     loadChapterVersions,
-    createEventPoolEventFromPrompt,
-    editEventPoolEventFromPrompt,
+    createEventPoolEvent,
+    editEventPoolEvent,
     retireEventPoolEventAction,
     deleteEventPoolEventAction,
     bindEventToActiveChapter,

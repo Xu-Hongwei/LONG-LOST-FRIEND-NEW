@@ -292,9 +292,9 @@ def register_novel_routes(
             raise HTTPException(status_code=status, detail=str(exc)) from exc
 
     @app.post("/api/novel/projects/{project_id}/chapters/{chapter_id}/event-pool-binding", response_model=NovelProjectResponse)
-    def bind_event_pool_event(project_id: str, chapter_id: str, payload: StoryEventPoolBindingRequest) -> NovelProjectResponse:
+    async def bind_event_pool_event(project_id: str, chapter_id: str, payload: StoryEventPoolBindingRequest) -> NovelProjectResponse:
         try:
-            return novel.bind_event_pool_event_to_chapter(project_id, chapter_id, payload)
+            return await novel.bind_event_pool_event_to_chapter_remote(llm, project_id, chapter_id, payload)
         except ValueError as exc:
             status = 404 if "not found" in str(exc).lower() else 400
             raise HTTPException(status_code=status, detail=str(exc)) from exc

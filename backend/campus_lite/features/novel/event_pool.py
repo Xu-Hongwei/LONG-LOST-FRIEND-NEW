@@ -195,21 +195,45 @@ def _ensure_unique_event_id(entry: dict[str, Any], used_ids: set[str], index: in
 
 
 def _replaceable_active_index(active: list[dict[str, Any]]) -> int:
-    for preferred_source in ["setting_profile", ""]:
+    replacement_tiers = [
+        {"setting_profile"},
+        {"character_seed_translated"},
+    ]
+    for sources in replacement_tiers:
         for index in range(len(active) - 1, -1, -1):
             item = active[index]
+            if item.get("bound_chapter_orders") or item.get("used_chapter_ids"):
+                continue
             if item.get("status") not in {"fresh", "", None}:
                 continue
-            if item.get("bound_chapter_orders"):
+            if item.get("source") not in sources:
                 continue
-            if preferred_source and item.get("source") != preferred_source:
+            if item.get("source") == "character_seed_translated" and (item.get("selection_score") or item.get("source_reason")):
                 continue
             return index
     for index in range(len(active) - 1, -1, -1):
         item = active[index]
-        if not item.get("bound_chapter_orders") and item.get("status") != "planned":
+        if item.get("bound_chapter_orders") or item.get("used_chapter_ids"):
+            continue
+        if item.get("status") in {"fresh", "", None} and int(item.get("selection_score") or 0) < 50:
+            return index
+    for index in range(len(active) - 1, -1, -1):
+        item = active[index]
+        if not item.get("bound_chapter_orders") and not item.get("used_chapter_ids") and item.get("status") != "planned":
             return index
     return -1
+
+
+def event_pool_source_counts(pool: Any) -> dict[str, int]:
+    source = pool if isinstance(pool, dict) else {}
+    active = source.get("active") if isinstance(source.get("active"), list) else []
+    counts: dict[str, int] = {}
+    for item in active:
+        if not isinstance(item, dict):
+            continue
+        label = _clean_text(item.get("source"), 40) or "setting_profile"
+        counts[label] = counts.get(label, 0) + 1
+    return counts
 
 
 def normalize_story_event_pool(
@@ -418,6 +442,7 @@ def apply_story_event_pool_delta(raw: Any, delta: Any, setting_type: str = "mode
     active = pool.get("active") or []
     retired = pool.get("retired") or []
     by_id = {str(item.get("id")): item for item in active}
+    seen_keys = {_event_key(item) for item in [*active, *retired] if _event_key(item)}
     for item in delta.get("retire", []) if isinstance(delta.get("retire"), list) else []:
         event_id = _clean_text(item.get("id") if isinstance(item, dict) else item, 80)
         if event_id and event_id in by_id:
@@ -425,12 +450,19 @@ def apply_story_event_pool_delta(raw: Any, delta: Any, setting_type: str = "mode
             active = [entry for entry in active if str(entry.get("id")) != event_id]
             removed["status"] = "retired"
             retired.append(removed)
+            seen_keys.add(_event_key(removed))
     for item in delta.get("update", []) if isinstance(delta.get("update"), list) else []:
         if not isinstance(item, dict):
             continue
         event_id = _clean_text(item.get("id"), 80)
         if event_id and event_id in by_id:
-            by_id[event_id].update(_normalize_event_entry(item, by_id[event_id], len(active)))
+            updated = _normalize_event_entry(item, by_id[event_id], len(active))
+            updated_key = _event_key(updated)
+            original_key = _event_key(by_id[event_id])
+            if updated_key == original_key or updated_key not in seen_keys:
+                seen_keys.discard(original_key)
+                by_id[event_id].update(updated)
+                seen_keys.add(_event_key(by_id[event_id]))
     for item in delta.get("add", []) if isinstance(delta.get("add"), list) else []:
         if not isinstance(item, dict):
             continue
@@ -438,12 +470,19 @@ def apply_story_event_pool_delta(raw: Any, delta: Any, setting_type: str = "mode
         entry = _normalize_event_entry(item, fallback, len(active))
         if entry.get("source_reason") and entry.get("source") == "setting_profile":
             entry["source"] = "remote"
-        if _event_key(entry) not in {_event_key(existing) for existing in active}:
+        entry_key = _event_key(entry)
+        if entry_key and entry_key not in seen_keys:
             if len(active) >= STORY_EVENT_POOL_SIZE:
                 replace_index = _replaceable_active_index(active)
                 if replace_index >= 0:
-                    active.pop(replace_index)
+                    removed = active.pop(replace_index)
+                    by_id.pop(str(removed.get("id")), None)
+                    seen_keys.discard(_event_key(removed))
+                    if removed.get("source") == "setting_profile":
+                        entry["selection_reasons"] = _clean_list([*(entry.get("selection_reasons") or []), "替换题材兜底"], 8, 120)
             active.append(entry)
+            by_id[str(entry.get("id"))] = entry
+            seen_keys.add(entry_key)
     pool["active"] = active[:STORY_EVENT_POOL_SIZE]
     pool["retired"] = retired[-40:]
     pool["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -645,6 +684,19 @@ def _has_internal_role_name(text: str) -> bool:
     return bool(re.search(r"\b(ai|assistant|user)\b", lowered))
 
 
+def _event_source_priority(event: dict[str, Any]) -> int:
+    source = _clean_text(event.get("source"), 40)
+    if source in {"manual", "project"}:
+        return 4
+    if source in {"remote", "llm"}:
+        return 3
+    if source in {"character_seed", "character_seed_translated", "character"}:
+        return 2
+    if source == "setting_profile":
+        return 0
+    return 1
+
+
 def score_story_event(
     event: dict[str, Any],
     chapter: dict[str, Any],
@@ -720,12 +772,27 @@ def score_story_event(
         score += 5
         reasons.append("hook present")
     source_label = _clean_text(event.get("source"), 40)
-    if source_label in {"project", "manual", "remote", "llm"} or event.get("source_reason"):
+    if source_label in {"project", "manual"}:
+        score += 7
+        reasons.append("project/manual candidate")
+    elif source_label in {"remote", "llm"}:
+        remote_bonus = 5
+        if event.get("source_reason"):
+            remote_bonus += 2
+        if theme_markers:
+            remote_bonus += 2
+        if time_anchor and _has_concrete_time_anchor(time_anchor):
+            remote_bonus += 2
+        score += min(11, remote_bonus)
+        reasons.append("滚动新增候选")
+    elif source_label not in {"setting_profile"} and event.get("source_reason"):
         score += 5
         reasons.append("sourced candidate")
     elif source_label in {"character", "character_seed", "character_seed_translated"}:
         score += 2
         reasons.append("character flavor seed")
+    elif source_label == "setting_profile":
+        penalties.append("setting profile fallback")
 
     if _event_matches_chapter(event, chapter):
         score += 10
@@ -833,7 +900,13 @@ def select_story_event_for_chapter(
         scored = score_story_event(item, chapter, context, setting_type)
         if scored["blocked"]:
             continue
-        if scored["score"] > best_score["score"]:
+        if (
+            scored["score"] > best_score["score"]
+            or (
+                scored["score"] >= best_score["score"] - 8
+                and _event_source_priority(item) > _event_source_priority(best_event or {})
+            )
+        ):
             best_event = item
             best_score = scored
     if (

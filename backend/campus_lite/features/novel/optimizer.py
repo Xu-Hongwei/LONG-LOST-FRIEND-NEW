@@ -90,6 +90,7 @@ class NovelInstructionOptimizerMixin:
             setting_type,
         )
         canvas_chapter = payload.canvas_chapter if isinstance(payload.canvas_chapter, dict) else {}
+        event_contract = canvas_chapter.get("event_contract") if isinstance(canvas_chapter.get("event_contract"), dict) else {}
         order = self._coerce_int(
             canvas_chapter.get("chapter_order") or (chapter["chapter_order"] if chapter else 0),
             0,
@@ -102,32 +103,35 @@ class NovelInstructionOptimizerMixin:
             {**canvas_chapter, "chapter_order": order, "event_pool_id": event_id},
             setting_type,
         ) if order else {}
-        if not selected:
+        if not selected and not event_contract:
             return {}
-        selected_orders = [str(value) for value in selected.get("bound_chapter_orders", [])]
+        selected_orders = [str(value) for value in selected.get("bound_chapter_orders", [])] if selected else []
         selected_id = str(selected.get("id") or "")
-        if not ((event_id and selected_id == event_id) or (order and str(order) in selected_orders)):
+        contract_id = str(event_contract.get("event_id") or "")
+        if not event_contract and not ((event_id and selected_id == event_id) or (order and str(order) in selected_orders)):
             return {}
         tags = selected.get("tags") if isinstance(selected.get("tags"), dict) else {}
+        selected_source = selected if selected else {}
         return {
             "role": "current_chapter_event_pool_binding",
             "rule": "事件池决定本章发生什么；场景卡只补镜头、视角、欲望和边界。",
+            "event_contract": event_contract,
             "selected_event": {
-                "id": selected.get("id") or "",
-                "source": selected.get("source") or "",
-                "status": selected.get("status") or "",
-                "use_mode": selected.get("use_mode") or "guide",
-                "place": selected.get("place") or "",
-                "time_anchor": selected.get("time_anchor") or "",
-                "event": selected.get("event") or "",
-                "hook": selected.get("hook") or "",
-                "motifs": selected.get("motifs") or [],
+                "id": selected_source.get("id") or contract_id or "",
+                "source": selected_source.get("source") or event_contract.get("source") or "",
+                "status": selected_source.get("status") or event_contract.get("status") or "",
+                "use_mode": selected_source.get("use_mode") or event_contract.get("use_mode") or "guide",
+                "place": event_contract.get("place") or selected_source.get("place") or "",
+                "time_anchor": event_contract.get("time_anchor") or selected_source.get("time_anchor") or "",
+                "event": event_contract.get("external_event") or selected_source.get("event") or "",
+                "hook": event_contract.get("hook") or selected_source.get("hook") or "",
+                "motifs": event_contract.get("motifs") or selected_source.get("motifs") or [],
                 "theme_markers": tags.get("theme_markers") or [],
                 "tone_markers": tags.get("tone_markers") or [],
                 "relationship_motion": tags.get("relationship_motion") or [],
-                "selection_score": selected.get("selection_score") or canvas_chapter.get("event_pool_score") or 0,
-                "selection_reasons": selected.get("selection_reasons") or canvas_chapter.get("event_pool_reasons") or [],
-                "selection_penalties": selected.get("selection_penalties") or canvas_chapter.get("event_pool_penalties") or [],
+                "selection_score": event_contract.get("score") or selected_source.get("selection_score") or canvas_chapter.get("event_pool_score") or 0,
+                "selection_reasons": event_contract.get("reasons") or selected_source.get("selection_reasons") or canvas_chapter.get("event_pool_reasons") or [],
+                "selection_penalties": event_contract.get("penalties") or selected_source.get("selection_penalties") or canvas_chapter.get("event_pool_penalties") or [],
             },
             "chapter_binding": {
                 "chapter_order": order,

@@ -273,6 +273,8 @@ export interface StoryCanvasChapter {
   event_pool_score?: number;
   event_pool_reasons?: string[];
   event_pool_penalties?: string[];
+  event_contract?: Record<string, unknown>;
+  event_sync?: Record<string, unknown>;
   completed_summary?: string;
   actual_word_count?: number;
   completed_at?: string;

@@ -274,8 +274,8 @@ const {
   saveNovelChapter,
   generateActiveChapter,
   checkActiveContinuity,
-  createEventPoolEventFromPrompt,
-  editEventPoolEventFromPrompt,
+  createEventPoolEvent,
+  editEventPoolEvent,
   retireEventPoolEventAction,
   deleteEventPoolEventAction,
   bindEventToActiveChapter,
@@ -700,8 +700,8 @@ function downloadNovelProjectMarkdown() {
               :novel-state-last-handoff-text="novelStateLastHandoffText"
               :novel-state-open-threads="novelStateOpenThreads"
               :novel-project-busy="novelProjectBusy"
-              @add-event="createEventPoolEventFromPrompt"
-              @edit-event="editEventPoolEventFromPrompt"
+              @add-event="createEventPoolEvent"
+              @edit-event="editEventPoolEvent"
               @retire-event="retireEventPoolEventAction"
               @delete-event="deleteEventPoolEventAction"
               @bind-event="bindEventToActiveChapter"

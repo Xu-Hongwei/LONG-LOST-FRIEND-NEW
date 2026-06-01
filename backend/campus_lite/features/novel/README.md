@@ -1,12 +1,15 @@
 # Novel 后端域
 
-小说域由 `backend/campus_lite/novel.py` 组合 mixin，当前目录保存短篇和长篇工作台逻辑。
+小说域由 `backend/campus_lite/novel.py` 组合 mixin。当前目录保存短篇、长篇项目、Story Canvas、项目事件池、章节生成、版本和 Novel State 逻辑。
 
 ## 核心数据边界
 
-- `story_canvas`：项目级规划，如 acts、chapters、scenes、threads 和 source material ids。
-- `chapter.scene_card`：章节规划和当前章节运行态，用户已编辑字段优先。
-- `novel_versions`：不可变正文版本，保留正文、规划快照、可信 state delta 和来源。
+- `story_bible`：项目规则、已确认事实、关系边界和素材摘要。
+- `story_canvas`：项目级规划，包括 acts、chapters、scenes、threads、event_pool 和 diagnostics。
+- `event_pool`：项目事件候选库，维持 active 事件，记录来源、时间锚点、主题标记、评分原因和绑定状态。
+- `event_contract`：当前章节真正采用的项目事件契约，写在 canvas chapter 和章节 scene card 中。
+- `chapter.scene_card`：章节演出层，描述场景、人物欲望、张力、禁推事项和结尾 beat。
+- `novel_versions.planning_snapshot_json`：章节版本快照，保存当前章节相关画布、场景卡、绑定事件和契约。
 - `novel_state`：全局可信状态，只从可信章节版本或可信 handoff 重建。
 
 禁止把 `generation_progress`、后台 `postprocess`、临时 audit 和 active delta 写进版本规划快照。
@@ -14,32 +17,84 @@
 ## 文件职责
 
 - `routes.py`：小说 API。
-- `project.py`：项目创建、Story Bible、素材初始化和项目响应。
+- `project.py`、`project_draft.py`：项目创建、项目草稿、Story Bible、素材初始化和项目响应。
 - `shortform.py`：Quick Draft 短篇/番外。
 - `canvas.py`：画布构建和扩展主流程。
-- `canvas_prompting.py`、`canvas_parsing.py`、`canvas_planning.py`：画布 prompt、解析、滚动规划。
+- `canvas_prompting.py`、`canvas_parsing.py`、`canvas_planning.py`：画布 prompt、解析和滚动规划。
 - `canvas_defaults.py`、`canvas_access.py`、`canvas_sync.py`：画布默认值、读取和章节同步。
+- `event_pool.py`：事件池 normalization、评分、排重、滚动补池和章节自动绑定。
+- `event_pool_edit.py`：事件新增、编辑、退休、删除、手动绑定、`event_contract` 和绑定后远程结构化同步。
 - `generation.py`：章节生成主流程。
+- `generation_context.py`、`generation_beats.py`：正文生成上下文和 scene beats，读取当前事件契约。
 - `generation_postprocess.py`：章节正文返回后的 handoff、Novel State 更新和后续画布滚动。
-- `generation_beats.py`、`generation_context.py`、`generation_response.py`、`generation_mock.py`：章节生成上下文、正文响应和 fallback。
-- `optimizer.py`：章节指令优化。
+- `generation_response.py`、`generation_mock.py`：正文响应和 fallback。
+- `optimizer.py`：章节生成指令优化，读取当前绑定事件、画布和场景卡。
 - `audit.py`、`quality.py`：审稿、连续性和本地质量检查。
 - `handoff.py`、`state.py`：章节交接与 Novel State。
 - `serialization.py`：数据库 row、JSON 和 response model 转换。
-- `config.py`：小说生成相关超时配置。
+- `config.py`：小说生成、画布、规划和事件绑定相关 timeout。
 
-## 主要流程
+## 长篇生成层级
 
-1. 项目创建把角色、消息、memory 和 story items 转成 Story Bible、素材、初始章节和默认状态。
-2. 画布构建生成全局规划，再同步到章节 planning 字段。
-3. 章节草稿保存走 `/api/novel/chapters/{chapter_id}/draft`，原子保存章节、规划片段和版本。
-4. 章节生成读取画布、scene card、历史章节、Novel State 和 handoff，生成正文并审稿。
-5. 正文返回后 postprocess 更新 handoff、可信状态和后续两章滚动画布。
-6. 恢复版本只恢复正文和规划快照，再按可信规则重建后续状态。
+长篇生成按固定优先级协作：
+
+1. 已写正文、章节版本和可信 Novel State。
+2. 当前章节 canvas chapter。
+3. 当前章节 `event_contract`。
+4. 当前章节 scene card。
+5. 优化后的生成指令。
+
+项目事件池只是候选库；未绑定事件不直接影响正文。用户手动绑定或系统自动绑定后，事件才进入 `event_contract` 并参与画布、场景卡、scene beats 和生成指令。
+
+## 项目事件池
+
+事件池 active 目标数量是 10 条。事件可来自：
+
+- `character_seed`：角色 `story_seed_pool` 转译出的默认故事味道。
+- `project`：项目设定、Story Bible 和用户补充。
+- `remote`：画布滚动时 LLM 返回的结构化候选。
+- `setting_profile`：全局题材兜底。
+- `manual`：用户手动新增。
+
+事件字段包括地点、时间锚点、外部事件、钩子、意象、`use_mode`、source reason、主题/基调 tags、selection score 和 reasons。本地评分器负责主题适配、章节相关性、素材熟悉感、关系节奏、连续性和新鲜度；LLM 不直接输出最终分数。
+
+事件池编辑 API：
+
+- `POST /api/novel/projects/{project_id}/event-pool/events`
+- `PATCH /api/novel/projects/{project_id}/event-pool/events/{event_id}`
+- `POST /api/novel/projects/{project_id}/event-pool/events/{event_id}/retire`
+- `DELETE /api/novel/projects/{project_id}/event-pool/events/{event_id}`
+- `POST /api/novel/projects/{project_id}/chapters/{chapter_id}/event-pool-binding`
+
+删除只允许未绑定、未使用事件；历史相关事件应先退休。
+
+## Event Contract 与绑定模式
+
+绑定事件时，后端先写入 `event_contract`，再按模式同步章节画布和场景卡：
+
+- `strict`：必须采用地点、时间、外部事件和钩子，可覆盖核心自动字段。
+- `guide`：默认模式，作为主要方向；首次同步会填充画布和场景卡，后续保护用户手写字段。
+- `flavor`：只借地点、意象、气氛或钩子，不覆盖主事件。
+- `free`：只记录灵感，不自动同步，也不参与自动绑定。
+
+绑定后会尝试远程结构化同步。远程只返回 `canvas_chapter_patch`、`scene_card_patch` 和 `sync_note`；本地代码校验字段、清理事件池元信息、按 use mode 应用。远程失败、未配置或超时时保留本地同步结果，并在 `event_sync.remote_status` 写入原因。
+
+## 版本与回退
+
+章节版本是不可变记录。保存正文版本时，`planning_snapshot_json` 记录当前章节相关规划：
+
+- `canvas_chapter`
+- 当前第一张 `canvas_scene`
+- `scene_card`
+- 当前绑定事件、事件分数和原因
+- `event_contract` 与 `event_use_mode`
+
+恢复版本时只恢复当前章节相关画布、场景卡和事件绑定，不整张覆盖项目画布，避免误删后续章节和用户后续编辑。恢复后继续沿用现有逻辑标记后续章节 affected 并重建可信 Novel State。
 
 ## 修改原则
 
 - 画布结构改动先放 canvas 系列文件。
+- 事件池评分、绑定和编辑改动优先放 `event_pool.py` / `event_pool_edit.py`。
 - 章节生成主链路放 generation 系列文件。
 - 版本和可信状态改动同时检查 `storage_parts/novel_versions.py`、`storage_parts/novel_chapters.py` 和本目录 `state.py`。
 - manual/mock/canvas/system/restore 默认不污染 Novel State，除非有可信 handoff。

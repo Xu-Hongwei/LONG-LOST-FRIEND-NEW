@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import uuid
+import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 from ...schemas import StoryEventPoolBindingRequest, StoryEventPoolEventWriteRequest
+from .config import NOVEL_EVENT_BINDING_TIMEOUT_MS
 from .event_pool import (
     STORY_EVENT_POOL_SIZE,
     _fallback_event,
@@ -33,6 +36,7 @@ class NovelEventPoolEditMixin:
         return self._save_event_pool(project["id"], canvas, pool, setting_type)
 
     def update_event_pool_event(self, project_id: str, event_id: str, payload: StoryEventPoolEventWriteRequest) -> Any:
+        storage = self._require_storage()
         project, canvas, pool, setting_type = self._editable_event_pool(project_id)
         event = self._find_event(pool, event_id)
         if not event:
@@ -40,6 +44,12 @@ class NovelEventPoolEditMixin:
         fallback = dict(event)
         event.update(self._event_entry_from_payload(payload, setting_type, 0, fallback=fallback, event_id=event_id))
         event["updated_at"] = datetime.now(timezone.utc).isoformat()
+        db_chapters = storage.list_novel_chapters(project_id)
+        for canvas_chapter in self._canvas_chapters(canvas):
+            if str(canvas_chapter.get("event_pool_id") or "") != event_id:
+                continue
+            chapter = next((row for row in db_chapters if int(row["chapter_order"]) == int(canvas_chapter.get("chapter_order") or 0)), None)
+            self._sync_event_contract_to_chapter(canvas, canvas_chapter, event, chapter)
         return self._save_event_pool(project["id"], canvas, pool, setting_type)
 
     def retire_event_pool_event(self, project_id: str, event_id: str) -> Any:
@@ -86,12 +96,17 @@ class NovelEventPoolEditMixin:
             canvas_chapter["event_pool_score"] = 0
             canvas_chapter["event_pool_reasons"] = []
             canvas_chapter["event_pool_penalties"] = []
+            canvas_chapter.pop("event_contract", None)
+            canvas_chapter.pop("event_sync", None)
+            scene_card = self._json_dict(chapter["scene_card_json"] if "scene_card_json" in chapter.keys() else "{}")
+            scene_card.pop("event_contract", None)
+            scene_card.pop("event_sync", None)
+            storage.update_novel_chapter(chapter_id, {"scene_card": scene_card}, "system", create_version=False)
             return self._save_event_pool(project["id"], canvas, pool, setting_type)
         event = self._find_event(pool, event_id)
         if not event:
             raise ValueError("Event not found")
-        if payload.use_mode:
-            event["use_mode"] = normalize_event_use_mode(payload.use_mode)
+        use_mode = normalize_event_use_mode(payload.use_mode or event.get("use_mode"))
         canvas_chapter["event_pool_id"] = event_id
         canvas_chapter["event_pool_score"] = int(event.get("selection_score") or 0)
         canvas_chapter["event_pool_reasons"] = event.get("selection_reasons") if isinstance(event.get("selection_reasons"), list) else []
@@ -103,7 +118,511 @@ class NovelEventPoolEditMixin:
         })
         if event.get("status") == "fresh":
             event["status"] = "planned"
+        self._sync_event_contract_to_chapter(canvas, canvas_chapter, event, chapter, use_mode=use_mode)
         return self._save_event_pool(project["id"], canvas, pool, setting_type)
+
+    async def bind_event_pool_event_to_chapter_remote(
+        self,
+        llm: Any,
+        project_id: str,
+        chapter_id: str,
+        payload: StoryEventPoolBindingRequest,
+    ) -> Any:
+        local_response = self.bind_event_pool_event_to_chapter(project_id, chapter_id, payload)
+        event_id = str(payload.event_id or "").strip()
+        if not event_id:
+            return local_response
+        try:
+            configured = bool(llm and llm.configured())
+        except Exception:
+            configured = False
+        if not configured:
+            self._mark_event_contract_remote_status(project_id, chapter_id, "skipped", "llm_not_configured")
+            return self.project_response(project_id)
+
+        storage = self._require_storage()
+        chapter = storage.get_novel_chapter(chapter_id)
+        scene_card = self._json_dict(chapter["scene_card_json"] if chapter and "scene_card_json" in chapter.keys() else "{}")
+        contract = scene_card.get("event_contract") if isinstance(scene_card.get("event_contract"), dict) else {}
+        if normalize_event_use_mode(contract.get("use_mode")) == "free":
+            self._mark_event_contract_remote_status(project_id, chapter_id, "skipped", "free_mode")
+            return self.project_response(project_id)
+
+        try:
+            remote_response = await self._remote_event_contract_sync(llm, project_id, chapter_id)
+            if remote_response:
+                return remote_response
+        except Exception as exc:
+            try:
+                llm.last_chat_error = type(exc).__name__
+            except Exception:
+                pass
+            self._mark_event_contract_remote_status(project_id, chapter_id, "failed", type(exc).__name__)
+        return self.project_response(project_id)
+
+    def _event_contract_from_event(
+        self,
+        event: dict[str, Any],
+        canvas_chapter: dict[str, Any],
+        use_mode: str | None = None,
+    ) -> dict[str, Any]:
+        tags = event.get("tags") if isinstance(event.get("tags"), dict) else {}
+        previous_contract = canvas_chapter.get("event_contract") if isinstance(canvas_chapter.get("event_contract"), dict) else {}
+        return {
+            "version": 1,
+            "event_id": str(event.get("id") or ""),
+            "use_mode": normalize_event_use_mode(use_mode or previous_contract.get("use_mode") or event.get("use_mode")),
+            "source": str(event.get("source") or ""),
+            "status": str(event.get("status") or ""),
+            "place": str(event.get("place") or ""),
+            "time_anchor": str(event.get("time_anchor") or ""),
+            "external_event": str(event.get("event") or ""),
+            "hook": str(event.get("hook") or ""),
+            "motifs": event.get("motifs") if isinstance(event.get("motifs"), list) else [],
+            "theme_markers": tags.get("theme_markers") if isinstance(tags.get("theme_markers"), list) else [],
+            "tone_markers": tags.get("tone_markers") if isinstance(tags.get("tone_markers"), list) else [],
+            "score": int(canvas_chapter.get("event_pool_score") or event.get("selection_score") or 0),
+            "reasons": canvas_chapter.get("event_pool_reasons") if isinstance(canvas_chapter.get("event_pool_reasons"), list) else [],
+            "penalties": canvas_chapter.get("event_pool_penalties") if isinstance(canvas_chapter.get("event_pool_penalties"), list) else [],
+            "source_reason": str(event.get("source_reason") or ""),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _sync_event_contract_to_chapter(
+        self,
+        canvas: dict[str, Any],
+        canvas_chapter: dict[str, Any],
+        event: dict[str, Any],
+        chapter: Any | None,
+        use_mode: str | None = None,
+    ) -> None:
+        contract = self._event_contract_from_event(event, canvas_chapter, use_mode=use_mode)
+        mode = normalize_event_use_mode(contract.get("use_mode"))
+        canvas_chapter["event_contract"] = contract
+        if mode == "free":
+            canvas_chapter["event_sync"] = {
+                "source": "local",
+                "remote_status": "skipped",
+                "event_id": contract["event_id"],
+                "mode": mode,
+                "fields": {},
+                "scene_fields": {},
+                "updated_at": contract["updated_at"],
+            }
+            if chapter:
+                scene_card = self._json_dict(chapter["scene_card_json"] if "scene_card_json" in chapter.keys() else "{}")
+                scene_card["event_contract"] = contract
+                scene_card["event_sync"] = canvas_chapter["event_sync"]
+                self._require_storage().update_novel_chapter(chapter["id"], {"scene_card": scene_card}, "system", create_version=False)
+            return
+
+        previous_sync = self._json_dict(canvas_chapter.get("event_sync"))
+        previous_fields = previous_sync.get("fields") if isinstance(previous_sync.get("fields"), dict) else {}
+        previous_scene_fields = previous_sync.get("scene_fields") if isinstance(previous_sync.get("scene_fields"), dict) else {}
+        force = mode == "strict"
+        first_guide_sync = mode == "guide" and not previous_sync
+        flavor = mode == "flavor"
+        event_text = str(contract.get("external_event") or "")
+        hook = str(contract.get("hook") or "")
+        place = str(contract.get("place") or "")
+        time_anchor = str(contract.get("time_anchor") or "")
+        motif_text = "、".join(str(item) for item in contract.get("motifs", []) if str(item).strip())
+        field_values = {
+            "external_event": event_text,
+            "trigger_event": event_text,
+            "ending_hook": hook,
+            "goal": f"{time_anchor + '，' if time_anchor else ''}{place}：{event_text}。{hook}" if (place or event_text or hook) else "",
+            "obstacle_escalation": "事件带来的时间、信息或旁观压力让角色不能立刻把话说完。",
+            "scene_consequence": hook or "事件留下一个可继续展开的选择。",
+        }
+        if flavor:
+            field_values = {
+                "ending_hook": hook,
+            }
+        written_fields: dict[str, Any] = {}
+        for key, value in field_values.items():
+            clean = str(value or "").strip()
+            if not clean:
+                continue
+            current = str(canvas_chapter.get(key) or "").strip()
+            previous = str(previous_fields.get(key) or "").strip()
+            should_write = force or first_guide_sync or not current or (previous and current == previous)
+            if flavor and key != "ending_hook":
+                should_write = False
+            if should_write:
+                canvas_chapter[key] = clean
+                written_fields[key] = clean
+        scene = self._event_contract_canvas_scene(canvas, canvas_chapter)
+        scene_values = {
+            "current_scene": f"{time_anchor + '，' if time_anchor else ''}{place}" if place or time_anchor else "",
+            "surface_event": event_text,
+            "ending_beat": hook,
+        }
+        if motif_text and mode == "flavor":
+            scene_values["surface_event"] = f"借用意象：{motif_text}"
+        written_scene_fields: dict[str, Any] = {}
+        for key, value in scene_values.items():
+            clean = str(value or "").strip()
+            if not clean:
+                continue
+            current = str(scene.get(key) or "").strip()
+            previous = str(previous_scene_fields.get(key) or "").strip()
+            should_write = force or first_guide_sync or not current or (previous and current == previous)
+            if flavor and key == "surface_event":
+                should_write = not current or (previous and current == previous)
+            if should_write:
+                scene[key] = clean
+                written_scene_fields[key] = clean
+        sync = {
+            "source": "local",
+            "remote_status": "skipped",
+            "event_id": contract["event_id"],
+            "mode": mode,
+            "fields": written_fields,
+            "scene_fields": written_scene_fields,
+            "updated_at": contract["updated_at"],
+        }
+        canvas_chapter["event_sync"] = sync
+        if chapter:
+            scene_card = self._json_dict(chapter["scene_card_json"] if "scene_card_json" in chapter.keys() else "{}")
+            scene_card["event_contract"] = contract
+            scene_card["event_sync"] = sync
+            for key, value in scene_values.items():
+                clean = str(value or "").strip()
+                if not clean:
+                    continue
+                current = str(scene_card.get(key) or "").strip()
+                previous = str(previous_scene_fields.get(key) or "").strip()
+                should_write = force or first_guide_sync or not current or (previous and current == previous)
+                if flavor and key == "surface_event":
+                    should_write = not current or (previous and current == previous)
+                if should_write:
+                    scene_card[key] = clean
+            self._require_storage().update_novel_chapter(chapter["id"], {"scene_card": scene_card}, "system", create_version=False)
+
+    async def _remote_event_contract_sync(self, llm: Any, project_id: str, chapter_id: str) -> Any:
+        storage = self._require_storage()
+        project, canvas, pool, setting_type = self._editable_event_pool(project_id)
+        chapter = storage.get_novel_chapter(chapter_id)
+        if not chapter or chapter["project_id"] != project_id:
+            raise ValueError("Novel chapter not found")
+        order = int(chapter["chapter_order"])
+        canvas_chapter = next((item for item in self._canvas_chapters(canvas) if int(item.get("chapter_order") or 0) == order), None)
+        if not canvas_chapter:
+            raise ValueError("Canvas chapter not found")
+        contract = canvas_chapter.get("event_contract") if isinstance(canvas_chapter.get("event_contract"), dict) else {}
+        if not contract:
+            return None
+        mode = normalize_event_use_mode(contract.get("use_mode"))
+        if mode == "free":
+            return None
+        scene = self._event_contract_canvas_scene(canvas, canvas_chapter)
+        scene_card = self._json_dict(chapter["scene_card_json"] if "scene_card_json" in chapter.keys() else "{}")
+        text = await llm.chat_complete(
+            [
+                {"role": "system", "content": self._event_contract_sync_system_prompt()},
+                {"role": "user", "content": self._event_contract_sync_source(project, chapter, canvas_chapter, scene, scene_card, contract)},
+            ],
+            timeout_ms=NOVEL_EVENT_BINDING_TIMEOUT_MS,
+            response_format={"type": "json_object"},
+        )
+        raw = self._load_llm_json_object(text, "event_contract_sync")
+        applied = self._apply_remote_event_sync_patch(canvas, canvas_chapter, chapter, scene, scene_card, contract, raw)
+        if not applied:
+            self._mark_event_contract_remote_status(project_id, chapter_id, "empty", "empty_remote_patch")
+            return self.project_response(project_id)
+        storage.update_novel_chapter(chapter_id, {"scene_card": scene_card}, "system", create_version=False)
+        return self._save_event_pool(project_id, canvas, pool, setting_type)
+
+    def _event_contract_sync_system_prompt(self) -> str:
+        return (
+            "You are a long-form novel planning assistant. Return only a JSON object. "
+            "Your task is to turn the selected event contract into a structured patch for the current chapter canvas and scene card. "
+            "Do not write prose正文. Do not invent a different event. Do not output scores, confidence, markdown, or explanations outside JSON. "
+            "Allowed top-level keys: canvas_chapter_patch, scene_card_patch, sync_note. "
+            "Respect use_mode: strict must preserve the event core; guide treats the event as the main direction; flavor only borrows place, motifs, atmosphere, or hook; free should return empty patches. "
+            "If scene_card conflicts with event_contract, keep what happens from event_contract and adjust only staging details. "
+            "Match the existing story canvas action-chain style: concrete, sequential, field-specific, and not summary-like. "
+            "Never copy event-pool metadata such as variant labels, source_reason, score reasons, or '变体N' into output fields."
+        )
+
+    def _event_contract_sync_source(
+        self,
+        project: Any,
+        chapter: Any,
+        canvas_chapter: dict[str, Any],
+        scene: dict[str, Any],
+        scene_card: dict[str, Any],
+        contract: dict[str, Any],
+    ) -> str:
+        project_context = {
+            "title": project["title"],
+            "genre": project["genre"],
+            "tone": project["tone"],
+            "protagonist": project["protagonist"],
+            "worldview": project["worldview"],
+            "relationship_setup": project["relationship_setup"],
+            "outline": project["outline"],
+        }
+        chapter_context = {
+            "id": chapter["id"],
+            "chapter_order": chapter["chapter_order"],
+            "title": chapter["title"],
+            "goal": chapter["goal"],
+            "summary": chapter["summary"],
+            "status": chapter["status"],
+        }
+        expected = {
+            "canvas_chapter_patch": {
+                "goal": "具体章节目标，保留事件契约方向",
+                "external_event": "本章可见外部事件",
+                "trigger_event": "触发事件",
+                "immediate_reaction": "角色当下反应",
+                "obstacle_escalation": "阻碍或信息压力",
+                "counterpart_reaction": "对方反应",
+                "character_choice": "人物选择",
+                "scene_consequence": "场景后果",
+                "ending_hook": "结尾钩子",
+            },
+            "scene_card_patch": {
+                "current_scene": "具体场景落点",
+                "surface_event": "表层可见事件",
+                "character_desire": "本场人物想要什么",
+                "tension": "可演出的阻力或误差",
+                "ending_beat": "本场最后一个动作/信息钩子",
+                "required_facts": ["必须保留的事实"],
+                "forbidden_progress": ["禁止提前推进的内容"],
+            },
+            "sync_note": "一句话说明这次如何把事件转成画布和场景卡",
+        }
+        lines = [
+            "Return JSON in this exact shape:",
+            self._json_dump(expected)[:1600],
+            "",
+            "Priority:",
+            "1. Already written chapter/body and Novel State are highest; do not contradict them.",
+            "2. event_contract decides what happens in this chapter.",
+            "3. canvas_chapter carries chapter-level action chain.",
+            "4. scene_card decides staging, desire, tension, and ending beat.",
+            "5. generation instruction will later compile these results; do not write that instruction here.",
+            "",
+            "Canvas action-chain field semantics:",
+            "- external_event: the visible outside event only; do not include pressure notes, score reasons, or variant labels.",
+            "- trigger_event: the precise moment that forces interaction; it should not simply duplicate external_event.",
+            "- immediate_reaction: the protagonist's first observable response.",
+            "- obstacle_escalation: a concrete obstacle, time pressure, witness, missing information, or physical constraint.",
+            "- counterpart_reaction: the other character's visible response, not an abstract relationship judgment.",
+            "- character_choice: the protagonist's choice in this chapter.",
+            "- scene_consequence: what changes by the end of the scene.",
+            "- ending_hook: one clean next-scene hook, with no metadata.",
+            "",
+            "Scene-card field semantics:",
+            "- current_scene: place plus time anchor when available.",
+            "- surface_event: what the camera can see happening.",
+            "- character_desire: what the protagonist wants right now.",
+            "- tension: what makes the desire hard to satisfy.",
+            "- ending_beat: the last visible beat or information hook.",
+            "",
+            "Project:",
+            self._json_dump(project_context)[:2200],
+            "",
+            "Current chapter row:",
+            self._json_dump(chapter_context)[:1200],
+            "",
+            "Selected event_contract:",
+            self._json_dump(contract)[:2200],
+            "",
+            "Current canvas_chapter:",
+            self._json_dump(canvas_chapter)[:3000],
+            "",
+            "Current first canvas_scene:",
+            self._json_dump(scene)[:2200],
+            "",
+            "Current editable scene_card:",
+            self._json_dump(scene_card)[:2600],
+            "",
+            "Rules:",
+            "- Use Chinese strings for generated field values.",
+            "- Keep the selected place/time/event/hook unless use_mode is flavor.",
+            "- Do not use 用户/助手/AI as character names.",
+            "- Rewrite event-pool candidate wording into natural chapter-planning prose; remove labels like 变体8, selection_score, source_reason, planned, fresh.",
+            "- Keep patches concise and field-oriented; no markdown.",
+            "- If a field should not change, omit it or use an empty string.",
+        ]
+        return "\n".join(lines)
+
+    def _apply_remote_event_sync_patch(
+        self,
+        canvas: dict[str, Any],
+        canvas_chapter: dict[str, Any],
+        chapter: Any,
+        scene: dict[str, Any],
+        scene_card: dict[str, Any],
+        contract: dict[str, Any],
+        raw: dict[str, Any],
+    ) -> bool:
+        mode = normalize_event_use_mode(contract.get("use_mode"))
+        previous_sync = self._json_dict(canvas_chapter.get("event_sync"))
+        previous_fields = previous_sync.get("fields") if isinstance(previous_sync.get("fields"), dict) else {}
+        previous_scene_fields = previous_sync.get("scene_fields") if isinstance(previous_sync.get("scene_fields"), dict) else {}
+        force = mode == "strict"
+        canvas_patch = self._json_dict(raw.get("canvas_chapter_patch") or raw.get("canvas_chapter") or raw.get("chapter_patch"))
+        scene_patch = self._json_dict(raw.get("scene_card_patch") or raw.get("scene_card") or raw.get("scene_patch"))
+        if mode == "flavor":
+            canvas_allowed = {"ending_hook", "scene_consequence"}
+            scene_allowed = {"current_scene", "tension", "ending_beat", "forbidden_progress"}
+        else:
+            canvas_allowed = {
+                "goal",
+                "external_event",
+                "trigger_event",
+                "immediate_reaction",
+                "obstacle_escalation",
+                "counterpart_reaction",
+                "character_choice",
+                "scene_consequence",
+                "ending_hook",
+            }
+            scene_allowed = {
+                "current_scene",
+                "surface_event",
+                "character_desire",
+                "tension",
+                "ending_beat",
+                "required_facts",
+                "forbidden_progress",
+            }
+        written_fields: dict[str, Any] = {}
+        for key in canvas_allowed:
+            clean = self._clean_remote_sync_value(canvas_patch.get(key), key)
+            if clean in ("", [], None):
+                continue
+            current = str(canvas_chapter.get(key) or "").strip()
+            previous = str(previous_fields.get(key) or "").strip()
+            should_write = force or not current or (previous and current == previous)
+            if should_write:
+                canvas_chapter[key] = clean
+                written_fields[key] = clean
+        written_scene_fields: dict[str, Any] = {}
+        for key in scene_allowed:
+            clean = self._clean_remote_sync_value(scene_patch.get(key), key)
+            if clean in ("", [], None):
+                continue
+            current = scene.get(key)
+            current_text = "" if isinstance(current, list) and not current else (self._json_dump(current) if isinstance(current, list) else str(current or "").strip())
+            previous = previous_scene_fields.get(key)
+            previous_text = "" if isinstance(previous, list) and not previous else (self._json_dump(previous) if isinstance(previous, list) else str(previous or "").strip())
+            should_write = force or not current_text or (previous_text and current_text == previous_text)
+            if should_write:
+                scene[key] = clean
+                scene_card[key] = clean
+                written_scene_fields[key] = clean
+        if not written_fields and not written_scene_fields:
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        note = str(raw.get("sync_note") or raw.get("source_note") or "").strip()[:360]
+        sync = {
+            "source": "remote",
+            "remote_status": "succeeded",
+            "event_id": str(contract.get("event_id") or ""),
+            "mode": mode,
+            "fields": written_fields,
+            "scene_fields": written_scene_fields,
+            "source_note": note,
+            "updated_at": now,
+        }
+        contract["updated_at"] = now
+        canvas_chapter["event_contract"] = contract
+        canvas_chapter["event_sync"] = sync
+        scene_card["event_contract"] = contract
+        scene_card["event_sync"] = sync
+        return True
+
+    def _clean_remote_sync_value(self, value: Any, key: str) -> Any:
+        if key in {"required_facts", "forbidden_progress"}:
+            if not isinstance(value, list):
+                return []
+            items = [self._strip_event_pool_artifacts(str(item or "").strip()) for item in value if str(item or "").strip()]
+            items = [item for item in items if item]
+            return items[:8]
+        text = self._strip_event_pool_artifacts(str(value or "").strip())
+        if not text:
+            return ""
+        limit = 900 if key in {"goal", "obstacle_escalation", "scene_consequence", "tension"} else 520
+        return text[:limit]
+
+    def _strip_event_pool_artifacts(self, text: str) -> str:
+        clean = str(text or "").strip()
+        if not clean:
+            return ""
+        clean = re.sub(r"(?:^|[。；;，,\s])变体\s*\d+\s*[：:]\s*", "，", clean)
+        clean = re.sub(r"^\s*[：:，,。；;\s]+", "", clean)
+        clean = re.sub(r"\s+", " ", clean)
+        clean = clean.replace("selection_score", "").replace("source_reason", "")
+        return clean.strip(" ，,。；;")
+
+    def _json_dump(self, value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        except Exception:
+            return str(value)
+
+    def _mark_event_contract_remote_status(self, project_id: str, chapter_id: str, status: str, reason: str) -> None:
+        storage = self._require_storage()
+        project, canvas, pool, setting_type = self._editable_event_pool(project_id)
+        chapter = storage.get_novel_chapter(chapter_id)
+        if not chapter or chapter["project_id"] != project_id:
+            return
+        order = int(chapter["chapter_order"])
+        canvas_chapter = next((item for item in self._canvas_chapters(canvas) if int(item.get("chapter_order") or 0) == order), None)
+        if not canvas_chapter:
+            return
+        sync = self._json_dict(canvas_chapter.get("event_sync"))
+        if not sync:
+            return
+        sync["remote_status"] = status
+        sync["remote_reason"] = reason
+        sync["updated_at"] = datetime.now(timezone.utc).isoformat()
+        canvas_chapter["event_sync"] = sync
+        scene_card = self._json_dict(chapter["scene_card_json"] if "scene_card_json" in chapter.keys() else "{}")
+        if isinstance(scene_card.get("event_sync"), dict):
+            scene_card["event_sync"] = {**scene_card["event_sync"], **sync}
+            storage.update_novel_chapter(chapter_id, {"scene_card": scene_card}, "system", create_version=False)
+        self._save_event_pool(project["id"], canvas, pool, setting_type)
+
+    def _event_contract_canvas_scene(self, canvas: dict[str, Any], canvas_chapter: dict[str, Any]) -> dict[str, Any]:
+        scenes = canvas.get("scenes") if isinstance(canvas.get("scenes"), list) else []
+        scene_ids = canvas_chapter.get("scene_ids") if isinstance(canvas_chapter.get("scene_ids"), list) else []
+        scene_id = str(scene_ids[0]) if scene_ids else ""
+        scene = next(
+            (
+                item for item in scenes
+                if isinstance(item, dict)
+                and (str(item.get("id") or "") == scene_id or str(item.get("chapter_id") or "") == str(canvas_chapter.get("id") or ""))
+            ),
+            None,
+        )
+        if scene is not None:
+            return scene
+        order = int(canvas_chapter.get("chapter_order") or 1)
+        scene = {
+            "id": scene_id or f"scene_{order}_1",
+            "chapter_id": str(canvas_chapter.get("id") or f"canvas_ch_{order}"),
+            "scene_order": 1,
+            "current_scene": "",
+            "pov": "",
+            "present_characters": "",
+            "surface_event": "",
+            "character_desire": "",
+            "tension": "",
+            "required_facts": [],
+            "forbidden_progress": [],
+            "ending_beat": "",
+            "linked_material_ids": [],
+        }
+        canvas.setdefault("scenes", []).append(scene)
+        canvas_chapter["scene_ids"] = [scene["id"]]
+        return scene
 
     def _editable_event_pool(self, project_id: str) -> tuple[Any, dict[str, Any], dict[str, Any], str]:
         storage = self._require_storage()

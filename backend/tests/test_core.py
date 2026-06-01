@@ -28,6 +28,13 @@ from campus_lite.storage import Storage, StoragePayloadError
 from campus_lite.story import StoryService
 
 
+class LocalOnlyLlm:
+    last_chat_error = None
+
+    def configured(self) -> bool:
+        return False
+
+
 class CampusLiteCoreTest(unittest.TestCase):
     def test_llm_router_provider_takes_priority_for_chat_and_optional_embeddings(self) -> None:
         with patch.dict(
@@ -1129,6 +1136,65 @@ class CampusLiteCoreTest(unittest.TestCase):
         self.assertEqual(selected["source"], "remote")
         self.assertEqual(selected["tags"]["boundary_risk"], "low")
 
+    def test_event_pool_delta_bulk_replaces_setting_profile_but_keeps_bound_events(self) -> None:
+        raw = normalize_story_event_pool({}, "modern_daily")
+        raw["active"][0]["bound_chapter_orders"] = ["1"]
+        raw["active"][0]["status"] = "planned"
+        bound_id = raw["active"][0]["id"]
+        updated = apply_story_event_pool_delta(
+            raw,
+            {
+                "add": [
+                    {
+                        "id": f"evt_remote_bulk_{index}",
+                        "place": f"湖边新地点 {index}",
+                        "time_anchor": f"周六 19:{index}0，路灯亮起前",
+                        "event": f"新的滚动事件 {index} 让两人必须重新选择路线",
+                        "hook": f"新的钩子 {index} 留下一句未问完的话",
+                        "tags": {
+                            "theme_markers": ["湖边", "夜景", "民谣"],
+                            "tone_markers": ["克制"],
+                            "boundary_risk": "low",
+                        },
+                        "source_reason": "滚动画布后替换题材兜底",
+                    }
+                    for index in range(4)
+                ]
+            },
+            "modern_daily",
+        )
+        sources = [item["source"] for item in updated["active"]]
+        ids = [item["id"] for item in updated["active"]]
+
+        self.assertEqual(len(updated["active"]), 10)
+        self.assertIn(bound_id, ids)
+        self.assertGreaterEqual(sources.count("remote"), 4)
+        self.assertLess(sources.count("setting_profile"), 10)
+
+    def test_event_pool_delta_does_not_reintroduce_retired_duplicate(self) -> None:
+        raw = normalize_story_event_pool({}, "modern_daily")
+        retired = dict(raw["active"][0])
+        retired["id"] = "evt_retired_duplicate"
+        retired["status"] = "retired"
+        raw["retired"] = [retired]
+        updated = apply_story_event_pool_delta(
+            raw,
+            {
+                "add": [
+                    {
+                        "id": "evt_remote_duplicate",
+                        "place": retired["place"],
+                        "event": retired["event"],
+                        "hook": retired["hook"],
+                        "source_reason": "should not return",
+                    }
+                ]
+            },
+            "modern_daily",
+        )
+
+        self.assertFalse(any(item["id"] == "evt_remote_duplicate" for item in updated["active"]))
+
     def test_event_pool_delta_preserves_time_and_theme_tags(self) -> None:
         raw = normalize_story_event_pool({}, "modern_daily")
         updated = apply_story_event_pool_delta(
@@ -1164,7 +1230,7 @@ class CampusLiteCoreTest(unittest.TestCase):
     def test_event_pool_edit_and_binding_api(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             storage = Storage(Path(tmp) / "test.db")
-            app = create_app(storage=storage, characters=CharacterStore())
+            app = create_app(storage=storage, characters=CharacterStore(), llm=LocalOnlyLlm())
             client = TestClient(app)
             session = client.post("/api/sessions", json={"visitor_id": "event-api", "character_id": "lin_wanzhi"})
             self.assertEqual(session.status_code, 200)
@@ -1216,9 +1282,39 @@ class CampusLiteCoreTest(unittest.TestCase):
                 json={"event_id": event["id"], "use_mode": "strict"},
             )
             self.assertEqual(bound.status_code, 200)
-            self.assertEqual(bound.json()["story_canvas"]["chapters"][0]["event_pool_id"], event["id"])
-            bound_event = next(item for item in bound.json()["story_canvas"]["event_pool"]["active"] if item["id"] == event["id"])
-            self.assertEqual(bound_event["use_mode"], "strict")
+            bound_payload = bound.json()
+            bound_chapter = bound_payload["story_canvas"]["chapters"][0]
+            self.assertEqual(bound_chapter["event_pool_id"], event["id"])
+            self.assertEqual(bound_chapter["event_contract"]["event_id"], event["id"])
+            self.assertEqual(bound_chapter["event_contract"]["external_event"], "manual pier revision forces one choice")
+            self.assertEqual(bound_chapter["external_event"], "manual pier revision forces one choice")
+            self.assertEqual(bound_chapter["trigger_event"], "manual pier revision forces one choice")
+            self.assertEqual(bound_chapter["ending_hook"], "the revised hook remains")
+            self.assertEqual(bound_payload["chapters"][0]["scene_card"]["event_contract"]["event_id"], event["id"])
+            self.assertEqual(bound_payload["chapters"][0]["scene_card"]["surface_event"], "manual pier revision forces one choice")
+            bound_event = next(item for item in bound_payload["story_canvas"]["event_pool"]["active"] if item["id"] == event["id"])
+            self.assertEqual(bound_chapter["event_contract"]["use_mode"], "strict")
+            self.assertEqual(bound_event["use_mode"], "flavor")
+
+            repatched = client.patch(
+                f"/api/novel/projects/{project_id}/event-pool/events/{event['id']}",
+                json={
+                    "place": "manual pier final",
+                    "time_anchor": "Saturday 19:05",
+                    "event": "manual pier final update changes the route",
+                    "hook": "the final route stays unanswered",
+                    "motifs": ["final route"],
+                    "use_mode": "strict",
+                    "source_reason": "manual repatch",
+                    "tags": {"theme_markers": ["pier"], "tone_markers": ["quiet"]},
+                },
+            )
+            self.assertEqual(repatched.status_code, 200)
+            repatched_payload = repatched.json()
+            repatched_chapter = repatched_payload["story_canvas"]["chapters"][0]
+            self.assertEqual(repatched_chapter["event_contract"]["external_event"], "manual pier final update changes the route")
+            self.assertEqual(repatched_chapter["external_event"], "manual pier final update changes the route")
+            self.assertEqual(repatched_payload["chapters"][0]["scene_card"]["surface_event"], "manual pier final update changes the route")
 
             blocked_delete = client.delete(f"/api/novel/projects/{project_id}/event-pool/events/{event['id']}")
             self.assertEqual(blocked_delete.status_code, 400)
@@ -1228,9 +1324,157 @@ class CampusLiteCoreTest(unittest.TestCase):
                 json={"event_id": None},
             )
             self.assertEqual(cleared.status_code, 200)
+            cleared_payload = cleared.json()
+            self.assertEqual(cleared_payload["story_canvas"]["chapters"][0].get("event_pool_id", ""), "")
+            self.assertNotIn("event_contract", cleared_payload["story_canvas"]["chapters"][0])
+            self.assertNotIn("event_contract", cleared_payload["chapters"][0]["scene_card"])
             retired = client.post(f"/api/novel/projects/{project_id}/event-pool/events/{event['id']}/retire")
             self.assertEqual(retired.status_code, 200)
             self.assertTrue(any(item["id"] == event["id"] for item in retired.json()["story_canvas"]["event_pool"]["retired"]))
+
+    def test_guide_event_binding_first_syncs_then_preserves_manual_scene_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            app = create_app(storage=storage, characters=CharacterStore(), llm=LocalOnlyLlm())
+            client = TestClient(app)
+            session = client.post("/api/sessions", json={"visitor_id": "guide-sync", "character_id": "lin_wanzhi"})
+            self.assertEqual(session.status_code, 200)
+            project_response = client.post(
+                f"/api/sessions/{session.json()['session_id']}/novel/projects",
+                json={"title": "Guide Sync", "genre": "modern_daily", "tone": "quiet"},
+            )
+            self.assertEqual(project_response.status_code, 200)
+            project_id = project_response.json()["id"]
+            chapter_id = project_response.json()["chapters"][0]["id"]
+
+            created = client.post(
+                f"/api/novel/projects/{project_id}/event-pool/events",
+                json={
+                    "place": "old pier",
+                    "time_anchor": "Saturday 19:15",
+                    "event": "guide event one changes the chapter direction",
+                    "hook": "guide hook one remains",
+                    "motifs": ["pier"],
+                    "use_mode": "guide",
+                    "source_reason": "guide sync test",
+                    "tags": {"theme_markers": ["pier"], "tone_markers": ["quiet"]},
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            event = next(item for item in created.json()["story_canvas"]["event_pool"]["active"] if item["place"] == "old pier")
+
+            bound = client.post(
+                f"/api/novel/projects/{project_id}/chapters/{chapter_id}/event-pool-binding",
+                json={"event_id": event["id"], "use_mode": "guide"},
+            )
+            self.assertEqual(bound.status_code, 200)
+            bound_payload = bound.json()
+            self.assertEqual(bound_payload["story_canvas"]["chapters"][0]["event_contract"]["use_mode"], "guide")
+            self.assertEqual(bound_payload["story_canvas"]["chapters"][0]["external_event"], "guide event one changes the chapter direction")
+            self.assertEqual(bound_payload["chapters"][0]["scene_card"]["surface_event"], "guide event one changes the chapter direction")
+
+            storage.update_novel_chapter(
+                chapter_id,
+                {"scene_card": {**bound_payload["chapters"][0]["scene_card"], "surface_event": "manual scene event"}},
+                "manual",
+                create_version=False,
+            )
+            patched = client.patch(
+                f"/api/novel/projects/{project_id}/event-pool/events/{event['id']}",
+                json={
+                    "place": "old pier changed",
+                    "time_anchor": "Saturday 19:40",
+                    "event": "guide event two should not overwrite manual scene",
+                    "hook": "guide hook two remains",
+                    "motifs": ["pier changed"],
+                    "use_mode": "guide",
+                    "source_reason": "guide sync patch",
+                    "tags": {"theme_markers": ["pier"], "tone_markers": ["quiet"]},
+                },
+            )
+            self.assertEqual(patched.status_code, 200)
+            patched_payload = patched.json()
+            self.assertEqual(patched_payload["story_canvas"]["chapters"][0]["external_event"], "guide event two should not overwrite manual scene")
+            self.assertEqual(patched_payload["chapters"][0]["scene_card"]["surface_event"], "manual scene event")
+
+    def test_event_binding_uses_remote_structured_sync_when_configured(self) -> None:
+        class RemoteSyncLlm:
+            last_chat_error = None
+
+            def __init__(self) -> None:
+                self.messages = []
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                self.messages = messages
+                self.timeout_ms = timeout_ms
+                self.response_format = response_format
+                return json.dumps({
+                    "canvas_chapter_patch": {
+                        "external_event": "变体8：remote refined pier event",
+                        "trigger_event": "remote trigger from the selected contract",
+                        "ending_hook": "变体9：remote hook closes the scene",
+                    },
+                    "scene_card_patch": {
+                        "current_scene": "remote pier at dusk",
+                        "surface_event": "变体3：remote visible event",
+                        "ending_beat": "remote final beat",
+                        "required_facts": ["keep selected event"],
+                    },
+                    "sync_note": "remote structured sync applied",
+                })
+
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            llm = RemoteSyncLlm()
+            app = create_app(storage=storage, characters=CharacterStore(), llm=llm)
+            client = TestClient(app)
+            session = client.post("/api/sessions", json={"visitor_id": "remote-bind", "character_id": "lin_wanzhi"})
+            self.assertEqual(session.status_code, 200)
+            project_response = client.post(
+                f"/api/sessions/{session.json()['session_id']}/novel/projects",
+                json={"title": "Remote Binding", "genre": "modern_daily", "tone": "quiet"},
+            )
+            self.assertEqual(project_response.status_code, 200)
+            project_id = project_response.json()["id"]
+            chapter_id = project_response.json()["chapters"][0]["id"]
+
+            created = client.post(
+                f"/api/novel/projects/{project_id}/event-pool/events",
+                json={
+                    "place": "remote pier",
+                    "time_anchor": "Saturday 20:10",
+                    "event": "local event should be refined remotely",
+                    "hook": "local hook",
+                    "motifs": ["pier"],
+                    "use_mode": "guide",
+                    "source_reason": "remote sync test",
+                    "tags": {"theme_markers": ["pier"], "tone_markers": ["quiet"]},
+                },
+            )
+            self.assertEqual(created.status_code, 200)
+            event = next(item for item in created.json()["story_canvas"]["event_pool"]["active"] if item["place"] == "remote pier")
+
+            bound = client.post(
+                f"/api/novel/projects/{project_id}/chapters/{chapter_id}/event-pool-binding",
+                json={"event_id": event["id"], "use_mode": "guide"},
+            )
+            self.assertEqual(bound.status_code, 200)
+            payload = bound.json()
+            chapter = payload["story_canvas"]["chapters"][0]
+            scene_card = payload["chapters"][0]["scene_card"]
+            self.assertEqual(chapter["external_event"], "remote refined pier event")
+            self.assertEqual(chapter["trigger_event"], "remote trigger from the selected contract")
+            self.assertEqual(chapter["ending_hook"], "remote hook closes the scene")
+            self.assertEqual(scene_card["surface_event"], "remote visible event")
+            self.assertEqual(scene_card["required_facts"], ["keep selected event"])
+            self.assertEqual(chapter["event_sync"]["source"], "remote")
+            self.assertEqual(chapter["event_sync"]["remote_status"], "succeeded")
+            self.assertEqual(chapter["event_sync"]["source_note"], "remote structured sync applied")
+            self.assertIn("event_contract", llm.messages[1]["content"])
+            self.assertEqual(llm.response_format, {"type": "json_object"})
 
     def test_story_event_score_prefers_theme_and_time_anchor(self) -> None:
         chapter = {
@@ -1294,6 +1538,52 @@ class CampusLiteCoreTest(unittest.TestCase):
         self.assertGreater(themed_score["score"], old_score["score"])
         self.assertIn("命中主题", themed_score["reasons"][0])
         self.assertTrue(any("具体时间" in reason for reason in themed_score["reasons"]))
+
+    def test_story_event_score_prefers_remote_candidate_over_setting_profile(self) -> None:
+        chapter = {
+            "chapter_order": 2,
+            "status": "planned",
+            "goal": "湖边夜景和民谣声让两人重新选择路线。",
+            "external_event": "湖边夜景路线变化",
+            "ending_hook": "未问完的问题留下来",
+        }
+        context = {
+            "project": {
+                "title": "湖边民谣",
+                "genre": "现代日常长篇",
+                "tone": "温柔克制",
+                "worldview": "湖边夜景、民谣、雨后路线",
+                "relationship_setup": "慢慢熟悉",
+            },
+            "story_bible": {"confirmed_facts": ["用户喜欢民谣"]},
+            "materials": [],
+            "novel_state": {"open_threads": ["未问完的问题"]},
+        }
+        setting_event = {
+            "id": "evt_setting",
+            "place": "湖边步道",
+            "event": "湖边夜景路线变化",
+            "hook": "未问完的问题留下来",
+            "source": "setting_profile",
+            "tags": {"boundary_risk": "low"},
+        }
+        remote_event = {
+            **setting_event,
+            "id": "evt_remote",
+            "source": "remote",
+            "time_anchor": "周六 19:20，湖边路灯刚亮起",
+            "source_reason": "滚动新增，承接湖边民谣和未问完的问题",
+            "tags": {
+                "theme_markers": ["湖边", "民谣", "夜景"],
+                "tone_markers": ["温柔", "克制"],
+                "boundary_risk": "low",
+            },
+        }
+
+        self.assertGreater(
+            score_story_event(remote_event, chapter, context, "modern_daily")["score"],
+            score_story_event(setting_event, chapter, context, "modern_daily")["score"],
+        )
 
     def test_character_seed_flavor_cannot_outscore_project_continuity(self) -> None:
         chapter = {
@@ -3117,13 +3407,13 @@ class CampusLiteCoreTest(unittest.TestCase):
             last_chat_error = None
 
             def __init__(self) -> None:
-                self.user_source = ""
+                self.user_sources = []
 
             def configured(self) -> bool:
                 return True
 
             async def chat_complete(self, messages, timeout_ms=None, response_format=None):
-                self.user_source = messages[1]["content"]
+                self.user_sources.append(messages[1]["content"])
                 return json.dumps({
                     "version": 1,
                     "mode": "story_canvas",
@@ -3191,11 +3481,118 @@ class CampusLiteCoreTest(unittest.TestCase):
             llm = CanvasLlm()
             rebuilt = self.run_async(service.build_canvas(llm, project.id))
             combined = json.dumps(rebuilt.story_canvas.get("event_pool", {}), ensure_ascii=False)
+            combined_sources = "\n".join(llm.user_sources)
 
-            self.assertNotIn("DO_NOT_KEEP_OLD_POOL", llm.user_source)
+            self.assertNotIn("DO_NOT_KEEP_OLD_POOL", combined_sources)
             self.assertNotIn("evt_old_prompt_leak", combined)
             self.assertNotIn("DO_NOT_KEEP_OLD_POOL", combined)
             self.assertTrue(rebuilt.story_canvas["diagnostics"]["event_pool_reset"])
+
+    def test_novel_build_canvas_initial_event_pool_uses_remote_delta(self) -> None:
+        class CanvasLlm:
+            last_chat_error = None
+            calls = 0
+
+            def configured(self) -> bool:
+                return True
+
+            async def chat_complete(self, messages, timeout_ms=None, response_format=None):
+                self.calls += 1
+                if str(messages[0]["content"]).startswith("You maintain a long-form novel project event pool"):
+                    return json.dumps({
+                        "event_pool_delta": {
+                            "add": [
+                                {
+                                    "place": f"remote place {index}",
+                                    "time_anchor": f"Saturday 18:{index}0, before the lamps change",
+                                    "event": f"A project-specific remote incident {index} forces a visible choice.",
+                                    "hook": f"Remote hook {index} leaves one concrete question.",
+                                    "motifs": [f"remote motif {index}"],
+                                    "source_reason": "initial remote event pool",
+                                    "tags": {
+                                        "event_type": ["choice"],
+                                        "anchors": ["project"],
+                                        "theme_markers": ["remote", "opening"],
+                                        "tone_markers": ["restrained"],
+                                        "relationship_motion": ["bounded cooperation"],
+                                        "boundary_risk": "low",
+                                        "freshness": ["new"],
+                                        "continuity": ["opening"],
+                                        "forbidden_defaults": [],
+                                    },
+                                }
+                                for index in range(1, 7)
+                            ],
+                            "update": [],
+                            "retire": [],
+                        }
+                    }, ensure_ascii=False)
+                return json.dumps({
+                    "version": 1,
+                    "mode": "story_canvas",
+                    "acts": [{"id": "act_1", "order": 1, "title": "Fresh act", "purpose": "Fresh start", "chapter_ids": ["canvas_ch_1"]}],
+                    "chapters": [
+                        {
+                            "id": "canvas_ch_1",
+                            "act_id": "act_1",
+                            "chapter_order": 1,
+                            "title": "Chapter 1 Fresh Start",
+                            "goal": "A remote opening incident forces the protagonist to make a visible choice.",
+                            "external_event": "A project-specific remote incident 1 forces a visible choice.",
+                            "trigger_event": "A project-specific remote incident 1 forces a visible choice.",
+                            "immediate_reaction": "The protagonist handles the pressure first.",
+                            "obstacle_escalation": "The time window narrows before anyone can explain.",
+                            "counterpart_reaction": "The counterpart responds without taking over.",
+                            "character_choice": "The protagonist keeps one question for later.",
+                            "scene_consequence": "The scene leaves a shared reference.",
+                            "relationship_shift": "They gain a bounded shared context.",
+                            "ending_hook": "Remote hook 1 leaves one concrete question.",
+                            "target_length": 1800,
+                            "status": "planned",
+                            "emotion_curve": "calm -> pressure -> held",
+                            "scene_ids": ["scene_1"],
+                        }
+                    ],
+                    "scenes": [
+                        {
+                            "id": "scene_1",
+                            "chapter_id": "canvas_ch_1",
+                            "scene_order": 1,
+                            "current_scene": "remote place 1",
+                            "pov": "third person limited",
+                            "present_characters": "protagonist, counterpart",
+                            "surface_event": "A project-specific remote incident 1 forces a visible choice.",
+                            "character_desire": "Handle the event without overexplaining.",
+                            "tension": "The time window narrows before anyone can explain.",
+                            "required_facts": [],
+                            "forbidden_progress": [],
+                            "ending_beat": "Remote hook 1 leaves one concrete question.",
+                            "linked_material_ids": [],
+                        }
+                    ],
+                    "threads": [],
+                    "quality_rules": [],
+                    "diagnostics": {"source": "remote"},
+                }, ensure_ascii=False)
+
+        card = CharacterStore().get("lin_wanzhi")
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            visitor_id, _ = storage.resolve_visitor("tester")
+            session_id = storage.create_or_get_session(visitor_id, card.id)
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
+
+            llm = CanvasLlm()
+            rebuilt = self.run_async(service.build_canvas(llm, project.id))
+            active = rebuilt.story_canvas.get("event_pool", {}).get("active", [])
+            remote_events = [item for item in active if item.get("source") == "remote"]
+
+            self.assertEqual(llm.calls, 2)
+            self.assertEqual(len(active), 10)
+            self.assertGreaterEqual(len(remote_events), 6)
+            self.assertEqual(rebuilt.story_canvas["diagnostics"]["event_pool_update_source"], "remote")
+            self.assertTrue(rebuilt.story_canvas["diagnostics"]["parallel_event_pool_update"])
 
     def test_novel_build_canvas_uses_remote_when_configured(self) -> None:
         class CanvasLlm:
@@ -3279,9 +3676,8 @@ class CampusLiteCoreTest(unittest.TestCase):
             )
             llm = CanvasLlm()
             rebuilt = self.run_async(service.build_canvas(llm, project.id))
-            self.assertEqual(llm.calls, 1)
-            self.assertIsNotNone(llm.timeouts[0])
-            self.assertGreaterEqual(llm.timeouts[0], 120000)
+            self.assertEqual(llm.calls, 2)
+            self.assertTrue(all(timeout is not None and timeout >= 120000 for timeout in llm.timeouts))
             self.assertEqual(llm.response_format, {"type": "json_object"})
             self.assertEqual(rebuilt.story_canvas["diagnostics"]["source"], "remote")
             self.assertEqual(rebuilt.story_canvas["diagnostics"]["mode"], "initial_rolling")
@@ -4480,7 +4876,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             original = storage.get_novel_project(project.id)
             assert original is not None
             with self.assertRaises(StoragePayloadError):
-                storage.update_novel_project(project.id, {"story_canvas": {"chapters": [{"title": "长" * 21000}]}})
+                storage.update_novel_project(project.id, {"story_canvas": {"chapters": [{"title": "长" * 37000}]}})
             unchanged = storage.get_novel_project(project.id)
             assert unchanged is not None
             self.assertEqual(unchanged["story_canvas_json"], original["story_canvas_json"])
@@ -4552,7 +4948,7 @@ class CampusLiteCoreTest(unittest.TestCase):
                 storage.update_novel_chapter_draft(
                     project.id,
                     chapter_id,
-                    {"story_canvas": {"chapters": [{"title": "长" * 21000}]}},
+                    {"story_canvas": {"chapters": [{"title": "长" * 37000}]}},
                     {"body": "不应写入。", "summary": "不应写入。"},
                 )
             chapter = storage.get_novel_chapter(chapter_id)

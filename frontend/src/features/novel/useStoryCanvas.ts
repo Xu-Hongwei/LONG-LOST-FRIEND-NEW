@@ -152,9 +152,29 @@ export function useStoryCanvas(
     if (!chapter || !pool) return null;
     const events = [...(pool.active || []), ...(pool.retired || [])];
     const eventId = String(chapter.event_pool_id || "");
+    const contract = chapter.event_contract && typeof chapter.event_contract === "object"
+      ? chapter.event_contract as Record<string, unknown>
+      : {};
+    const contractId = String(contract.event_id || "");
+    const mergeContract = (event: StoryCanvasEvent): StoryCanvasEvent => ({
+      ...event,
+      place: String(contract.place || event.place || ""),
+      time_anchor: String(contract.time_anchor || event.time_anchor || ""),
+      event: String(contract.external_event || event.event || ""),
+      hook: String(contract.hook || event.hook || ""),
+      motifs: Array.isArray(contract.motifs) ? contract.motifs.map(String).filter(Boolean) : event.motifs,
+      use_mode: String(contract.use_mode || event.use_mode || "guide"),
+      selection_score: Number(contract.score || event.selection_score || chapter.event_pool_score || 0),
+      selection_reasons: Array.isArray(contract.reasons) ? contract.reasons.map(String).filter(Boolean) : event.selection_reasons,
+      selection_penalties: Array.isArray(contract.penalties) ? contract.penalties.map(String).filter(Boolean) : event.selection_penalties
+    });
     if (eventId) {
       const byId = events.find((item) => item.id === eventId);
-      if (byId) return byId;
+      if (byId) return mergeContract(byId);
+    }
+    if (contractId) {
+      const byContract = events.find((item) => item.id === contractId);
+      if (byContract) return mergeContract(byContract);
     }
     return events.find((item) => (item.bound_chapter_orders || []).map(String).includes(String(chapter.chapter_order))) || null;
   });

@@ -14,6 +14,18 @@ defineProps<{
 defineEmits<{
   selectChapter: [chapter: StoryCanvasChapter];
 }>();
+
+function eventContractText(chapter: StoryCanvasChapter) {
+  const contract = chapter.event_contract && typeof chapter.event_contract === "object"
+    ? chapter.event_contract as Record<string, unknown>
+    : null;
+  if (!contract) return "";
+  return [
+    String(contract.time_anchor || "").trim(),
+    String(contract.place || "").trim(),
+    String(contract.external_event || "").trim()
+  ].filter(Boolean).join(" · ");
+}
 </script>
 
 <template>
@@ -33,6 +45,10 @@ defineEmits<{
         <article>
           <span>剧情概述</span>
           <p>{{ canvasFieldText(chapter.goal) }}</p>
+        </article>
+        <article v-if="eventContractText(chapter)">
+          <span>事件契约</span>
+          <p>{{ eventContractText(chapter) }}</p>
         </article>
         <article v-for="field in canvasActionChainFields" :key="field.key">
           <span>{{ field.label }}</span>

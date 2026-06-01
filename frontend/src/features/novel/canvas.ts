@@ -112,6 +112,12 @@ export function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
         event_pool_score: Number(chapter.event_pool_score || 0),
         event_pool_reasons: stringArray(chapter.event_pool_reasons),
         event_pool_penalties: stringArray(chapter.event_pool_penalties),
+        event_contract: chapter.event_contract && typeof chapter.event_contract === "object"
+          ? chapter.event_contract as Record<string, unknown>
+          : undefined,
+        event_sync: chapter.event_sync && typeof chapter.event_sync === "object"
+          ? chapter.event_sync as Record<string, unknown>
+          : undefined,
         completed_summary: String(chapter.completed_summary || ""),
         actual_word_count: Number(chapter.actual_word_count || 0),
         completed_at: String(chapter.completed_at || "")
@@ -165,10 +171,18 @@ export function normalizeSceneCardDraft(sceneCard: Record<string, unknown> | nul
 
 export function derivedSceneCardFromCanvasChapter(chapter: StoryCanvasChapter | null | undefined): ChapterSceneCardDraft {
   if (!chapter) return {};
+  const contract = chapter.event_contract && typeof chapter.event_contract === "object"
+    ? chapter.event_contract as Record<string, unknown>
+    : null;
+  const contractPlace = String(contract?.place || "").trim();
+  const contractTime = String(contract?.time_anchor || "").trim();
+  const contractEvent = String(contract?.external_event || "").trim();
+  const contractHook = String(contract?.hook || "").trim();
   return {
-    surface_event: chapter.trigger_event || chapter.external_event || chapter.goal || "",
+    current_scene: [contractTime, contractPlace].filter(Boolean).join("，"),
+    surface_event: contractEvent || chapter.trigger_event || chapter.external_event || chapter.goal || "",
     tension: chapter.obstacle_escalation || "",
-    ending_beat: chapter.ending_hook || ""
+    ending_beat: contractHook || chapter.ending_hook || ""
   };
 }
 
@@ -244,7 +258,9 @@ export function storyCanvasWithChapterDraft(
       target_length: options.targetLength,
       status: draft.status,
       emotion_curve: "",
-      scene_ids: []
+      scene_ids: [],
+      event_contract: undefined,
+      event_sync: undefined
     };
     nextCanvas.chapters.push(canvasChapter);
   }

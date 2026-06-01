@@ -1,6 +1,6 @@
 # Relationship 前端域
 
-关系域承接聊天之后需要长期维护和解释的上下文。
+关系域承接聊天之后需要长期维护和解释的上下文：memory、state、bond、postprocess diagnostics 和恋爱人格测试。
 
 ## 文件
 
@@ -20,12 +20,13 @@
 - Bond Detail 可展示 trust、closeness、boundary safety 三个长期维度，但主视图不把它们包装成单一好感度。
 - postprocess diagnostics 可以说明 memory/state/bond 哪个阶段成功或失败；memory wait 当前只补 pane 和 Prompt Stack，不补拉 state/bond。
 
+## Diagnostics
+
+- Analysis panel 显示 postprocess stage status、bond event counts 和 reducer state changes。
+- 关系事件 payload 保持在后端 diagnostics 和 `relationship_events` 存储中；前端只展示结构化计数、状态和可读摘要，避免把事件 JSON 当成本地 UI 事件流。
+
 ## 不放这里
 
 - 角色消息收发和 session 生命周期，归 `chat/`。
-- Story Pane、小说项目、章节生成和版本，归 `novel/`。
-
-## Diagnostics detail
-
-- The Analysis panel keeps postprocess stage status, bond event counts, and reducer state changes visible.
-- Relationship event payloads stay in structured backend diagnostics and storage rather than being expanded in the local panel.
+- 角色创建、AI 扩写和角色模板，归 `characters/`。
+- Story Pane、小说项目、章节生成、项目事件池和版本，归 `novel/`。

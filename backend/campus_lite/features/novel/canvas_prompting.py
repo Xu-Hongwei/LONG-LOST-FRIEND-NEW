@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .event_pool import story_event_pool_prompt
+from .event_pool import event_pool_source_counts, story_event_pool_prompt
 from .setting_profiles import character_story_seed_pool, infer_novel_setting_type, novel_setting_guidance, project_story_seed_pool
 
 
@@ -157,6 +157,17 @@ class NovelCanvasPromptMixin:
         materials = self._require_storage().list_novel_materials(str(project["id"]))[:12]
         material_lines = "\n".join(self._canvas_material_line(row) for row in materials) or "None"
         active_pool = story_event_pool_prompt(current_canvas.get("event_pool")) if isinstance(current_canvas.get("event_pool"), dict) else "None"
+        source_counts = event_pool_source_counts(current_canvas.get("event_pool")) if isinstance(current_canvas.get("event_pool"), dict) else {}
+        active_count = sum(source_counts.values())
+        setting_count = int(source_counts.get("setting_profile") or 0)
+        setting_ratio = (setting_count / active_count) if active_count else 0
+        source_stats = json.dumps({
+            "active_count": active_count,
+            "source_counts": source_counts,
+            "setting_profile_ratio": round(setting_ratio, 2),
+            "requires_remote_add": setting_ratio > 0.3,
+            "recommended_add_count": "3-5" if setting_ratio > 0.3 else "0-3",
+        }, ensure_ascii=False)
         character_seed_lines = self._event_pool_character_seed_prompt(project)
         recent_chapters = "\n".join(
             f"- chapter {row['chapter_order']}: {self._clean_material_text(row['summary'] or row['goal'])}"
@@ -177,6 +188,8 @@ class NovelCanvasPromptMixin:
             self._novel_state_prompt(novel_state),
             "[Current Active Event Pool]",
             active_pool,
+            "[Event Pool Source Stats]",
+            source_stats,
             "[Character Story Seed Pool - translatable flavor only]",
             character_seed_lines,
             "[Materials]",
@@ -190,6 +203,8 @@ class NovelCanvasPromptMixin:
             "Prefer events that can carry action, obstacle, choice, and ending hook. "
             "Each add/update must include a concrete time_anchor and tags.theme_markers/tone_markers derived from Project genre/tone/worldview/relationship_setup. "
             "Do not add generic reusable incidents; make the time, place, object, and pressure specific to this project. "
+            "If source stats show setting_profile_ratio > 0.3, return 3 to 5 add candidates to replace generic fallback placeholders. "
+            "Remote add candidates should be preferred over keeping setting_profile placeholders when they are grounded in Novel State, handoff, genre, tone, worldview, or relationship_setup. "
             "Use written chapters, Novel State, and handoff as hard continuity; use Story Bible as hard constraints; use Materials as light familiar anchors; use character story_seed_pool only to create translated variants when the active pool is thin, stale, duplicated, or off-theme. "
             "Never copy character default places/events directly when they conflict with the project setting. "
             "If existing active events are still useful, do not update them. Add only genuinely useful fresh candidates. "

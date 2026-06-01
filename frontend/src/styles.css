@@ -1716,6 +1716,237 @@ textarea::placeholder {
   font-weight: 800;
 }
 
+.story-event-pool-actions > small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.story-event-editor {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(233, 196, 106, 0.18);
+  border-radius: 8px;
+  background: rgba(10, 12, 10, 0.28);
+}
+
+.story-event-editor-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.story-event-editor-head strong {
+  display: block;
+  margin-top: 2px;
+  color: rgba(244, 241, 232, 0.94);
+  font-size: 1rem;
+}
+
+.story-event-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.story-event-editor-grid label {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  color: rgba(244, 241, 232, 0.7);
+  font-size: 0.78rem;
+}
+
+.story-event-editor-grid label.story-event-source-field {
+  grid-column: 1 / -1;
+  width: auto;
+  height: auto;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  color: rgba(244, 241, 232, 0.7);
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.story-event-editor-grid input,
+.story-event-editor-grid select,
+.story-event-editor-grid textarea {
+  min-width: 0;
+  width: 100%;
+}
+
+.story-event-editor-grid input,
+.story-event-editor-grid select {
+  height: 38px;
+}
+
+.story-event-editor-grid textarea {
+  min-height: 92px;
+}
+
+.story-event-editor-actions {
+  display: flex;
+  justify-content: end;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.story-event-bind-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(233, 196, 106, 0.22);
+  border-radius: 8px;
+  background: rgba(233, 196, 106, 0.055);
+}
+
+.story-event-bind-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.story-event-bind-head strong {
+  display: block;
+  margin-top: 2px;
+  color: rgba(244, 241, 232, 0.94);
+  font-size: 1rem;
+}
+
+.story-event-bind-summary {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(10, 12, 10, 0.3);
+}
+
+.story-event-bind-summary span {
+  color: rgba(233, 196, 106, 0.82);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.story-event-bind-summary strong {
+  color: rgba(244, 241, 232, 0.92);
+  font-size: 0.92rem;
+}
+
+.story-event-bind-summary p,
+.story-event-bind-summary em {
+  margin: 0;
+  color: rgba(244, 241, 232, 0.68);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.story-event-bind-summary em {
+  color: rgba(233, 196, 106, 0.76);
+  font-style: normal;
+}
+
+.story-event-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.story-event-mode-grid label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 8px;
+  align-items: start;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.story-event-mode-grid label.active {
+  border-color: rgba(233, 196, 106, 0.55);
+  background: rgba(233, 196, 106, 0.12);
+}
+
+.story-event-mode-grid input {
+  margin-top: 2px;
+}
+
+.story-event-mode-grid strong {
+  color: rgba(244, 241, 232, 0.92);
+  font-size: 0.84rem;
+}
+
+.story-event-mode-grid span {
+  grid-column: 2;
+  color: rgba(244, 241, 232, 0.58);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.story-event-bind-progress {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.story-event-bind-progress li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  color: rgba(244, 241, 232, 0.54);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.story-event-bind-progress i {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  color: rgba(244, 241, 232, 0.62);
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.story-event-bind-progress span {
+  min-width: 0;
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.story-event-bind-progress li.active {
+  color: rgba(244, 241, 232, 0.9);
+  background: rgba(233, 196, 106, 0.1);
+}
+
+.story-event-bind-progress li.done i,
+.story-event-bind-progress li.active i {
+  color: #161912;
+  background: #e9c46a;
+}
+
 .story-event-pool-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1882,6 +2113,71 @@ textarea::placeholder {
   font-size: 0.84rem;
   line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+.chapter-event-sync-detail {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 8px;
+  background: rgba(10, 12, 10, 0.3);
+}
+
+.chapter-event-sync-detail > div:first-child strong {
+  display: block;
+  margin-top: 2px;
+  color: rgba(244, 241, 232, 0.92);
+  font-size: 0.94rem;
+}
+
+.chapter-event-sync-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chapter-event-sync-meta span {
+  max-width: 100%;
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: rgba(244, 241, 232, 0.58);
+  background: rgba(255, 255, 255, 0.055);
+  font-size: 0.68rem;
+  overflow-wrap: anywhere;
+}
+
+.chapter-event-sync-detail article {
+  display: grid;
+  gap: 6px;
+}
+
+.chapter-event-sync-detail article > span {
+  color: rgba(233, 196, 106, 0.82);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.chapter-event-sync-detail p {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.chapter-event-sync-detail b {
+  display: block;
+  color: rgba(244, 241, 232, 0.76);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.chapter-event-sync-detail em {
+  color: rgba(244, 241, 232, 0.48);
+  font-size: 0.78rem;
+  font-style: normal;
+  line-height: 1.45;
 }
 
 .chapter-event-actions {
@@ -4037,7 +4333,8 @@ select {
   }
 
   .story-event-pool header,
-  .story-event-pool-grid {
+  .story-event-pool-grid,
+  .story-event-mode-grid {
     display: grid;
     grid-template-columns: 1fr;
   }
