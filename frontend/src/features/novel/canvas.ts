@@ -1,4 +1,4 @@
-import type { NovelChapter, NovelChapterStatus, StoryCanvas, StoryCanvasChapter, StoryCanvasEvent, StoryCanvasEventPool, StoryCanvasScene } from "../../types";
+import type { NovelChapter, NovelChapterStatus, ProgressionProtocol, StoryCanvas, StoryCanvasChapter, StoryCanvasEvent, StoryCanvasEventPool, StoryCanvasScene, StoryPromise } from "../../types";
 import { sceneCardFields } from "./constants";
 
 export type ChapterSceneCardDraft = Record<string, string>;
@@ -7,6 +7,8 @@ export function emptyStoryCanvas(): StoryCanvas {
   return {
     version: 1,
     mode: "story_canvas",
+    story_promise: emptyStoryPromise(),
+    progression_protocol: emptyProgressionProtocol(),
     acts: [],
     chapters: [],
     scenes: [],
@@ -19,6 +21,28 @@ export function emptyStoryCanvas(): StoryCanvas {
       retired: []
     },
     quality_rules: []
+  };
+}
+
+export function emptyStoryPromise(): StoryPromise {
+  return {
+    core_experience: "",
+    genre_contract: "",
+    relationship_engine: "",
+    tone_commitment: ""
+  };
+}
+
+export function emptyProgressionProtocol(): ProgressionProtocol {
+  return {
+    driver: "",
+    chapter_rules: [],
+    progression_tools: [],
+    relationship_rule: "",
+    drift_guards: [],
+    style_directives: [],
+    source: "local",
+    manual_edited: false
   };
 }
 
@@ -66,6 +90,30 @@ function normalizeStoryEventPool(value: unknown): StoryCanvasEventPool {
   };
 }
 
+function normalizeStoryPromise(value: unknown): StoryPromise {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return {
+    core_experience: String(raw.core_experience || ""),
+    genre_contract: String(raw.genre_contract || ""),
+    relationship_engine: String(raw.relationship_engine || ""),
+    tone_commitment: String(raw.tone_commitment || "")
+  };
+}
+
+function normalizeProgressionProtocol(value: unknown): ProgressionProtocol {
+  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return {
+    driver: String(raw.driver || ""),
+    chapter_rules: stringArray(raw.chapter_rules),
+    progression_tools: stringArray(raw.progression_tools),
+    relationship_rule: String(raw.relationship_rule || ""),
+    drift_guards: stringArray(raw.drift_guards),
+    style_directives: stringArray(raw.style_directives),
+    source: String(raw.source || ""),
+    manual_edited: Boolean(raw.manual_edited)
+  };
+}
+
 export function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
   const raw = (canvas && typeof canvas === "object" ? canvas : {}) as Record<string, unknown>;
   const acts = Array.isArray(raw.acts) ? raw.acts : [];
@@ -76,6 +124,8 @@ export function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
   return {
     version: Number(raw.version || 1),
     mode: String(raw.mode || "story_canvas"),
+    story_promise: normalizeStoryPromise(raw.story_promise),
+    progression_protocol: normalizeProgressionProtocol(raw.progression_protocol),
     event_pool: normalizeStoryEventPool(raw.event_pool),
     acts: acts.map((item, index) => {
       const act = item as Record<string, unknown>;
@@ -118,6 +168,9 @@ export function normalizeStoryCanvas(canvas: unknown): StoryCanvas {
         event_sync: chapter.event_sync && typeof chapter.event_sync === "object"
           ? chapter.event_sync as Record<string, unknown>
           : undefined,
+        chapter_drive: String(chapter.chapter_drive || ""),
+        progression_role: String(chapter.progression_role || ""),
+        promise_targets: stringArray(chapter.promise_targets),
         completed_summary: String(chapter.completed_summary || ""),
         actual_word_count: Number(chapter.actual_word_count || 0),
         completed_at: String(chapter.completed_at || "")
@@ -260,7 +313,10 @@ export function storyCanvasWithChapterDraft(
       emotion_curve: "",
       scene_ids: [],
       event_contract: undefined,
-      event_sync: undefined
+      event_sync: undefined,
+      chapter_drive: "",
+      progression_role: "",
+      promise_targets: []
     };
     nextCanvas.chapters.push(canvasChapter);
   }

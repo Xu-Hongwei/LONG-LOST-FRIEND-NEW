@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from ...schemas import NovelContinuityIssue, NovelContinuityReport
+from .continuity import continuity_hits, normalize_continuity_ledger
 
 
 INTERNAL_NOVEL_TERMS = {
@@ -82,6 +83,37 @@ class NovelQualityMixin:
                 issues.append(NovelContinuityIssue(severity="warning", label="章节未绑定画布", detail="当前章节没有对应的画布节点。"))
             if not canvas_scene:
                 issues.append(NovelContinuityIssue(severity="warning", label="缺少场景卡节点", detail="当前章节没有可驱动正文的画布场景。"))
+            previous_state = self._novel_state_until(project, int(selected["chapter_order"]) - 1)
+            ledger = normalize_continuity_ledger(previous_state.get("continuity_ledger"))
+            body_text = str(text or "")
+            must_hits = continuity_hits(body_text, ledger["next_must_continue"], 4)
+            if ledger["next_must_continue"] and not must_hits and body_text.strip():
+                issues.append(NovelContinuityIssue(
+                    severity="warning",
+                    label="未承接账本",
+                    detail=f"上一章要求承接：{ledger['next_must_continue'][0][:160]}",
+                ))
+            avoid_hits = continuity_hits(body_text, ledger["avoid_repeating"], 3)
+            if avoid_hits:
+                issues.append(NovelContinuityIssue(
+                    severity="warning",
+                    label="重复已避免内容",
+                    detail="；".join(avoid_hits)[:200],
+                ))
+            resolved_hits = continuity_hits(body_text, ledger["resolved_threads"], 3)
+            if resolved_hits:
+                issues.append(NovelContinuityIssue(
+                    severity="warning",
+                    label="重复已回收线索",
+                    detail="；".join(resolved_hits)[:200],
+                ))
+            forbidden_hits = continuity_hits(body_text, ledger["forbidden_contradictions"], 3)
+            if forbidden_hits:
+                issues.append(NovelContinuityIssue(
+                    severity="error",
+                    label="违反连续性禁区",
+                    detail="；".join(forbidden_hits)[:200],
+                ))
         if not issues:
             issues.append(NovelContinuityIssue(severity="ok", label="基础检查通过", detail="未发现内部措辞、空正文或明显伏笔状态风险。"))
         return NovelContinuityReport(
@@ -89,7 +121,12 @@ class NovelQualityMixin:
             chapter_id=selected["id"] if selected else None,
             issues=issues,
             summary="；".join(item.label for item in issues),
-            diagnostics={"checker": "local"},
+            diagnostics={
+                "checker": "local",
+                "continuity_ledger": normalize_continuity_ledger(
+                    self._novel_state_until(project, int(selected["chapter_order"]) - 1).get("continuity_ledger")
+                ) if selected else {},
+            },
         )
 
     def _chapter_local_check(self, body: str, target_length: int = 0) -> dict[str, list[str]]:

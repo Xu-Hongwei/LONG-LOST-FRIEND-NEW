@@ -88,6 +88,9 @@ export function useNovelInstruction(options: {
       event.motifs?.length ? `意象：${event.motifs.slice(0, 4).join("、")}` : "",
       tagList("theme_markers") ? `主题命中：${tagList("theme_markers")}` : "",
       tagList("tone_markers") ? `基调命中：${tagList("tone_markers")}` : "",
+      String(tags.progression_role || "").trim() ? `推进角色：${String(tags.progression_role)}` : "",
+      tagList("progression_markers") ? `推进命中：${tagList("progression_markers")}` : "",
+      tagList("promise_markers") ? `承诺命中：${tagList("promise_markers")}` : "",
       event.selection_reasons?.length ? `选择原因：${event.selection_reasons.slice(0, 3).join("；")}` : ""
     ].filter(Boolean);
   }
@@ -119,6 +122,24 @@ export function useNovelInstruction(options: {
     };
     const boundEvent = activeBoundEvent();
     const boundEventLines = boundEventInstructionLines(boundEvent);
+    const storyCanvas = options.activeNovelProject.value?.story_canvas;
+    const promise = storyCanvas?.story_promise;
+    const protocol = storyCanvas?.progression_protocol;
+    const protocolLines = [
+      promise?.core_experience ? `核心体验：${promise.core_experience}` : "",
+      promise?.genre_contract ? `题材承诺：${promise.genre_contract}` : "",
+      promise?.relationship_engine ? `关系引擎：${promise.relationship_engine}` : "",
+      promise?.tone_commitment ? `基调承诺：${promise.tone_commitment}` : "",
+      protocol?.driver ? `故事驱动力：${protocol.driver}` : "",
+      protocol?.relationship_rule ? `关系推进规则：${protocol.relationship_rule}` : "",
+      protocol?.progression_tools?.length ? `推进工具：${protocol.progression_tools.slice(0, 5).join("；")}` : "",
+      protocol?.drift_guards?.length ? `漂移护栏：${protocol.drift_guards.slice(0, 5).join("；")}` : ""
+    ].filter(Boolean);
+    const chapterProgressionLines = [
+      options.activeCanvasChapter.value?.progression_role ? `本章推进角色：${options.activeCanvasChapter.value.progression_role}` : "",
+      options.activeCanvasChapter.value?.chapter_drive ? `本章推进驱动：${options.activeCanvasChapter.value.chapter_drive}` : "",
+      options.activeCanvasChapter.value?.promise_targets?.length ? `本章承诺目标：${options.activeCanvasChapter.value.promise_targets.slice(0, 4).join("；")}` : ""
+    ].filter(Boolean);
     let mode = "精修当前章";
     let lengthDirective = `当前正文约 ${current} 字，接近目标区间。请保持已有节奏，补强场景连贯性和章节收束。`;
     if (!current) {
@@ -165,6 +186,7 @@ export function useNovelInstruction(options: {
     return [
       `生成模式：${mode}`,
       instructionSection("信息优先级", [
+        "项目推进协议决定整本书怎么推进，是 genre/tone 之后的执行约束。",
         "本章剧情概述决定这一章发生什么，是剧情事实和方向，不是写作命令。",
         "画布动作链决定事件推进顺序：先外部事件，再触发反应、阻碍升级、人物选择和结尾钩子。",
         "场景卡决定怎么贴近人物和场景来写：视角、在场人物、人物欲望、必须保留事实和禁止推进。",
@@ -176,6 +198,8 @@ export function useNovelInstruction(options: {
         lengthDirective,
         "如果一次无法写满目标长度，也必须先达到最低可接受长度，并停在可继续续写的自然钩子上。"
       ]),
+      instructionSection("项目推进协议", protocolLines),
+      instructionSection("本章推进方式", chapterProgressionLines),
       instructionSection("本章剧情概述", [goal]),
       instructionSection("项目事件池绑定", boundEventLines.length ? [
         ...boundEventLines,

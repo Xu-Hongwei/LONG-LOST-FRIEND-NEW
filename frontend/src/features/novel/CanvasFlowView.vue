@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { StoryCanvasChapter, StoryCanvasEvent, StoryCanvasEventPool, StoryEventPoolEventWriteRequest } from "../../types";
+import type { ProgressionProtocol, StoryCanvas, StoryCanvasChapter, StoryCanvasEvent, StoryCanvasEventPool, StoryEventPoolEventWriteRequest, StoryPromise } from "../../types";
 import type { CanvasBuildStage } from "./constants";
 import { canvasBuildSteps } from "./constants";
 
@@ -16,6 +16,25 @@ type EventDraft = {
   source_reason: string;
 };
 
+const promiseFields: { key: keyof StoryPromise; label: string; rows: number }[] = [
+  { key: "core_experience", label: "核心体验", rows: 2 },
+  { key: "genre_contract", label: "题材承诺", rows: 2 },
+  { key: "relationship_engine", label: "关系引擎", rows: 2 },
+  { key: "tone_commitment", label: "基调承诺", rows: 2 }
+];
+
+const protocolTextFields: { key: keyof Pick<ProgressionProtocol, "driver" | "relationship_rule">; label: string; rows: number }[] = [
+  { key: "driver", label: "故事驱动力", rows: 2 },
+  { key: "relationship_rule", label: "关系推进规则", rows: 2 }
+];
+
+const protocolListFields: { key: keyof Pick<ProgressionProtocol, "chapter_rules" | "progression_tools" | "drift_guards" | "style_directives">; label: string; rows: number }[] = [
+  { key: "chapter_rules", label: "章节规则", rows: 3 },
+  { key: "progression_tools", label: "推进工具", rows: 3 },
+  { key: "drift_guards", label: "漂移护栏", rows: 3 },
+  { key: "style_directives", label: "风格指令", rows: 3 }
+];
+
 function eventBindingLabel(item: StoryCanvasEvent) {
   const orders = item.bound_chapter_orders || [];
   if (!orders.length) return "";
@@ -29,6 +48,15 @@ function eventScoreLabel(item: StoryCanvasEvent) {
 
 function eventReasonLabel(item: StoryCanvasEvent) {
   return (item.selection_reasons || [])[0] || item.source_reason || "";
+}
+
+function eventProgressionLabel(item: StoryCanvasEvent) {
+  const tags = (item.tags || {}) as Record<string, unknown>;
+  const role = String(tags.progression_role || "").trim();
+  const markers = Array.isArray(tags.progression_markers)
+    ? tags.progression_markers.map(String).filter(Boolean).slice(0, 3)
+    : [];
+  return [role, markers.length ? markers.join(" / ") : ""].filter(Boolean).join(" · ");
 }
 
 function eventSourceLabel(item: StoryCanvasEvent) {
@@ -100,6 +128,7 @@ const props = defineProps<{
   canvasBuildPercent: number;
   canvasBuildStepClass: (index: number) => Record<string, boolean>;
   eventPool?: StoryCanvasEventPool;
+  storyCanvas?: StoryCanvas;
   activeCanvasChapter?: StoryCanvasChapter | null;
   novelStateSummary: string;
   novelStateLastHandoffText: string;
@@ -129,6 +158,65 @@ const emit = defineEmits<{
   deleteEvent: [event: StoryCanvasEvent];
   bindEvent: [event: StoryCanvasEvent, useMode: EventUseMode];
 }>();
+
+function lineList(value: unknown) {
+  return Array.isArray(value) ? value.map(String).filter(Boolean).join("\n") : String(value || "");
+}
+
+function splitLines(value: string) {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function ensureProgressionObjects() {
+  if (!props.storyCanvas) return null;
+  if (!props.storyCanvas.story_promise) {
+    props.storyCanvas.story_promise = {
+      core_experience: "",
+      genre_contract: "",
+      relationship_engine: "",
+      tone_commitment: ""
+    };
+  }
+  if (!props.storyCanvas.progression_protocol) {
+    props.storyCanvas.progression_protocol = {
+      driver: "",
+      chapter_rules: [],
+      progression_tools: [],
+      relationship_rule: "",
+      drift_guards: [],
+      style_directives: [],
+      source: "manual",
+      manual_edited: true
+    };
+  }
+  props.storyCanvas.progression_protocol.manual_edited = true;
+  props.storyCanvas.progression_protocol.source = "manual";
+  return {
+    storyPromise: props.storyCanvas.story_promise,
+    protocol: props.storyCanvas.progression_protocol
+  };
+}
+
+function updatePromiseField(key: keyof StoryPromise, value: string) {
+  const objects = ensureProgressionObjects();
+  if (!objects) return;
+  objects.storyPromise[key] = value;
+}
+
+function updateProtocolTextField(key: keyof Pick<ProgressionProtocol, "driver" | "relationship_rule">, value: string) {
+  const objects = ensureProgressionObjects();
+  if (!objects) return;
+  objects.protocol[key] = value;
+}
+
+function updateProtocolListField(
+  key: keyof Pick<ProgressionProtocol, "chapter_rules" | "progression_tools" | "drift_guards" | "style_directives">,
+  value: string
+) {
+  const objects = ensureProgressionObjects();
+  if (!objects) return;
+  objects.protocol[key] = splitLines(value);
+}
 
 const eventUseModeOptions: { value: EventUseMode; label: string; detail: string }[] = [
   { value: "strict", label: "strict", detail: "必须采用地点、时间、外部事件和钩子" },
@@ -264,6 +352,41 @@ function submitEventDraft() {
       <strong>自动滚动</strong>
       <span>每章生成后会整理交接单、更新 Novel State，并重规划后续两章；“重新生成画布”只适合开局大改。</span>
     </div>
+    <section class="story-progression-panel">
+      <header>
+        <div>
+          <p class="eyebrow">Progression Protocol</p>
+          <strong>故事推进协议</strong>
+        </div>
+        <span>{{ storyCanvas?.progression_protocol?.manual_edited ? "手动编辑" : (storyCanvas?.progression_protocol?.source || "自动") }}</span>
+      </header>
+      <div class="story-progression-grid">
+        <label v-for="field in promiseFields" :key="field.key">
+          <span>{{ field.label }}</span>
+          <textarea
+            :rows="field.rows"
+            :value="storyCanvas?.story_promise?.[field.key] || ''"
+            @input="updatePromiseField(field.key, ($event.target as HTMLTextAreaElement).value)"
+          />
+        </label>
+        <label v-for="field in protocolTextFields" :key="field.key">
+          <span>{{ field.label }}</span>
+          <textarea
+            :rows="field.rows"
+            :value="storyCanvas?.progression_protocol?.[field.key] || ''"
+            @input="updateProtocolTextField(field.key, ($event.target as HTMLTextAreaElement).value)"
+          />
+        </label>
+        <label v-for="field in protocolListFields" :key="field.key">
+          <span>{{ field.label }}</span>
+          <textarea
+            :rows="field.rows"
+            :value="lineList(storyCanvas?.progression_protocol?.[field.key])"
+            @input="updateProtocolListField(field.key, ($event.target as HTMLTextAreaElement).value)"
+          />
+        </label>
+      </div>
+    </section>
     <section class="story-event-pool">
       <header>
         <div>
@@ -385,6 +508,7 @@ function submitEventDraft() {
           </div>
           <div class="story-event-content">
             <p v-if="eventReasonLabel(item)" class="story-event-reason">{{ eventReasonLabel(item) }}</p>
+            <p v-if="eventProgressionLabel(item)" class="story-event-reason progression">{{ eventProgressionLabel(item) }}</p>
             <p v-if="item.time_anchor" class="story-event-time">{{ item.time_anchor }}</p>
             <div class="story-event-body">
               <span>地点</span>

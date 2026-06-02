@@ -5,7 +5,9 @@ import re
 from typing import Any
 
 from .config import NOVEL_PLANNING_TIMEOUT_MS
+from .continuity import continuity_ledger_prompt
 from .event_pool import story_event_for_chapter, sync_story_event_pool_display_bindings
+from .progression import progression_prompt
 from .setting_profiles import infer_novel_setting_type, novel_setting_profile
 
 
@@ -73,6 +75,8 @@ class NovelGenerationBeatsMixin:
             f"{project['title']}｜{project['genre']}｜{project['tone']}",
             "[故事画布]",
             self._canvas_prompt(canvas, canvas_chapter),
+            "[项目推进协议]",
+            progression_prompt(canvas, project),
             "[当前章节事件契约]",
             self._event_contract_prompt(event_contract),
             "[本章场面推进链]",
@@ -83,6 +87,8 @@ class NovelGenerationBeatsMixin:
             previous,
             "[上一章交接单]",
             previous_handoff,
+            "[Continuity Ledger 连续性账本]",
+            continuity_ledger_prompt(novel_state.get("continuity_ledger")),
             "[上一章尾段]",
             previous_tail,
             "[素材]",
@@ -91,6 +97,8 @@ class NovelGenerationBeatsMixin:
             instruction,
             "[硬约束]",
             "必须按本章场面推进链生成 beats：触发事件 -> 即时反应 -> 阻碍升级 -> 对方反应 -> 人物选择 -> 场景后果 -> 结尾钩子。"
+            "Beats 必须服务项目推进协议和本章事件契约；协议决定推进方式，事件契约决定本章发生什么，场景卡只决定怎么演出来。"
+            "Continuity Ledger 中的必须承接项要优先进入前两拍或中段选择，禁止矛盾和避免重复项不得写成新事件。"
             "第一拍必须自然承接上一章尾段或上一章交接单的未解决点，不要重演上一章已经完成的动作。"
             "保持一个连续大场景，但可以在场景内部新增一到两个符合项目题材的小事件、道具、旁观者、误会、延误或场面压力。"
             "素材只是熟悉感锚点，不要把全部素材塞进 beats；优先让读者看到具体动作、对白、阻碍和选择。"
@@ -138,6 +146,7 @@ class NovelGenerationBeatsMixin:
             "relationship_states": state.get("relationship_states", [])[:8],
             "open_threads": state.get("open_threads", [])[:8],
             "resolved_threads": state.get("resolved_threads", [])[:6],
+            "continuity_ledger": state.get("continuity_ledger", {}),
             "last_completed_chapter_order": state.get("last_completed_chapter_order", 0),
         }
         return json.dumps(compact, ensure_ascii=False)

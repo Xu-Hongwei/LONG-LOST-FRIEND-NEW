@@ -275,6 +275,9 @@ export interface StoryCanvasChapter {
   event_pool_penalties?: string[];
   event_contract?: Record<string, unknown>;
   event_sync?: Record<string, unknown>;
+  chapter_drive?: string;
+  progression_role?: string;
+  promise_targets?: string[];
   completed_summary?: string;
   actual_word_count?: number;
   completed_at?: string;
@@ -327,6 +330,36 @@ export interface StoryCanvasEvent {
   selection_penalties?: string[];
 }
 
+export interface StoryPromise {
+  core_experience: string;
+  genre_contract: string;
+  relationship_engine: string;
+  tone_commitment: string;
+}
+
+export interface ProgressionProtocol {
+  driver: string;
+  chapter_rules: string[];
+  progression_tools: string[];
+  relationship_rule: string;
+  drift_guards: string[];
+  style_directives: string[];
+  source?: string;
+  manual_edited?: boolean;
+}
+
+export interface ContinuityLedger {
+  locked_facts?: string[];
+  changed_states?: string[];
+  open_threads?: string[];
+  resolved_threads?: string[];
+  next_must_continue?: string[];
+  promises_made?: string[];
+  promises_paid?: string[];
+  avoid_repeating?: string[];
+  forbidden_contradictions?: string[];
+}
+
 export interface StoryCanvasEventPool {
   version: number;
   target_active: number;
@@ -339,6 +372,8 @@ export interface StoryCanvasEventPool {
 export interface StoryCanvas {
   version: number;
   mode: string;
+  story_promise?: StoryPromise;
+  progression_protocol?: ProgressionProtocol;
   event_pool?: StoryCanvasEventPool;
   acts: StoryCanvasAct[];
   chapters: StoryCanvasChapter[];

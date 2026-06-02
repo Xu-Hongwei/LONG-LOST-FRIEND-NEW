@@ -8,6 +8,7 @@ from typing import Any
 
 from ...schemas import StoryEventPoolBindingRequest, StoryEventPoolEventWriteRequest
 from .config import NOVEL_EVENT_BINDING_TIMEOUT_MS
+from .continuity import continuity_hits, continuity_ledger_terms
 from .event_pool import (
     STORY_EVENT_POOL_SIZE,
     _fallback_event,
@@ -18,6 +19,7 @@ from .event_pool import (
     normalize_story_event_pool,
     sync_story_event_pool_display_bindings,
 )
+from .progression import progression_prompt
 from .setting_profiles import infer_novel_setting_type
 
 
@@ -49,7 +51,7 @@ class NovelEventPoolEditMixin:
             if str(canvas_chapter.get("event_pool_id") or "") != event_id:
                 continue
             chapter = next((row for row in db_chapters if int(row["chapter_order"]) == int(canvas_chapter.get("chapter_order") or 0)), None)
-            self._sync_event_contract_to_chapter(canvas, canvas_chapter, event, chapter)
+            self._sync_event_contract_to_chapter(canvas, canvas_chapter, event, chapter, project=project)
         return self._save_event_pool(project["id"], canvas, pool, setting_type)
 
     def retire_event_pool_event(self, project_id: str, event_id: str) -> Any:
@@ -118,7 +120,7 @@ class NovelEventPoolEditMixin:
         })
         if event.get("status") == "fresh":
             event["status"] = "planned"
-        self._sync_event_contract_to_chapter(canvas, canvas_chapter, event, chapter, use_mode=use_mode)
+        self._sync_event_contract_to_chapter(canvas, canvas_chapter, event, chapter, use_mode=use_mode, project=project)
         return self._save_event_pool(project["id"], canvas, pool, setting_type)
 
     async def bind_event_pool_event_to_chapter_remote(
@@ -165,9 +167,11 @@ class NovelEventPoolEditMixin:
         event: dict[str, Any],
         canvas_chapter: dict[str, Any],
         use_mode: str | None = None,
+        project: Any | None = None,
     ) -> dict[str, Any]:
         tags = event.get("tags") if isinstance(event.get("tags"), dict) else {}
         previous_contract = canvas_chapter.get("event_contract") if isinstance(canvas_chapter.get("event_contract"), dict) else {}
+        continuity = self._event_continuity_marks(project, event)
         return {
             "version": 1,
             "event_id": str(event.get("id") or ""),
@@ -181,12 +185,51 @@ class NovelEventPoolEditMixin:
             "motifs": event.get("motifs") if isinstance(event.get("motifs"), list) else [],
             "theme_markers": tags.get("theme_markers") if isinstance(tags.get("theme_markers"), list) else [],
             "tone_markers": tags.get("tone_markers") if isinstance(tags.get("tone_markers"), list) else [],
+            "progression_role": str(tags.get("progression_role") or canvas_chapter.get("progression_role") or ""),
+            "progression_markers": tags.get("progression_markers") if isinstance(tags.get("progression_markers"), list) else [],
+            "promise_markers": tags.get("promise_markers") if isinstance(tags.get("promise_markers"), list) else [],
+            "drift_guard_risks": tags.get("drift_guard_risks") if isinstance(tags.get("drift_guard_risks"), list) else [],
+            "chapter_drive": str(canvas_chapter.get("chapter_drive") or ""),
+            "promise_targets": canvas_chapter.get("promise_targets") if isinstance(canvas_chapter.get("promise_targets"), list) else [],
             "score": int(canvas_chapter.get("event_pool_score") or event.get("selection_score") or 0),
             "reasons": canvas_chapter.get("event_pool_reasons") if isinstance(canvas_chapter.get("event_pool_reasons"), list) else [],
             "penalties": canvas_chapter.get("event_pool_penalties") if isinstance(canvas_chapter.get("event_pool_penalties"), list) else [],
             "source_reason": str(event.get("source_reason") or ""),
+            "continuity_hits": continuity["hits"],
+            "continuity_risks": continuity["risks"],
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    def _event_continuity_marks(self, project: Any | None, event: dict[str, Any]) -> dict[str, list[str]]:
+        if not project:
+            return {"hits": [], "risks": []}
+        try:
+            novel_state = self._json_dict(project["novel_state_json"] if "novel_state_json" in project.keys() else "{}")
+        except Exception:
+            novel_state = {}
+        terms = continuity_ledger_terms(novel_state.get("continuity_ledger"))
+        text = " ".join(
+            str(value or "")
+            for value in [
+                event.get("place"),
+                event.get("time_anchor"),
+                event.get("event"),
+                event.get("hook"),
+                event.get("source_reason"),
+                " ".join(str(item) for item in event.get("motifs", []) if str(item).strip()) if isinstance(event.get("motifs"), list) else "",
+            ]
+        )
+        hits = [
+            *continuity_hits(text, terms["ledger_must_continue"], 3),
+            *continuity_hits(text, terms["ledger_open"], 2),
+            *continuity_hits(text, terms["ledger_promises"], 2),
+        ]
+        risks = [
+            *continuity_hits(text, terms["ledger_avoid"], 2),
+            *continuity_hits(text, terms["ledger_resolved"], 2),
+            *continuity_hits(text, terms["ledger_forbidden"], 2),
+        ]
+        return {"hits": hits[:6], "risks": risks[:6]}
 
     def _sync_event_contract_to_chapter(
         self,
@@ -195,10 +238,19 @@ class NovelEventPoolEditMixin:
         event: dict[str, Any],
         chapter: Any | None,
         use_mode: str | None = None,
+        project: Any | None = None,
     ) -> None:
-        contract = self._event_contract_from_event(event, canvas_chapter, use_mode=use_mode)
+        contract = self._event_contract_from_event(event, canvas_chapter, use_mode=use_mode, project=project)
         mode = normalize_event_use_mode(contract.get("use_mode"))
         canvas_chapter["event_contract"] = contract
+        if contract.get("progression_role") and not str(canvas_chapter.get("progression_role") or "").strip():
+            canvas_chapter["progression_role"] = contract["progression_role"]
+        if contract.get("progression_markers") and not str(canvas_chapter.get("chapter_drive") or "").strip():
+            canvas_chapter["chapter_drive"] = " / ".join(str(item) for item in contract.get("progression_markers", []) if str(item).strip())[:500]
+        if contract.get("promise_markers") and not isinstance(canvas_chapter.get("promise_targets"), list):
+            canvas_chapter["promise_targets"] = contract.get("promise_markers", [])[:6]
+        elif contract.get("promise_markers") and not canvas_chapter.get("promise_targets"):
+            canvas_chapter["promise_targets"] = contract.get("promise_markers", [])[:6]
         if mode == "free":
             canvas_chapter["event_sync"] = {
                 "source": "local",
@@ -341,8 +393,10 @@ class NovelEventPoolEditMixin:
             "Do not write prose正文. Do not invent a different event. Do not output scores, confidence, markdown, or explanations outside JSON. "
             "Allowed top-level keys: canvas_chapter_patch, scene_card_patch, sync_note. "
             "Respect use_mode: strict must preserve the event core; guide treats the event as the main direction; flavor only borrows place, motifs, atmosphere, or hook; free should return empty patches. "
+            "Respect story_promise and progression_protocol: they decide how this novel progresses; event_contract decides what this chapter does. "
             "If scene_card conflicts with event_contract, keep what happens from event_contract and adjust only staging details. "
             "Match the existing story canvas action-chain style: concrete, sequential, field-specific, and not summary-like. "
+            "All returned field values must be natural Chinese. Never return English enum labels or snake_case values such as third_person or company_building_front. "
             "Never copy event-pool metadata such as variant labels, source_reason, score reasons, or '变体N' into output fields."
         )
 
@@ -426,6 +480,9 @@ class NovelEventPoolEditMixin:
             "Project:",
             self._json_dump(project_context)[:2200],
             "",
+            "Project progression protocol:",
+            progression_prompt(self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}"), project)[:2200],
+            "",
             "Current chapter row:",
             self._json_dump(chapter_context)[:1200],
             "",
@@ -443,6 +500,7 @@ class NovelEventPoolEditMixin:
             "",
             "Rules:",
             "- Use Chinese strings for generated field values.",
+            "- Do not return English enum labels, pinyin, or snake_case; translate third_person to 第三人称限知 and rewrite location ids as Chinese scene text.",
             "- Keep the selected place/time/event/hook unless use_mode is flavor.",
             "- Do not use 用户/助手/AI as character names.",
             "- Rewrite event-pool candidate wording into natural chapter-planning prose; remove labels like 变体8, selection_score, source_reason, planned, fresh.",
@@ -548,8 +606,37 @@ class NovelEventPoolEditMixin:
         text = self._strip_event_pool_artifacts(str(value or "").strip())
         if not text:
             return ""
+        if key == "current_scene" and self._looks_like_english_slug(text):
+            text = self._scene_slug_to_chinese(text) or ""
+        if key == "pov" and self._looks_like_english_slug(text):
+            text = "第三人称限知"
         limit = 900 if key in {"goal", "obstacle_escalation", "scene_consequence", "tension"} else 520
         return text[:limit]
+
+    def _looks_like_english_slug(self, value: Any) -> bool:
+        text = str(value or "").strip()
+        return bool(text) and bool(re.fullmatch(r"[A-Za-z0-9_\\-\\s]+", text)) and bool(re.search(r"[A-Za-z]", text))
+
+    def _scene_slug_to_chinese(self, value: Any) -> str:
+        token_map = {
+            "company": "公司",
+            "building": "大楼",
+            "front": "门口",
+            "office": "办公室",
+            "street": "街道",
+            "road": "路边",
+            "lake": "湖边",
+            "cafe": "咖啡店",
+            "shop": "店门口",
+            "station": "车站",
+            "school": "学校",
+            "library": "图书馆",
+            "room": "房间",
+            "door": "门口",
+            "hall": "走廊",
+        }
+        pieces = re.split(r"[_\\-\\s]+", str(value or "").strip().lower())
+        return "".join(token_map.get(piece, "") for piece in pieces if piece)
 
     def _strip_event_pool_artifacts(self, text: str) -> str:
         clean = str(text or "").strip()

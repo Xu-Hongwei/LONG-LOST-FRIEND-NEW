@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { novelVersionSourceLabels, storyKindLabels, storyStatusLabels } from "./constants";
-import type { NovelContinuityReport, NovelMaterial, NovelVersion, StoryPane } from "../../types";
+import type { ContinuityLedger, NovelContinuityReport, NovelMaterial, NovelProject, NovelVersion, StoryPane } from "../../types";
 
 type NovelVersionDisplay = NovelVersion & {
   duplicateCount: number;
@@ -14,6 +14,7 @@ defineProps<{
   sessionId: string;
   storyAutoRefreshUserInterval: number;
   hasActiveNovelProject: boolean;
+  activeNovelProject: NovelProject | null;
   storyBibleEntries: [string, string[]][];
   projectMaterialGroups: [string, NovelMaterial[]][];
   continuityReport: NovelContinuityReport | null;
@@ -64,6 +65,29 @@ function storyRefreshLabel(storyPane: StoryPane | null) {
             ? "兜底生成"
             : "";
   return `上次刷新：候选 ${generated}，写入 ${stored}${remoteDetail ? ` · ${remoteDetail}` : ""}`;
+}
+
+const ledgerLabels: Record<keyof ContinuityLedger, string> = {
+  locked_facts: "已锁定事实",
+  changed_states: "状态变化",
+  open_threads: "未解决线索",
+  resolved_threads: "已回收线索",
+  next_must_continue: "必须承接",
+  promises_made: "未兑现承诺",
+  promises_paid: "已兑现承诺",
+  avoid_repeating: "避免重复",
+  forbidden_contradictions: "禁止矛盾"
+};
+
+function continuityLedger(project: NovelProject | null): [string, string[]][] {
+  const state = project?.novel_state;
+  const ledger = state && typeof state === "object"
+    ? (state.continuity_ledger as ContinuityLedger | undefined)
+    : undefined;
+  if (!ledger || typeof ledger !== "object") return [];
+  return (Object.keys(ledgerLabels) as (keyof ContinuityLedger)[])
+    .map((key) => [ledgerLabels[key], Array.isArray(ledger[key]) ? ledger[key]!.map(String).filter(Boolean) : []] as [string, string[]])
+    .filter(([, values]) => values.length);
 }
 </script>
 
@@ -136,13 +160,19 @@ function storyRefreshLabel(storyPane: StoryPane | null) {
 
     <section class="story-pane-card">
       <p class="eyebrow">Continuity</p>
+      <div v-if="continuityLedger(activeNovelProject).length" class="ledger-list">
+        <article v-for="[label, items] in continuityLedger(activeNovelProject)" :key="label">
+          <strong>{{ label }}</strong>
+          <p v-for="item in items.slice(0, 4)" :key="item">{{ item }}</p>
+        </article>
+      </div>
       <div v-if="continuityReport" class="continuity-list">
         <article v-for="issue in continuityReport.issues" :key="`${issue.severity}-${issue.label}`" :class="issue.severity">
           <strong>{{ issue.label }}</strong>
           <p>{{ issue.detail }}</p>
         </article>
       </div>
-      <p v-else class="empty">点击“检查”后会显示连续性、边界和内部措辞风险。</p>
+      <p v-if="!continuityReport && !continuityLedger(activeNovelProject).length" class="empty">点击“检查”后会显示连续性、边界和内部措辞风险。</p>
     </section>
 
     <section class="story-pane-card">

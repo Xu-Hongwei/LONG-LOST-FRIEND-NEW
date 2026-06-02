@@ -4,6 +4,7 @@ from typing import Any
 
 from ...schemas import CharacterCard, StoryItem
 from .event_pool import build_story_event_pool, story_event_for_order
+from .progression import chapter_progression_defaults, default_progression_protocol, default_story_promise
 from .setting_profiles import infer_novel_setting_type, novel_setting_profile, project_story_seed_pool
 
 
@@ -23,6 +24,13 @@ class NovelCanvasDefaultMixin:
             "worldview": story_bible.get("worldview", "") if isinstance(story_bible, dict) else "",
             "relationship_setup": story_bible.get("relationship_setup", "") if isinstance(story_bible, dict) else "",
         }, character)
+        project_context = {
+            "title": title,
+            "genre": genre,
+            "tone": tone,
+            "worldview": story_bible.get("worldview", "") if isinstance(story_bible, dict) else "",
+            "relationship_setup": story_bible.get("relationship_setup", "") if isinstance(story_bible, dict) else "",
+        }
         seed_pool, seed_pool_source = project_story_seed_pool(character, setting_type)
         event_pool = build_story_event_pool(setting_type, seed_pool if setting_type != "campus" else None)
         if setting_type != "campus":
@@ -199,9 +207,16 @@ class NovelCanvasDefaultMixin:
                 "notes": "每次推进必须表现为动作、对话或选择，不直接跳到关系确认。",
             },
         ]
+        story_promise = default_story_promise(project_context)
+        progression_protocol = default_progression_protocol(project_context)
+        progression_canvas = {"story_promise": story_promise, "progression_protocol": progression_protocol}
+        for chapter in chapters:
+            chapter.update(chapter_progression_defaults(chapter, progression_canvas, project_context))
         return {
             "version": 1,
             "mode": "story_canvas",
+            "story_promise": story_promise,
+            "progression_protocol": progression_protocol,
             "event_pool": event_pool,
             "acts": acts,
             "chapters": chapters,
@@ -233,6 +248,16 @@ class NovelCanvasDefaultMixin:
         lead = protagonist or title or "主角"
         seed_pool = seed_pool or {}
         event_pool = event_pool or build_story_event_pool(setting_type, seed_pool)
+        project_context = {
+            "title": title,
+            "genre": genre,
+            "tone": tone,
+            "worldview": story_bible.get("worldview", "") if isinstance(story_bible, dict) else "",
+            "relationship_setup": story_bible.get("relationship_setup", "") if isinstance(story_bible, dict) else "",
+        }
+        story_promise = default_story_promise(project_context)
+        progression_protocol = default_progression_protocol(project_context)
+        progression_canvas = {"story_promise": story_promise, "progression_protocol": progression_protocol}
         titles = profile["titles"]
         inspirations = [item.content for item in story_items if item.kind in {"story_beat", "relationship_texture"}][:3]
         unresolved = [
@@ -281,6 +306,7 @@ class NovelCanvasDefaultMixin:
                 "emotion_curve": f"{tone or profile['label']} -> 受阻 -> 选择 -> 留钩子",
                 "scene_ids": [scene_id],
             })
+            chapters[-1].update(chapter_progression_defaults(chapters[-1], progression_canvas, project_context, order))
             scenes.append(self._canvas_scene(
                 scene_id,
                 chapter_id,
@@ -297,6 +323,8 @@ class NovelCanvasDefaultMixin:
         return {
             "version": 1,
             "mode": "story_canvas",
+            "story_promise": story_promise,
+            "progression_protocol": progression_protocol,
             "event_pool": event_pool,
             "acts": acts,
             "chapters": chapters,

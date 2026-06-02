@@ -5,6 +5,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import NOVEL_PLANNING_TIMEOUT_MS
+from .continuity import (
+    continuity_ledger_from_handoff,
+    empty_continuity_ledger,
+    merge_continuity_ledgers,
+    normalize_continuity_ledger,
+)
 
 
 class NovelStateMixin:
@@ -34,6 +40,7 @@ class NovelStateMixin:
             "relationship_states": [],
             "open_threads": [],
             "resolved_threads": [],
+            "continuity_ledger": empty_continuity_ledger(),
             "chapter_handoffs": [],
             "last_completed_chapter_order": 0,
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -67,6 +74,8 @@ class NovelStateMixin:
         ]
         previous_summary = self._clean_material_text(str(previous_state.get("global_summary") or ""))
         summary_line = f"第{order}章：{summary}" if summary else ""
+        next_ledger = continuity_ledger_from_handoff(next_handoff)
+        merged_ledger = merge_continuity_ledgers(previous_state.get("continuity_ledger"), [next_ledger], 16)
         return {
             **previous_state,
             "global_summary": self._clean_material_text(" ".join(item for item in [previous_summary, summary_line] if item))[:1400],
@@ -77,6 +86,7 @@ class NovelStateMixin:
                 16,
             ),
             "resolved_threads": self._unique_short_list(list(previous_state.get("resolved_threads", [])) + list_value("resolved_threads"), 16),
+            "continuity_ledger": merged_ledger,
             "chapter_handoffs": [*previous_handoffs, next_handoff][-8:],
             "last_completed_chapter_order": order,
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -212,6 +222,8 @@ class NovelStateMixin:
             handoff_source = str(state_delta.get("handoff_source") or scene_card.get("handoff_source") or "").strip()
             if not handoff or handoff_source in {"skipped_mock", "cleaned_mock"}:
                 break
+            if not isinstance(handoff.get("continuity_ledger"), dict) and isinstance(state_delta.get("continuity_ledger"), dict):
+                handoff = {**handoff, "continuity_ledger": state_delta["continuity_ledger"]}
             entries.append({
                 "chapter_order": order,
                 "chapter_title": str(row["title"] or "")[:120],
@@ -247,12 +259,14 @@ class NovelStateMixin:
         relationships = list(base_state.get("relationship_states", []))
         open_threads = list(base_state.get("open_threads", []))
         resolved = list(base_state.get("resolved_threads", []))
+        ledgers = []
         for handoff in handoffs:
             confirmed.extend(handoff.get("happened", []) if isinstance(handoff.get("happened"), list) else [])
             relationships.extend(handoff.get("relationship_delta", []) if isinstance(handoff.get("relationship_delta"), list) else [])
             open_threads.extend(handoff.get("open_threads", []) if isinstance(handoff.get("open_threads"), list) else [])
             open_threads.extend(handoff.get("next_must_continue", []) if isinstance(handoff.get("next_must_continue"), list) else [])
             resolved.extend(handoff.get("resolved_threads", []) if isinstance(handoff.get("resolved_threads"), list) else [])
+            ledgers.append(continuity_ledger_from_handoff(handoff))
         return {
             **base_state,
             "global_summary": self._clean_material_text(" ".join(summaries))[:1400] or base_state.get("global_summary", ""),
@@ -260,6 +274,7 @@ class NovelStateMixin:
             "relationship_states": self._unique_short_list(relationships, 16),
             "open_threads": self._unique_short_list(open_threads, 16),
             "resolved_threads": self._unique_short_list(resolved, 16),
+            "continuity_ledger": merge_continuity_ledgers(base_state.get("continuity_ledger"), ledgers, 16),
             "chapter_handoffs": handoffs[-8:],
             "last_completed_chapter_order": entries[-1]["chapter_order"],
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -279,6 +294,7 @@ class NovelStateMixin:
                 "confirmed_facts": base_state.get("confirmed_facts", []),
                 "relationship_states": base_state.get("relationship_states", []),
                 "open_threads": base_state.get("open_threads", []),
+                "continuity_ledger": base_state.get("continuity_ledger", {}),
             }, ensure_ascii=False),
             "[最新可信章节版本]",
             json.dumps(entries, ensure_ascii=False)[:12000],
@@ -287,13 +303,14 @@ class NovelStateMixin:
             "global_summary 用 500-900 字以内概括截至最后一个可信章节已经发生的主线。"
             "open_threads 只保留未解决线索；resolved_threads 只放明确回收的线索。"
             "chapter_handoffs 必须对应输入里的章节交接单，不要新增未发生剧情。",
+            "continuity_ledger 必须只基于输入章节交接单重建，不能编造新事实。",
         ])
 
     def _novel_state_system_prompt(self) -> str:
         return (
             "你是长篇小说全局状态管理员。根据最新可信章节版本、章节摘要和章节交接单，重建长期摘要。"
             "只保留已经发生的事实和仍需追踪的线索，不沿用旧状态里的重复或冲突内容，不写正文，不扩写剧情。"
-            "输出 JSON 对象，字段：global_summary, confirmed_facts, character_states, relationship_states, open_threads, resolved_threads, chapter_handoffs, last_completed_chapter_order。"
+            "输出 JSON 对象，字段：global_summary, confirmed_facts, character_states, relationship_states, open_threads, resolved_threads, continuity_ledger, chapter_handoffs, last_completed_chapter_order。"
         )
 
     def _parse_novel_state(self, text: str, fallback: dict[str, Any]) -> dict[str, Any]:
@@ -306,6 +323,10 @@ class NovelStateMixin:
                 state[key] = [self._clean_material_text(str(item))[:260] for item in value if str(item).strip()][:16]
         if isinstance(raw.get("chapter_handoffs"), list):
             state["chapter_handoffs"] = raw["chapter_handoffs"][-8:]
+        state["continuity_ledger"] = normalize_continuity_ledger(
+            raw.get("continuity_ledger"),
+            state.get("continuity_ledger"),
+        )
         state["last_completed_chapter_order"] = self._coerce_int(raw.get("last_completed_chapter_order"), int(state.get("last_completed_chapter_order") or 0), 0, 999)
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         return state

@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from .event_pool import story_event_for_chapter, sync_story_event_pool_display_bindings
+from .continuity import continuity_ledger_prompt
+from .progression import progression_prompt
 from .setting_profiles import infer_novel_setting_type, novel_setting_profile
 
 
@@ -46,12 +48,16 @@ class NovelGenerationContextMixin:
             project["outline"],
             "[故事画布]",
             self._canvas_prompt(canvas, canvas_chapter),
+            "[项目推进协议]",
+            progression_prompt(canvas, project),
             "[当前章节事件契约]",
             self._event_contract_prompt(event_contract),
             "[设定档案]",
             self._story_bible_prompt(self._json_dict(project["story_bible_json"])),
             "[Novel State 长期摘要]",
             self._novel_state_prompt(novel_state),
+            "[Continuity Ledger 连续性账本]",
+            continuity_ledger_prompt(novel_state.get("continuity_ledger")),
             "[可转写素材]",
             material_lines,
             "[已有章节]",
@@ -74,8 +80,9 @@ class NovelGenerationContextMixin:
             "[长度要求]",
             f"目标长度：约 {target_length} 字",
             "[信息优先级]",
-            "Novel State、上一章交接单和上一章尾段只用于承接已经发生的事实、情绪余波和未解决点；不得提前使用后续章节信息。"
-            "本章剧情概述决定这一章发生什么，故事画布和 Scene Beats 决定事件推进顺序，Scene Card 决定视角、人物欲望和边界。"
+            "Novel State、Continuity Ledger、上一章交接单和上一章尾段只用于承接已经发生的事实、情绪余波和未解决点；不得提前使用后续章节信息。"
+            "Continuity Ledger 的 locked_facts 和 forbidden_contradictions 是硬约束；next_must_continue 和 promises_made 是本章优先承接项；avoid_repeating 和 resolved_threads 不要重复写成新悬念。"
+            "项目推进协议决定整本书如何推进；本章剧情概述和事件契约决定这一章发生什么，故事画布和 Scene Beats 决定事件推进顺序，Scene Card 决定视角、人物欲望和边界。"
             "用户写作指令只决定写法、篇幅、节奏和质量补救；不得改写本章剧情概述、画布动作链和已确认事实。"
             "如果当前章节已有正文，必须承接现有正文末尾继续扩写或精修，不要从头重写为另一章。",
             "[输出硬约束]",
@@ -174,6 +181,8 @@ class NovelGenerationContextMixin:
             f"- 时间锚点: {contract.get('time_anchor') or '未设定'}",
             f"- 外部事件: {contract.get('external_event') or '未设定'}",
             f"- 结尾钩子: {contract.get('hook') or '未设定'}",
+            f"- 本章推进方式: {contract.get('progression_role') or '未设定'} / {contract.get('chapter_drive') or '未设定'}",
+            f"- 承诺命中: {'、'.join(str(item) for item in (contract.get('promise_markers') if isinstance(contract.get('promise_markers'), list) else []) if str(item).strip()) or '无'}",
             f"- 意象: {'、'.join(str(item) for item in motifs if str(item).strip()) or '无'}",
             f"- 选择原因: {'；'.join(str(item) for item in reasons if str(item).strip()) or '无'}",
             "- 优先级：事件契约决定本章发生什么；场景卡只补镜头、人物欲望和边界；生成指令只控制写法、篇幅和补救策略。",

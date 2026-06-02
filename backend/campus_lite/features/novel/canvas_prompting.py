@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .event_pool import event_pool_source_counts, story_event_pool_prompt
+from .continuity import continuity_ledger_prompt
+from .event_pool import event_pool_replacement_stats, story_event_pool_prompt
+from .progression import progression_prompt
 from .setting_profiles import character_story_seed_pool, infer_novel_setting_type, novel_setting_guidance, project_story_seed_pool
 
 
@@ -24,6 +26,7 @@ class NovelCanvasPromptMixin:
             "character_desire, tension, required_facts, forbidden_progress, ending_beat, linked_material_ids。"
             "不要输出任何数字评分、冲突等级或低/中/高标签；所有张力都必须写成具体可见的文字原因。"
             "画布和正文规划中禁止使用“用户”“助手”“AI”作为人物名或视角名，必须使用作品设定里的真实人物名。"
+            "所有面向前端显示的字段必须使用自然中文；禁止返回 third_person、company_building_front、snake_case 或英文枚举。"
         )
 
     def _canvas_extend_system_prompt(self) -> str:
@@ -41,6 +44,7 @@ class NovelCanvasPromptMixin:
             "不要输出任何数字评分、冲突等级或低/中/高标签；scene.tension 必须写具体阻碍，例如外部打断、"
             "时间压力、信息差或人物不能立刻开口的原因。"
             "画布和正文规划中禁止使用“用户”“助手”“AI”作为人物名或视角名，必须使用作品设定里的真实人物名。"
+            "所有面向前端显示的字段必须使用自然中文；current_scene、pov、present_characters、surface_event 等不得使用英文枚举、拼音或 snake_case。"
         )
 
     def _canvas_source(
@@ -62,6 +66,8 @@ class NovelCanvasPromptMixin:
             f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
             "[题材事件池]",
             self._canvas_setting_guidance(project),
+            "[Project Progression Protocol]",
+            progression_prompt({}, project),
             "[Story Bible]",
             self._story_bible_prompt(story_bible),
             "[可用素材]",
@@ -98,6 +104,8 @@ class NovelCanvasPromptMixin:
             f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
             "[题材事件池]",
             self._canvas_setting_guidance(project),
+            "[Project Progression Protocol]",
+            progression_prompt({}, project),
             "[Story Bible]",
             self._story_bible_prompt(story_bible),
             "[Novel State 长期摘要]",
@@ -121,6 +129,9 @@ class NovelCanvasPromptMixin:
             "acts: 4 个阶段对象；chapters: 4-6 个章节对象，chapter_order 必须为 1..N；"
             "scenes: 至少每章 1 个场景对象，chapter_id 必须指向章节 id；"
             "threads: 线索对象数组，可为空；quality_rules: 字符串数组；"
+            "story_promise: 对象，包含 core_experience/genre_contract/relationship_engine/tone_commitment；"
+            "progression_protocol: 对象，包含 driver/chapter_rules/progression_tools/relationship_rule/drift_guards/style_directives/source/manual_edited；"
+            "chapters 每项额外包含 chapter_drive/progression_role/promise_targets；"
             "event_pool_delta: 可选对象，字段 add/update/retire，用来维护项目活动事件池。"
         )
 
@@ -132,10 +143,14 @@ class NovelCanvasPromptMixin:
             "place, time_anchor, event, hook, motifs, source_reason, and tags. Retire items should include id. "
             "time_anchor must be specific, for example 'Saturday 18:40, before the lake lights turn on'. "
             "tags must be an object: {event_type: string[], anchors: string[], theme_markers: string[], "
-            "tone_markers: string[], relationship_motion: string[], boundary_risk: 'low'|'medium'|'high', "
+            "tone_markers: string[], progression_role: string, progression_markers: string[], promise_markers: string[], "
+            "drift_guard_risks: string[], relationship_motion: string[], boundary_risk: 'low'|'medium'|'high', "
             "freshness: string[], continuity: string[], forbidden_defaults: string[]}. "
             "Every add/update must include at least 2 theme_markers and at least 1 tone_markers. "
+            "Every add/update must include progression_role, at least 2 progression_markers, and at least 1 promise_markers grounded in the project progression protocol. "
             "Events must express the project genre, tone, worldview, and relationship_setup through visible details. "
+            "Events must serve the project progression protocol; if an event may break drift_guards, list the risk instead of hiding it. "
+            "All returned values that will be displayed to users must be natural Chinese; do not use English enum labels, pinyin, or snake_case. "
             "Priority is fixed: written prose and Novel State first, current project event pool second, Project/Story Bible third, character story_seed_pool only as translatable flavor, global setting profile last. "
             "The character story_seed_pool must not decide what happens next, overwrite bound chapters, or drag the project back to the character's default setting. "
             "Do not output numeric scores, confidence, or deltas. "
@@ -157,17 +172,13 @@ class NovelCanvasPromptMixin:
         materials = self._require_storage().list_novel_materials(str(project["id"]))[:12]
         material_lines = "\n".join(self._canvas_material_line(row) for row in materials) or "None"
         active_pool = story_event_pool_prompt(current_canvas.get("event_pool")) if isinstance(current_canvas.get("event_pool"), dict) else "None"
-        source_counts = event_pool_source_counts(current_canvas.get("event_pool")) if isinstance(current_canvas.get("event_pool"), dict) else {}
-        active_count = sum(source_counts.values())
-        setting_count = int(source_counts.get("setting_profile") or 0)
-        setting_ratio = (setting_count / active_count) if active_count else 0
-        source_stats = json.dumps({
-            "active_count": active_count,
-            "source_counts": source_counts,
-            "setting_profile_ratio": round(setting_ratio, 2),
-            "requires_remote_add": setting_ratio > 0.3,
-            "recommended_add_count": "3-5" if setting_ratio > 0.3 else "0-3",
-        }, ensure_ascii=False)
+        progression = progression_prompt(current_canvas, project)
+        source_stats_data = (
+            event_pool_replacement_stats(current_canvas.get("event_pool"))
+            if isinstance(current_canvas.get("event_pool"), dict)
+            else event_pool_replacement_stats({})
+        )
+        source_stats = json.dumps(source_stats_data, ensure_ascii=False)
         character_seed_lines = self._event_pool_character_seed_prompt(project)
         recent_chapters = "\n".join(
             f"- chapter {row['chapter_order']}: {self._clean_material_text(row['summary'] or row['goal'])}"
@@ -186,6 +197,10 @@ class NovelCanvasPromptMixin:
             self._story_bible_prompt(story_bible),
             "[Novel State]",
             self._novel_state_prompt(novel_state),
+            "[Continuity Ledger]",
+            continuity_ledger_prompt(novel_state.get("continuity_ledger")),
+            "[Project Progression Protocol]",
+            progression,
             "[Current Active Event Pool]",
             active_pool,
             "[Event Pool Source Stats]",
@@ -202,10 +217,14 @@ class NovelCanvasPromptMixin:
             "[Rules]",
             "Prefer events that can carry action, obstacle, choice, and ending hook. "
             "Each add/update must include a concrete time_anchor and tags.theme_markers/tone_markers derived from Project genre/tone/worldview/relationship_setup. "
+            "Each add/update must include tags.progression_role, tags.progression_markers, tags.promise_markers, and tags.drift_guard_risks so local scoring can judge protocol fit. "
+            "Progression protocol beats generic setting profile: when a candidate expresses story_promise and progression tools, prefer adding it over preserving fallback templates. "
             "Do not add generic reusable incidents; make the time, place, object, and pressure specific to this project. "
-            "If source stats show setting_profile_ratio > 0.3, return 3 to 5 add candidates to replace generic fallback placeholders. "
+            "If Event Pool Source Stats shows replacement_needed > 0, return at least replacement_needed add candidates, enough to reduce setting_profile to fallback_target_max or lower. "
+            "If many placeholders remain, return up to 10 add candidates instead of stopping at 3 to 5. "
             "Remote add candidates should be preferred over keeping setting_profile placeholders when they are grounded in Novel State, handoff, genre, tone, worldview, or relationship_setup. "
-            "Use written chapters, Novel State, and handoff as hard continuity; use Story Bible as hard constraints; use Materials as light familiar anchors; use character story_seed_pool only to create translated variants when the active pool is thin, stale, duplicated, or off-theme. "
+            "Use written chapters, Novel State, Continuity Ledger, and handoff as hard continuity; events should continue next_must_continue/promises_made, avoid avoid_repeating/resolved_threads, and never violate forbidden_contradictions. "
+            "Use Story Bible as hard constraints; use Materials as light familiar anchors; use character story_seed_pool only to create translated variants when the active pool is thin, stale, duplicated, or off-theme. "
             "Never copy character default places/events directly when they conflict with the project setting. "
             "If existing active events are still useful, do not update them. Add only genuinely useful fresh candidates. "
             "If an active event is stale, duplicate, or conflicts with boundaries, retire it by id.",
@@ -325,6 +344,8 @@ class NovelCanvasPromptMixin:
             f"关系设定：{self._clean_material_text(project['relationship_setup'])}",
             "[题材事件池]",
             self._canvas_setting_guidance(project),
+            "[Project Progression Protocol]",
+            progression_prompt(current_canvas, project),
             "[Story Bible]",
             self._story_bible_prompt(story_bible),
             "[可信前文边界]",
@@ -342,6 +363,8 @@ class NovelCanvasPromptMixin:
             preserved_future,
             "[结构要求]",
             self._canvas_schema_hint(),
+            "Progression schema: include story_promise, progression_protocol, and per-chapter chapter_drive/progression_role/promise_targets. Build them for this project instead of using a fixed genre template.",
+            "Rolling rule: keep the existing story_promise/progression_protocol unless user edited it; every new chapter must include chapter_drive, progression_role, and promise_targets that serve the protocol.",
             "[滚动规划目标]",
             f"从第 {from_order + 1} 章开始，连续规划后续 {count} 章。chapter_order 必须依次为 {from_order + 1} 到 {from_order + count}。",
             instruction or "承接已写正文，规划下一组有事件、有协作、有轻微阻碍和具体钩子的题材内章节。",

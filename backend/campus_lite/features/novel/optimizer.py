@@ -6,7 +6,9 @@ from typing import Any
 
 from ...schemas import NovelInstructionOptimizeRequest, NovelInstructionOptimizeResponse
 from .config import NOVEL_GENERATION_TIMEOUT_MS
+from .continuity import continuity_ledger_prompt
 from .event_pool import normalize_story_event_pool, story_event_for_chapter, sync_story_event_pool_display_bindings
+from .progression import progression_prompt
 
 
 class NovelInstructionOptimizerMixin:
@@ -128,6 +130,10 @@ class NovelInstructionOptimizerMixin:
                 "motifs": event_contract.get("motifs") or selected_source.get("motifs") or [],
                 "theme_markers": tags.get("theme_markers") or [],
                 "tone_markers": tags.get("tone_markers") or [],
+                "progression_role": event_contract.get("progression_role") or tags.get("progression_role") or canvas_chapter.get("progression_role") or "",
+                "progression_markers": event_contract.get("progression_markers") or tags.get("progression_markers") or [],
+                "promise_markers": event_contract.get("promise_markers") or tags.get("promise_markers") or canvas_chapter.get("promise_targets") or [],
+                "drift_guard_risks": event_contract.get("drift_guard_risks") or tags.get("drift_guard_risks") or [],
                 "relationship_motion": tags.get("relationship_motion") or [],
                 "selection_score": event_contract.get("score") or selected_source.get("selection_score") or canvas_chapter.get("event_pool_score") or 0,
                 "selection_reasons": event_contract.get("reasons") or selected_source.get("selection_reasons") or canvas_chapter.get("event_pool_reasons") or [],
@@ -155,6 +161,7 @@ class NovelInstructionOptimizerMixin:
         body_tail = body[-900:] if len(body) > 900 else ""
         scene_card = payload.scene_card or {}
         canvas_chapter = payload.canvas_chapter or {}
+        canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
         previous_handoff = payload.previous_handoff or {}
         prior_novel_state = payload.prior_novel_state or {}
         quality_diagnosis = payload.quality_diagnosis or {}
@@ -174,6 +181,9 @@ class NovelInstructionOptimizerMixin:
             "章节目标：",
             str(payload.goal or (chapter["goal"] if chapter else "") or ""),
             "",
+            "项目推进协议：",
+            progression_prompt(canvas, project),
+            "",
             "章节摘要：",
             str(payload.summary or (chapter["summary"] if chapter else "") or ""),
             "",
@@ -192,6 +202,9 @@ class NovelInstructionOptimizerMixin:
             "截至上一章 Novel State 精简版：",
             json.dumps(prior_novel_state, ensure_ascii=False, indent=2)[:2200] if prior_novel_state else "无",
             "",
+            "Continuity Ledger 连续性账本：",
+            continuity_ledger_prompt(prior_novel_state.get("continuity_ledger") if isinstance(prior_novel_state, dict) else {}),
+            "",
             "当前正文质量诊断：",
             json.dumps(quality_diagnosis, ensure_ascii=False, indent=2)[:1600] if quality_diagnosis else "无",
             "",
@@ -204,7 +217,9 @@ class NovelInstructionOptimizerMixin:
             "",
             "请生成优化后的 instruction。要求：",
             "- 不写正文，只写给生成模型的操作指令。",
-            "- 信息优先级固定：已写正文/Novel State > 当前章节画布 > 项目事件池绑定 > 场景卡 > 用户写作偏好。",
+            "- 信息优先级固定：已写正文/Novel State/Continuity Ledger > 项目推进协议 > 当前章节画布 > 项目事件池绑定 > 场景卡 > 用户写作偏好。",
+            "- Continuity Ledger 的 locked_facts 和 forbidden_contradictions 是硬约束；next_must_continue/promises_made 必须优先承接；avoid_repeating/resolved_threads 不要重复写成新悬念。",
+            "- 项目推进协议决定整本书如何推进；当前章节画布和事件契约决定这一章发生什么；场景卡决定镜头、视角、欲望和边界；本 instruction 只编译写作任务。",
             "- 项目事件池绑定决定这一章的可见事件、时间锚点、主题标记和结尾钩子；不能另起一个与事件池无关的事件。",
             "- 事件 use_mode 规则：strict 必须采用核心地点/时间/事件/钩子；guide 作为主要方向；flavor 只借地点、意象或钩子；free 只作灵感，允许自由发挥。",
             "- 场景卡只决定镜头落点、视角、在场人物、人物欲望、边界和禁止推进；如果场景卡与事件池冲突，保留事件池发生什么，调整场景卡的写法。",

@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from .config import NOVEL_PLANNING_TIMEOUT_MS
+from .continuity import continuity_ledger_prompt
 
 
 class NovelAuditMixin:
@@ -87,7 +88,7 @@ class NovelAuditMixin:
             "你是小说章节审稿员，只输出 JSON 对象，不要打主观总分。"
             "字段必须包含：hard_fail, rewrite_required, checks, issues, rewrite_brief。"
             "checks 是对象，布尔字段包含 has_visible_event, has_character_choice, has_dialogue, has_ending_hook, "
-            "uses_scene_card_terms, has_meta_narration, has_repeated_paragraphs, breaks_confirmed_facts, style_breaks_previous_chapter。"
+            "uses_scene_card_terms, has_meta_narration, has_repeated_paragraphs, breaks_confirmed_facts, breaks_continuity_ledger, misses_required_continuation, repeats_resolved_thread, style_breaks_previous_chapter。"
             "你只判断这些可说明的问题，并为每个 issue 给出 evidence 和 rewrite_instruction。"
             "如果只是文风还可提升但正文已经可读，不要要求重写；如果缺少事件、对白、人物选择、结尾钩子，或泄露场景卡术语，才要求重写。"
         )
@@ -102,6 +103,10 @@ class NovelAuditMixin:
         local_check: dict[str, list[str]] | None = None,
     ) -> str:
         local_check = local_check or {"blockers": [], "warnings": [], "infos": []}
+        try:
+            novel_state = self._novel_state_until(project, int(chapter["chapter_order"]) - 1)
+        except Exception:
+            novel_state = {}
         return "\n\n".join([
             f"作品：{project['title']} / 第{chapter['chapter_order']}章《{chapter['title']}》",
             "[本地检查]",
@@ -110,6 +115,8 @@ class NovelAuditMixin:
             self._scene_card_prompt(scene_card),
             "[Scene Beats]",
             self._scene_beats_prompt(scene_beats),
+            "[Continuity Ledger 连续性账本]",
+            continuity_ledger_prompt(novel_state.get("continuity_ledger") if isinstance(novel_state, dict) else {}),
             "[正文]",
             parsed.get("body", ""),
             "[输出 JSON 示例]",
@@ -125,6 +132,9 @@ class NovelAuditMixin:
                     "has_meta_narration": False,
                     "has_repeated_paragraphs": False,
                     "breaks_confirmed_facts": False,
+                    "breaks_continuity_ledger": False,
+                    "misses_required_continuation": False,
+                    "repeats_resolved_thread": False,
                     "style_breaks_previous_chapter": False,
                 },
                 "issues": [],
@@ -170,6 +180,8 @@ class NovelAuditMixin:
         if checks.get("has_meta_narration") or checks.get("uses_scene_card_terms") or checks.get("has_repeated_paragraphs"):
             return True
         if checks.get("breaks_confirmed_facts"):
+            return True
+        if checks.get("breaks_continuity_ledger") or checks.get("misses_required_continuation") or checks.get("repeats_resolved_thread"):
             return True
         if checks.get("has_visible_event") is False or checks.get("has_character_choice") is False:
             return True

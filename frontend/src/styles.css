@@ -1004,6 +1004,7 @@ textarea::placeholder {
 .chapter-list,
 .bible-list,
 .material-list,
+.ledger-list,
 .continuity-list,
 .version-list {
   display: grid;
@@ -1677,6 +1678,55 @@ textarea::placeholder {
   background: rgba(255, 255, 255, 0.035);
 }
 
+.story-progression-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(139, 186, 166, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.story-progression-panel header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.story-progression-panel header strong {
+  color: rgba(244, 241, 232, 0.94);
+}
+
+.story-progression-panel header > span {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: rgba(244, 241, 232, 0.74);
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.story-progression-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.story-progression-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: rgba(244, 241, 232, 0.66);
+  font-size: 0.76rem;
+}
+
+.story-progression-grid textarea {
+  width: 100%;
+  resize: vertical;
+}
+
 .story-event-pool header {
   display: flex;
   justify-content: space-between;
@@ -2006,6 +2056,10 @@ textarea::placeholder {
   line-height: 1.45;
 }
 
+.story-event-reason.progression {
+  color: rgba(139, 186, 166, 0.86);
+}
+
 .story-event-time {
   margin: -2px 0 0;
   color: rgba(233, 196, 106, 0.82);
@@ -2294,6 +2348,7 @@ textarea::placeholder {
 
 .bible-list article,
 .material-list article,
+.ledger-list article,
 .continuity-list article,
 .version-list article {
   display: grid;
@@ -2305,6 +2360,7 @@ textarea::placeholder {
 
 .bible-list strong,
 .material-list strong,
+.ledger-list strong,
 .continuity-list strong,
 .version-list strong {
   color: rgba(233, 196, 106, 0.92);
@@ -2313,6 +2369,7 @@ textarea::placeholder {
 
 .bible-list p,
 .material-list p,
+.ledger-list p,
 .continuity-list p {
   color: rgba(244, 241, 232, 0.72);
   line-height: 1.55;

@@ -120,6 +120,28 @@ function eventSyncReturnRows(chapter: StoryCanvasChapter | null) {
     .map(([label, value]) => ({ label: String(label), value: String(value || "").trim() }))
     .filter((item) => item.value);
 }
+
+function chapterProgressionText(chapter: StoryCanvasChapter | null) {
+  if (!chapter) return "";
+  const contract = chapter.event_contract && typeof chapter.event_contract === "object"
+    ? chapter.event_contract as Record<string, unknown>
+    : {};
+  const promiseTargets = Array.isArray(contract.promise_markers)
+    ? contract.promise_markers.map(String).filter(Boolean)
+    : (chapter.promise_targets || []);
+  return [
+    String(contract.progression_role || chapter.progression_role || "").trim(),
+    String(contract.chapter_drive || chapter.chapter_drive || "").trim(),
+    promiseTargets.slice(0, 4).join(" / ")
+  ].filter(Boolean).join(" · ");
+}
+
+function contractList(chapter: StoryCanvasChapter | null, key: "continuity_hits" | "continuity_risks") {
+  const contract = chapter?.event_contract;
+  if (!contract || typeof contract !== "object") return [];
+  const value = (contract as Record<string, unknown>)[key];
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
 </script>
 
 <template>
@@ -170,10 +192,16 @@ function eventSyncReturnRows(chapter: StoryCanvasChapter | null) {
         <p>{{ activeCanvasEvent.hook || "暂无钩子" }}</p>
         <span>模式</span>
         <strong>{{ activeCanvasEvent.use_mode || "guide" }}</strong>
+        <span>本章推进</span>
+        <p>{{ chapterProgressionText(activeCanvasChapter) || "暂未写入推进方式" }}</p>
         <span>Score</span>
         <strong>{{ activeCanvasEvent.selection_score || activeCanvasChapter?.event_pool_score || 0 }}</strong>
         <span>Reasons</span>
         <p>{{ (activeCanvasEvent.selection_reasons || activeCanvasChapter?.event_pool_reasons || []).join("；") || "暂无原因" }}</p>
+        <span>连续性命中</span>
+        <p>{{ contractList(activeCanvasChapter, "continuity_hits").join("；") || "暂无命中" }}</p>
+        <span>连续性风险</span>
+        <p>{{ contractList(activeCanvasChapter, "continuity_risks").join("；") || "暂无风险" }}</p>
         <span>同步</span>
         <p>{{ eventSyncLabel(activeCanvasChapter) }}</p>
       </div>

@@ -64,6 +64,7 @@ class NovelVersionStorageMixin:
             "relationship_delta": handoff_list("relationship_delta"),
             "open_threads_delta": (handoff_list("open_threads") + handoff_list("next_must_continue"))[:12],
             "resolved_threads_delta": handoff_list("resolved_threads"),
+            "continuity_ledger": handoff.get("continuity_ledger") if isinstance(handoff.get("continuity_ledger"), dict) else {},
             "chapter_handoff": handoff if isinstance(handoff, dict) else {},
             "handoff_source": str(scene_card.get("handoff_source") or "").strip(),
             "source": source.strip()[:120],

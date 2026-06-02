@@ -26,6 +26,18 @@ function eventContractText(chapter: StoryCanvasChapter) {
     String(contract.external_event || "").trim()
   ].filter(Boolean).join(" · ");
 }
+
+function promiseTargetsText(chapter: StoryCanvasChapter) {
+  return (chapter.promise_targets || []).slice(0, 4).join(" / ");
+}
+
+function continuityText(chapter: StoryCanvasChapter, key: "continuity_hits" | "continuity_risks") {
+  const contract = chapter.event_contract && typeof chapter.event_contract === "object"
+    ? chapter.event_contract as Record<string, unknown>
+    : null;
+  const value = contract?.[key];
+  return Array.isArray(value) ? value.map(String).filter(Boolean).slice(0, 3).join(" / ") : "";
+}
 </script>
 
 <template>
@@ -49,6 +61,17 @@ function eventContractText(chapter: StoryCanvasChapter) {
         <article v-if="eventContractText(chapter)">
           <span>事件契约</span>
           <p>{{ eventContractText(chapter) }}</p>
+        </article>
+        <article v-if="chapter.chapter_drive || chapter.progression_role || promiseTargetsText(chapter)">
+          <span>本章推进方式</span>
+          <p>{{ [chapter.progression_role, chapter.chapter_drive, promiseTargetsText(chapter)].filter(Boolean).join(" · ") }}</p>
+        </article>
+        <article v-if="continuityText(chapter, 'continuity_hits') || continuityText(chapter, 'continuity_risks')">
+          <span>连续性账本</span>
+          <p>
+            {{ continuityText(chapter, 'continuity_hits') ? `命中：${continuityText(chapter, 'continuity_hits')}` : "" }}
+            {{ continuityText(chapter, 'continuity_risks') ? `风险：${continuityText(chapter, 'continuity_risks')}` : "" }}
+          </p>
         </article>
         <article v-for="field in canvasActionChainFields" :key="field.key">
           <span>{{ field.label }}</span>

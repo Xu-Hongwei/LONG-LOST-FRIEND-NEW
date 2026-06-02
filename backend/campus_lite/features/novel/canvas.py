@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import asyncio
+import json
 from typing import Any
 
 from ...schemas import NovelProjectResponse
 from .config import NOVEL_CANVAS_TIMEOUT_MS
-from .event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters
+from .event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters, event_pool_replacement_stats
 
 
 class NovelCanvasMixin:
@@ -24,14 +24,12 @@ class NovelCanvasMixin:
         canvas = fallback_canvas
         event_pool_delta: dict[str, Any] = {}
         event_pool_delta_error = ""
-        parallel_event_pool_update = False
+        event_pool_first_update = False
+        event_pool_replacement = event_pool_replacement_stats(fallback_canvas.get("event_pool"))
+        event_pool_add_count = 0
         try:
             if not llm.configured():
                 raise RuntimeError("llm_not_configured")
-            canvas_messages = [
-                {"role": "system", "content": self._canvas_extend_system_prompt()},
-                {"role": "user", "content": self._initial_canvas_source(reset_project, story_bible, materials)},
-            ]
             event_pool_messages = [
                 {"role": "system", "content": self._event_pool_delta_system_prompt()},
                 {
@@ -46,24 +44,29 @@ class NovelCanvasMixin:
                     ),
                 },
             ]
-            parallel_event_pool_update = True
-            canvas_result, event_pool_result = await asyncio.gather(
-                llm.chat_complete(canvas_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"}),
-                llm.chat_complete(event_pool_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"}),
-                return_exceptions=True,
-            )
-            if isinstance(event_pool_result, Exception):
-                event_pool_delta_error = type(event_pool_result).__name__
-            else:
+            try:
+                event_pool_result = await llm.chat_complete(event_pool_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
                 try:
                     event_pool_delta = self._parse_event_pool_delta_response(str(event_pool_result))
+                    event_pool_add_count = len(event_pool_delta.get("add") or []) if isinstance(event_pool_delta.get("add"), list) else 0
                 except Exception as delta_exc:
                     event_pool_delta_error = type(delta_exc).__name__
-            if isinstance(canvas_result, Exception):
-                raise canvas_result
+            except Exception as delta_exc:
+                event_pool_delta_error = type(delta_exc).__name__
+            if event_pool_delta:
+                setting_type = str(self._json_dict(fallback_canvas.get("diagnostics")).get("setting_type") or "modern_daily")
+                fallback_canvas["event_pool"] = apply_story_event_pool_delta(fallback_canvas.get("event_pool"), event_pool_delta, setting_type)
+                event_pool_first_update = True
+            canvas_project = self._project_with_story_canvas(reset_project, fallback_canvas)
+            canvas_messages = [
+                {"role": "system", "content": self._canvas_extend_system_prompt()},
+                {"role": "user", "content": self._initial_canvas_source(canvas_project, story_bible, materials)},
+            ]
+            canvas_result = await llm.chat_complete(canvas_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
             text = str(canvas_result)
             canvas = self._parse_canvas_response(text, canvas)
             if event_pool_delta:
+                self._clear_initial_canvas_event_bindings(canvas)
                 setting_type = str(
                     self._json_dict(canvas.get("diagnostics")).get("setting_type")
                     or self._json_dict(fallback_canvas.get("diagnostics")).get("setting_type")
@@ -73,6 +76,21 @@ class NovelCanvasMixin:
                     apply_story_event_pool_delta(canvas.get("event_pool"), event_pool_delta, setting_type),
                     self._canvas_chapters(canvas),
                     setting_type,
+                    {
+                        "project": {
+                            "title": project["title"],
+                            "genre": project["genre"],
+                            "tone": project["tone"],
+                            "worldview": project["worldview"],
+                            "relationship_setup": project["relationship_setup"],
+                            "outline": project["outline"],
+                        },
+                        "story_promise": canvas.get("story_promise"),
+                        "progression_protocol": canvas.get("progression_protocol"),
+                        "story_bible": story_bible,
+                        "materials": materials,
+                        "prefer_concrete_events": True,
+                    },
                 )
             canvas["diagnostics"] = {
                 **self._json_dict(canvas.get("diagnostics")),
@@ -81,16 +99,37 @@ class NovelCanvasMixin:
                 "event_pool_reset": True,
                 "event_pool_update_source": "remote" if event_pool_delta else "none",
                 "event_pool_update_error": event_pool_delta_error,
-                "parallel_event_pool_update": parallel_event_pool_update,
+                "event_pool_first_update": event_pool_first_update,
+                "parallel_event_pool_update": False,
+                "event_pool_replacement_needed": event_pool_replacement.get("replacement_needed", 0),
+                "event_pool_delta_add_count": event_pool_add_count,
+                "event_pool_update_missing": bool(event_pool_replacement.get("replacement_needed", 0)) and event_pool_add_count <= 0,
+                "event_pool_update_underfilled": event_pool_add_count > 0 and event_pool_add_count < int(event_pool_replacement.get("replacement_needed", 0) or 0),
             }
         except Exception as exc:
             llm.last_chat_error = type(exc).__name__
             if event_pool_delta:
+                self._clear_initial_canvas_event_bindings(canvas)
                 setting_type = str(self._json_dict(canvas.get("diagnostics")).get("setting_type") or "modern_daily")
                 canvas["event_pool"] = bind_story_event_pool_to_chapters(
                     apply_story_event_pool_delta(canvas.get("event_pool"), event_pool_delta, setting_type),
                     self._canvas_chapters(canvas),
                     setting_type,
+                    {
+                        "project": {
+                            "title": project["title"],
+                            "genre": project["genre"],
+                            "tone": project["tone"],
+                            "worldview": project["worldview"],
+                            "relationship_setup": project["relationship_setup"],
+                            "outline": project["outline"],
+                        },
+                        "story_promise": canvas.get("story_promise") if isinstance(canvas, dict) else {},
+                        "progression_protocol": canvas.get("progression_protocol") if isinstance(canvas, dict) else {},
+                        "story_bible": story_bible,
+                        "materials": materials,
+                        "prefer_concrete_events": True,
+                    },
                 )
             canvas["diagnostics"] = {
                 **self._json_dict(canvas.get("diagnostics")),
@@ -101,13 +140,28 @@ class NovelCanvasMixin:
                 "fallback_detail": str(exc)[:240],
                 "event_pool_update_source": "remote" if event_pool_delta else "none",
                 "event_pool_update_error": event_pool_delta_error,
-                "parallel_event_pool_update": parallel_event_pool_update,
+                "event_pool_first_update": event_pool_first_update,
+                "parallel_event_pool_update": False,
+                "event_pool_replacement_needed": event_pool_replacement.get("replacement_needed", 0),
+                "event_pool_delta_add_count": event_pool_add_count,
+                "event_pool_update_missing": bool(event_pool_replacement.get("replacement_needed", 0)) and event_pool_add_count <= 0,
+                "event_pool_update_underfilled": event_pool_add_count > 0 and event_pool_add_count < int(event_pool_replacement.get("replacement_needed", 0) or 0),
             }
         canvas = self._story_canvas_with_materials(canvas, materials)
+        self._sync_bound_event_contracts(canvas)
         storage.update_novel_project(project_id, {"story_canvas": canvas, "outline": self._canvas_outline(canvas)})
         self._prune_empty_chapters_outside_canvas(project_id, canvas)
         self._sync_chapters_from_canvas(project_id, canvas)
         return self.project_response(project_id)
+
+    def _clear_initial_canvas_event_bindings(self, canvas: dict[str, Any]) -> None:
+        for chapter in self._canvas_chapters(canvas):
+            chapter["event_pool_id"] = ""
+            chapter.pop("event_pool_score", None)
+            chapter.pop("event_pool_reasons", None)
+            chapter.pop("event_pool_penalties", None)
+            chapter.pop("event_contract", None)
+            chapter.pop("event_sync", None)
 
     def _project_with_reset_canvas(self, project: Any) -> Any:
         try:
@@ -115,6 +169,14 @@ class NovelCanvasMixin:
         except Exception:
             data = dict(project) if isinstance(project, dict) else {}
         data["story_canvas_json"] = "{}"
+        return data
+
+    def _project_with_story_canvas(self, project: Any, canvas: dict[str, Any]) -> Any:
+        try:
+            data = {key: project[key] for key in project.keys()}
+        except Exception:
+            data = dict(project) if isinstance(project, dict) else {}
+        data["story_canvas_json"] = json.dumps(canvas or {}, ensure_ascii=False)
         return data
 
     async def extend_canvas(
@@ -147,45 +209,55 @@ class NovelCanvasMixin:
             from_order = max(max_canvas_order, max_written_order)
         from_order = max(0, min(int(from_order), 999))
         count = max(2, min(int(count), 6))
-        fallback = self._default_extension_canvas(project, current_canvas, from_order, count)
+        event_canvas = current_canvas
+        fallback = self._default_extension_canvas(project, event_canvas, from_order, count)
         event_pool_delta: dict[str, Any] = {}
         event_pool_delta_error = ""
+        event_pool_first_update = False
+        event_pool_replacement = event_pool_replacement_stats(event_canvas.get("event_pool"))
+        event_pool_add_count = 0
         try:
             if not llm.configured():
                 raise RuntimeError("llm_not_configured")
-            canvas_messages = [
-                {"role": "system", "content": self._canvas_extend_system_prompt()},
-                {"role": "user", "content": self._canvas_extend_source(project, current_canvas, db_chapters, from_order, count, instruction)},
-            ]
             event_pool_messages = [
                 {"role": "system", "content": self._event_pool_delta_system_prompt()},
-                {"role": "user", "content": self._event_pool_delta_source(project, current_canvas, db_chapters, from_order, count, instruction)},
+                {"role": "user", "content": self._event_pool_delta_source(project, event_canvas, db_chapters, from_order, count, instruction)},
             ]
-            canvas_result, event_pool_result = await asyncio.gather(
-                llm.chat_complete(canvas_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"}),
-                llm.chat_complete(event_pool_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"}),
-                return_exceptions=True,
-            )
-            if isinstance(event_pool_result, Exception):
-                event_pool_delta_error = type(event_pool_result).__name__
-            else:
+            try:
+                event_pool_result = await llm.chat_complete(event_pool_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
                 try:
                     event_pool_delta = self._parse_event_pool_delta_response(str(event_pool_result))
+                    event_pool_add_count = len(event_pool_delta.get("add") or []) if isinstance(event_pool_delta.get("add"), list) else 0
                 except Exception as delta_exc:
                     event_pool_delta_error = type(delta_exc).__name__
-            if isinstance(canvas_result, Exception):
-                raise canvas_result
+            except Exception as delta_exc:
+                event_pool_delta_error = type(delta_exc).__name__
+            if event_pool_delta:
+                setting_type = str(self._json_dict(event_canvas.get("diagnostics")).get("setting_type") or "modern_daily")
+                event_canvas = json.loads(json.dumps(event_canvas, ensure_ascii=False))
+                event_canvas["event_pool"] = apply_story_event_pool_delta(event_canvas.get("event_pool"), event_pool_delta, setting_type)
+                event_pool_first_update = True
+            canvas_project = self._project_with_story_canvas(project, event_canvas)
+            fallback = self._default_extension_canvas(canvas_project, event_canvas, from_order, count)
+            canvas_messages = [
+                {"role": "system", "content": self._canvas_extend_system_prompt()},
+                {"role": "user", "content": self._canvas_extend_source(canvas_project, event_canvas, db_chapters, from_order, count, instruction)},
+            ]
+            canvas_result = await llm.chat_complete(canvas_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
             text = str(canvas_result)
             extension = self._parse_canvas_response(text, fallback)
-            if event_pool_delta:
-                extension["event_pool_delta"] = self._merge_event_pool_deltas(extension.get("event_pool_delta"), event_pool_delta)
             extension["diagnostics"] = {
                 **self._json_dict(extension.get("diagnostics")),
                 "source": "remote",
                 "mode": "rolling_extend",
                 "event_pool_update_source": "remote" if event_pool_delta else "none",
                 "event_pool_update_error": event_pool_delta_error,
-                "parallel_event_pool_update": True,
+                "event_pool_first_update": event_pool_first_update,
+                "parallel_event_pool_update": False,
+                "event_pool_replacement_needed": event_pool_replacement.get("replacement_needed", 0),
+                "event_pool_delta_add_count": event_pool_add_count,
+                "event_pool_update_missing": bool(event_pool_replacement.get("replacement_needed", 0)) and event_pool_add_count <= 0,
+                "event_pool_update_underfilled": event_pool_add_count > 0 and event_pool_add_count < int(event_pool_replacement.get("replacement_needed", 0) or 0),
             }
         except Exception as exc:
             llm.last_chat_error = type(exc).__name__
@@ -199,11 +271,15 @@ class NovelCanvasMixin:
                     "fallback_detail": str(exc)[:240],
                     "event_pool_update_source": "none",
                     "event_pool_update_error": event_pool_delta_error,
+                    "event_pool_first_update": event_pool_first_update,
                     "parallel_event_pool_update": False,
+                    "event_pool_replacement_needed": event_pool_replacement.get("replacement_needed", 0),
+                    "event_pool_delta_add_count": event_pool_add_count,
+                    "event_pool_update_missing": bool(event_pool_replacement.get("replacement_needed", 0)) and event_pool_add_count <= 0,
+                    "event_pool_update_underfilled": event_pool_add_count > 0 and event_pool_add_count < int(event_pool_replacement.get("replacement_needed", 0) or 0),
                 },
             }
             if event_pool_delta:
-                extension["event_pool_delta"] = event_pool_delta
                 extension["diagnostics"]["event_pool_update_source"] = "remote"
         materials = storage.list_novel_materials(project_id)
         character_card = None
@@ -229,10 +305,14 @@ class NovelCanvasMixin:
             "materials": materials,
             "novel_state": self._novel_state_until(project, from_order),
             "recent_chapters": db_chapters,
+            "story_promise": current_canvas.get("story_promise") if isinstance(current_canvas, dict) else {},
+            "progression_protocol": current_canvas.get("progression_protocol") if isinstance(current_canvas, dict) else {},
             "bind_after_order": from_order,
+            "prefer_concrete_events": True,
         }
         canvas = self._merge_extended_canvas(current_canvas, extension, from_order, scoring_context)
         canvas = self._story_canvas_with_materials(canvas, materials)
+        self._sync_bound_event_contracts(canvas)
         storage.update_novel_project(project_id, {"story_canvas": canvas, "outline": self._canvas_outline(canvas)})
         self._prune_empty_chapters_outside_canvas(project_id, canvas)
         self._sync_chapters_from_canvas(project_id, canvas, start_order=from_order + 1)

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ...setting_types import normalize_setting_type
+from .continuity import continuity_ledger_terms
+from .progression import progression_terms as _progression_terms
 from .setting_profiles import novel_setting_profile
 
 
@@ -53,6 +55,9 @@ def _clean_tags(value: Any) -> dict[str, Any]:
         "anchors",
         "theme_markers",
         "tone_markers",
+        "progression_markers",
+        "promise_markers",
+        "drift_guard_risks",
         "relationship_motion",
         "continuity",
         "freshness",
@@ -64,6 +69,9 @@ def _clean_tags(value: Any) -> dict[str, Any]:
     boundary_risk = _clean_text(value.get("boundary_risk"), 40)
     if boundary_risk:
         tags["boundary_risk"] = boundary_risk
+    progression_role = _clean_text(value.get("progression_role"), 80)
+    if progression_role:
+        tags["progression_role"] = progression_role
     return tags
 
 
@@ -156,6 +164,11 @@ def _normalize_event_entry(raw: Any, fallback: dict[str, Any], index: int) -> di
     place = _clean_text(source.get("place") or source.get("location") or fallback["place"], 180)
     hook = _clean_text(source.get("hook") or source.get("ending") or source.get("ending_hook") or fallback["hook"], 260)
     event_id = _clean_text(source.get("id") or fallback["id"] or f"evt_{index + 1}", 80)
+    source_label = _clean_text(source.get("source") or fallback.get("source") or "setting_profile", 40)
+    if raw is source and not source.get("source") and source.get("source_reason"):
+        source_label = "remote"
+    elif raw is source and not source.get("source") and event_id and event_id != _clean_text(fallback.get("id"), 80):
+        source_label = "project"
     status = _clean_text(source.get("status") or fallback.get("status") or "fresh", 40)
     if status not in {"fresh", "planned", "used", "mutated", "retired"}:
         status = "fresh"
@@ -167,7 +180,7 @@ def _normalize_event_entry(raw: Any, fallback: dict[str, Any], index: int) -> di
         "time_anchor": _clean_text(source.get("time_anchor") or fallback.get("time_anchor"), 120),
         "motifs": _clean_list(source.get("motifs") or fallback.get("motifs"), 6, 80),
         "status": status,
-        "source": _clean_text(source.get("source") or fallback.get("source") or "setting_profile", 40),
+        "source": source_label,
         "use_mode": normalize_event_use_mode(source.get("use_mode") or fallback.get("use_mode")),
         "used_chapter_ids": _clean_list(source.get("used_chapter_ids") or fallback.get("used_chapter_ids"), 20, 80),
         "bound_chapter_orders": _clean_list(source.get("bound_chapter_orders") or fallback.get("bound_chapter_orders"), 20, 20),
@@ -200,7 +213,8 @@ def _replaceable_active_index(active: list[dict[str, Any]]) -> int:
         {"character_seed_translated"},
     ]
     for sources in replacement_tiers:
-        for index in range(len(active) - 1, -1, -1):
+        indexes = range(len(active)) if "setting_profile" in sources else range(len(active) - 1, -1, -1)
+        for index in indexes:
             item = active[index]
             if item.get("bound_chapter_orders") or item.get("used_chapter_ids"):
                 continue
@@ -234,6 +248,28 @@ def event_pool_source_counts(pool: Any) -> dict[str, int]:
         label = _clean_text(item.get("source"), 40) or "setting_profile"
         counts[label] = counts.get(label, 0) + 1
     return counts
+
+
+def event_pool_replacement_stats(pool: Any, fallback_source: str = "setting_profile", target_max: int = 3) -> dict[str, Any]:
+    counts = event_pool_source_counts(pool)
+    active_count = sum(counts.values())
+    fallback_count = int(counts.get(fallback_source) or 0)
+    replacement_needed = max(0, fallback_count - max(0, int(target_max)))
+    return {
+        "active_count": active_count,
+        "source_counts": counts,
+        "fallback_source": fallback_source,
+        "fallback_count": fallback_count,
+        "fallback_target_max": max(0, int(target_max)),
+        "fallback_ratio": round((fallback_count / active_count) if active_count else 0, 2),
+        "replacement_needed": replacement_needed,
+        "requires_remote_add": replacement_needed > 0,
+        "recommended_add_count": (
+            f"{replacement_needed}-{STORY_EVENT_POOL_SIZE}"
+            if replacement_needed > 0
+            else "0-3"
+        ),
+    }
 
 
 def normalize_story_event_pool(
@@ -472,15 +508,20 @@ def apply_story_event_pool_delta(raw: Any, delta: Any, setting_type: str = "mode
             entry["source"] = "remote"
         entry_key = _event_key(entry)
         if entry_key and entry_key not in seen_keys:
+            insert_index: int | None = None
             if len(active) >= STORY_EVENT_POOL_SIZE:
                 replace_index = _replaceable_active_index(active)
                 if replace_index >= 0:
                     removed = active.pop(replace_index)
+                    insert_index = replace_index
                     by_id.pop(str(removed.get("id")), None)
                     seen_keys.discard(_event_key(removed))
                     if removed.get("source") == "setting_profile":
                         entry["selection_reasons"] = _clean_list([*(entry.get("selection_reasons") or []), "替换题材兜底"], 8, 120)
-            active.append(entry)
+            if insert_index is None:
+                active.append(entry)
+            else:
+                active.insert(insert_index, entry)
             by_id[str(entry.get("id"))] = entry
             seen_keys.add(entry_key)
     pool["active"] = active[:STORY_EVENT_POOL_SIZE]
@@ -565,6 +606,7 @@ def _scoring_context(context: dict[str, Any] | None, retired: list[dict[str, Any
     context = context if isinstance(context, dict) else {}
     story_bible = context.get("story_bible") if isinstance(context.get("story_bible"), dict) else {}
     novel_state = context.get("novel_state") if isinstance(context.get("novel_state"), dict) else {}
+    ledger_terms = continuity_ledger_terms(novel_state.get("continuity_ledger"))
     project = context.get("project") if isinstance(context.get("project"), dict) else {}
     character = context.get("character") if isinstance(context.get("character"), dict) else {}
     materials = context.get("materials") if isinstance(context.get("materials"), list) else []
@@ -586,6 +628,9 @@ def _scoring_context(context: dict[str, Any] | None, retired: list[dict[str, Any
         *[str(item) for item in story_bible.get("foreshadowing", []) if str(item).strip()],
         *[str(item) for item in story_bible.get("unresolved_threads", []) if str(item).strip()],
         *[str(item) for item in novel_state.get("open_threads", []) if str(item).strip()],
+        *ledger_terms["ledger_open"],
+        *ledger_terms["ledger_must_continue"],
+        *ledger_terms["ledger_promises"],
     ]
     material_facts: list[str] = []
     material_relationships: list[str] = []
@@ -637,6 +682,13 @@ def _scoring_context(context: dict[str, Any] | None, retired: list[dict[str, Any
         character_seed.get("event_seeds", []),
         character.get("setting_notes"),
     ], 18)
+    progression_profile_terms = _profile_terms([
+        _progression_terms(context, project),
+        context.get("story_promise"),
+        context.get("progression_protocol"),
+        project.get("story_promise"),
+        project.get("progression_protocol"),
+    ], 36)
     return {
         "facts": _clean_list(facts, 20, 160),
         "relationships": _clean_list(relationships, 20, 160),
@@ -652,6 +704,8 @@ def _scoring_context(context: dict[str, Any] | None, retired: list[dict[str, Any
         "theme_terms": theme_terms,
         "tone_terms": tone_terms,
         "character_seed_terms": character_seed_terms,
+        "progression_terms": progression_profile_terms,
+        **ledger_terms,
     }
 
 
@@ -697,6 +751,19 @@ def _event_source_priority(event: dict[str, Any]) -> int:
     return 1
 
 
+def _is_concrete_event_source(event: dict[str, Any]) -> bool:
+    return _clean_text(event.get("source"), 40) in {"remote", "llm", "project", "manual"}
+
+
+def _has_available_concrete_event(active: list[dict[str, Any]], excluded_event_ids: set[str]) -> bool:
+    return any(
+        item.get("use_mode") != "free"
+        and str(item.get("id") or "") not in excluded_event_ids
+        and _is_concrete_event_source(item)
+        for item in active
+    )
+
+
 def score_story_event(
     event: dict[str, Any],
     chapter: dict[str, Any],
@@ -719,6 +786,10 @@ def score_story_event(
     forbidden_defaults = _clean_list(tags.get("forbidden_defaults"), 8, 80)
     theme_markers = _clean_list(tags.get("theme_markers"), 12, 80)
     tone_markers = _clean_list(tags.get("tone_markers"), 8, 80)
+    progression_markers = _clean_list(tags.get("progression_markers"), 12, 80)
+    promise_markers = _clean_list(tags.get("promise_markers"), 12, 80)
+    drift_guard_risks = _clean_list(tags.get("drift_guard_risks"), 8, 80)
+    progression_role = _clean_text(tags.get("progression_role") or event.get("progression_role"), 80)
 
     if _event_key(event) in set(ctx["retired_keys"]):
         blocked = True
@@ -732,6 +803,10 @@ def score_story_event(
     if _has_internal_role_name(text):
         blocked = True
         penalties.append("internal role name")
+    forbidden_hits = _contains_any(text, ctx["ledger_forbidden"], 2)
+    if forbidden_hits:
+        blocked = True
+        penalties.append(f"违反连续性禁区：{', '.join(forbidden_hits)}")
     if setting_type != "campus" and (_contains_any(text, list(_CAMPUS_DEFAULT_TERMS), 1) or forbidden_defaults):
         blocked = True
         penalties.append("campus default in non-campus setting")
@@ -752,6 +827,28 @@ def score_story_event(
         priority_reasons.append(f"命中基调：{', '.join(tone_hits[:3])}")
     elif tone_markers:
         score += 1
+
+    progression_text = " ".join([text, progression_role, " ".join(progression_markers), " ".join(promise_markers)])
+    progression_hits = _contains_any(progression_text, ctx["progression_terms"], 5)
+    chapter_progression_role = _clean_text(chapter.get("progression_role"), 80)
+    if progression_hits:
+        score += min(16, 6 + len(progression_hits) * 3)
+        priority_reasons.append(f"命中推进协议：{', '.join(progression_hits[:4])}")
+    elif progression_markers or promise_markers:
+        score += min(5, len(progression_markers) + len(promise_markers))
+    elif _clean_text(event.get("source"), 40) in {"remote", "llm"}:
+        score -= 3
+        penalties.append("missing progression markers")
+    if progression_role and chapter_progression_role:
+        if progression_role == chapter_progression_role or progression_role in chapter_progression_role or chapter_progression_role in progression_role:
+            score += 6
+            reasons.append("matches chapter progression role")
+        else:
+            score -= 3
+            penalties.append("progression role mismatch")
+    if drift_guard_risks:
+        score -= min(12, len(drift_guard_risks) * 4)
+        penalties.append("drift guard risk")
 
     time_anchor = _clean_text(event.get("time_anchor"), 120)
     if time_anchor and _has_concrete_time_anchor(time_anchor):
@@ -792,6 +889,7 @@ def score_story_event(
         score += 2
         reasons.append("character flavor seed")
     elif source_label == "setting_profile":
+        score -= 8
         penalties.append("setting profile fallback")
 
     if _event_matches_chapter(event, chapter):
@@ -849,6 +947,22 @@ def score_story_event(
     if _contains_any(text, ctx["open_threads"], 2):
         score += 4
         reasons.append("continues open thread")
+    must_hits = _contains_any(text, ctx["ledger_must_continue"], 3)
+    if must_hits:
+        score += min(14, 6 + len(must_hits) * 4)
+        priority_reasons.append(f"承接账本：{', '.join(must_hits[:3])}")
+    promise_hits = _contains_any(text, ctx["ledger_promises"], 2)
+    if promise_hits:
+        score += min(8, 4 + len(promise_hits) * 2)
+        reasons.append("承接未兑现承诺")
+    avoid_hits = _contains_any(text, ctx["ledger_avoid"], 2)
+    if avoid_hits:
+        score -= min(14, 6 + len(avoid_hits) * 4)
+        penalties.append(f"重复账本避免项：{', '.join(avoid_hits[:2])}")
+    resolved_hits = _contains_any(text, ctx["ledger_resolved"], 2)
+    if resolved_hits:
+        score -= min(10, 4 + len(resolved_hits) * 3)
+        penalties.append("touches resolved thread")
     if _contains_any(text, ctx["recent_text"], 1):
         score += 2
 
@@ -868,6 +982,8 @@ def score_story_event(
         penalties.append("similar to retired")
 
     score = max(0, min(100, int(score)))
+    if not time_anchor and not theme_markers and source_label not in {"remote", "llm"}:
+        score = min(score, 88)
     if blocked:
         score = 0
     return {
@@ -887,6 +1003,8 @@ def select_story_event_for_chapter(
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     context = context if isinstance(context, dict) else {}
     excluded_event_ids = {str(item) for item in context.get("excluded_event_ids", []) if str(item).strip()}
+    prefer_concrete = bool(context.get("prefer_concrete_events"))
+    concrete_available = prefer_concrete and _has_available_concrete_event(active, excluded_event_ids)
     best_event: dict[str, Any] | None = None
     best_score: dict[str, Any] = {"score": -1, "reasons": [], "penalties": [], "blocked": True}
     event_id = _clean_text(chapter.get("event_pool_id"), 80)
@@ -896,6 +1014,8 @@ def select_story_event_for_chapter(
         if str(item.get("id") or "") in excluded_event_ids:
             continue
         if item.get("use_mode") == "free":
+            continue
+        if concrete_available and not _is_concrete_event_source(item):
             continue
         scored = score_story_event(item, chapter, context, setting_type)
         if scored["blocked"]:
@@ -916,6 +1036,7 @@ def select_story_event_for_chapter(
         and existing_score
         and not existing_score["blocked"]
         and _event_matches_chapter(existing, chapter)
+        and not (concrete_available and not _is_concrete_event_source(existing))
     ):
         if existing_score["score"] >= 60 and existing_score["score"] >= int(best_score.get("score", 0)) - 12:
             return existing, existing_score
@@ -989,12 +1110,26 @@ def bind_story_event_pool_to_chapters(
             if event.get("status") == "fresh":
                 event["status"] = "planned"
             continue
-        if not event or not _event_matches_chapter(event, chapter):
-            event = next((item for item in active if item.get("use_mode") != "free" and str(item.get("id") or "") not in selected_event_ids and _event_matches_chapter(item, chapter)), None)
+        prefer_concrete = bool(bind_context.get("prefer_concrete_events"))
+        concrete_available = prefer_concrete and _has_available_concrete_event(active, selected_event_ids)
+        current_is_usable = bool(event) and _event_matches_chapter(event, chapter) and not (concrete_available and not _is_concrete_event_source(event))
+        if not current_is_usable:
+            event = next((
+                item for item in active
+                if item.get("use_mode") != "free"
+                and str(item.get("id") or "") not in selected_event_ids
+                and (not concrete_available or _is_concrete_event_source(item))
+                and _event_matches_chapter(item, chapter)
+            ), None)
             if not event:
                 event, scored = select_story_event_for_chapter(active, chapter, bind_context, setting_type)
                 if not event:
-                    candidates = [item for item in active if item.get("use_mode") != "free" and str(item.get("id") or "") not in selected_event_ids] or [item for item in active if item.get("use_mode") != "free"]
+                    candidates = [
+                        item for item in active
+                        if item.get("use_mode") != "free"
+                        and str(item.get("id") or "") not in selected_event_ids
+                        and (not concrete_available or _is_concrete_event_source(item))
+                    ] or [item for item in active if item.get("use_mode") != "free"]
                     if not candidates:
                         chapter["event_pool_id"] = ""
                         continue
@@ -1006,7 +1141,11 @@ def bind_story_event_pool_to_chapters(
         else:
             selected, scored = select_story_event_for_chapter(active, chapter, bind_context, setting_type)
             current_score = score_story_event(event, chapter, bind_context, setting_type)
-            if selected and (str(event.get("id") or "") in selected_event_ids or scored.get("score", 0) >= current_score.get("score", 0) + 12):
+            if selected and (
+                str(event.get("id") or "") in selected_event_ids
+                or (prefer_concrete and not _is_concrete_event_source(event) and _is_concrete_event_source(selected))
+                or scored.get("score", 0) >= current_score.get("score", 0) + 12
+            ):
                 event = selected
                 chapter["event_pool_id"] = str(event.get("id") or "")
             else:
@@ -1035,7 +1174,11 @@ def story_event_pool_prompt(pool: Any) -> str:
     normalized = normalize_story_event_pool(pool)
     lines = []
     for index, item in enumerate((normalized.get("active") or [])[:STORY_EVENT_POOL_SIZE], start=1):
+        tags = item.get("tags") if isinstance(item.get("tags"), dict) else {}
+        progression_role = tags.get("progression_role") or ""
         lines.append(
-            f"{index}. id={item.get('id')} use_mode={item.get('use_mode', 'guide')} place={item.get('place')} event={item.get('event')} hook={item.get('hook')} status={item.get('status')}"
+            f"{index}. id={item.get('id')} source={item.get('source')} use_mode={item.get('use_mode', 'guide')} "
+            f"time={item.get('time_anchor')} progression_role={progression_role} place={item.get('place')} "
+            f"event={item.get('event')} hook={item.get('hook')} status={item.get('status')}"
         )
     return "\n".join(lines)

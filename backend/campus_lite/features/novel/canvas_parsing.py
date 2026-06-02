@@ -4,9 +4,63 @@ import re
 from typing import Any
 
 from .event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters, normalize_story_event_pool
+from .progression import chapter_progression_defaults, normalize_progression_protocol, normalize_story_promise
 
 
 class NovelCanvasParsingMixin:
+    def _looks_like_english_slug(self, value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z0-9_\\-\\s]+", text)) and bool(re.search(r"[A-Za-z]", text))
+
+    def _scene_slug_to_chinese(self, value: Any, fallback: str = "") -> str:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        if not self._looks_like_english_slug(text):
+            return text[:500]
+        lowered = text.lower()
+        if lowered in {"third_person", "third person"}:
+            return "第三人称限知"
+        token_map = {
+            "company": "公司",
+            "building": "大楼",
+            "front": "门口",
+            "office": "办公室",
+            "street": "街道",
+            "road": "路边",
+            "lake": "湖边",
+            "cafe": "咖啡店",
+            "shop": "店门口",
+            "station": "车站",
+            "school": "学校",
+            "library": "图书馆",
+            "room": "房间",
+            "door": "门口",
+            "hall": "走廊",
+        }
+        pieces = re.split(r"[_\\-\\s]+", lowered)
+        translated = "".join(token_map.get(piece, "") for piece in pieces if piece)
+        if translated:
+            return translated[:500]
+        return fallback[:500]
+
+    def _normalize_scene_display_value(self, value: Any, fallback: Any, chapter: dict[str, Any], key: str) -> str:
+        raw = str(value or "").strip()
+        fallback_text = str(fallback or "").strip()
+        if key == "pov":
+            if self._looks_like_english_slug(raw):
+                return "第三人称限知"
+            return (raw or "第三人称限知")[:260]
+        if key == "current_scene":
+            if self._looks_like_english_slug(raw):
+                translated = self._scene_slug_to_chinese(raw, "")
+                if translated:
+                    return translated[:500]
+                return str(chapter.get("external_event") or chapter.get("trigger_event") or fallback_text or "")[:500]
+        return (raw or fallback_text)[:500]
+
     def _parse_event_pool_delta_response(self, text: str) -> dict[str, Any]:
         raw = self._load_llm_json_object(text, "event_pool_delta")
         delta = raw.get("event_pool_delta") if isinstance(raw.get("event_pool_delta"), dict) else raw
@@ -71,6 +125,7 @@ class NovelCanvasParsingMixin:
                 continue
             base = fallback_chapters[min(index, len(fallback_chapters) - 1)] if fallback_chapters else {}
             chapter_id = str(item.get("id") or base.get("id") or f"canvas_ch_{index + 1}")
+            chapter_status = self._normalize_remote_canvas_chapter_status(item.get("status"), base.get("status"))
             chapter = {
                 "id": chapter_id,
                 "act_id": str(item.get("act_id") or base.get("act_id") or "act_1"),
@@ -88,9 +143,12 @@ class NovelCanvasParsingMixin:
                 "relationship_shift": str(item.get("relationship_shift") or base.get("relationship_shift") or "")[:260],
                 "ending_hook": str(item.get("ending_hook") or base.get("ending_hook") or "")[:500],
                 "target_length": self._coerce_int(item.get("target_length") or base.get("target_length"), 1800, 300, 12000),
-                "status": str(item.get("status") or base.get("status") or "planned"),
+                "status": chapter_status,
                 "emotion_curve": str(item.get("emotion_curve") or base.get("emotion_curve") or "")[:260],
                 "scene_ids": [str(value) for value in item.get("scene_ids", [])] if isinstance(item.get("scene_ids"), list) else [],
+                "chapter_drive": str(item.get("chapter_drive") or base.get("chapter_drive") or "")[:500],
+                "progression_role": str(item.get("progression_role") or base.get("progression_role") or "")[:80],
+                "promise_targets": [str(value)[:160] for value in item.get("promise_targets", [])] if isinstance(item.get("promise_targets"), list) else (base.get("promise_targets", []) if isinstance(base.get("promise_targets"), list) else []),
             }
             chapters.append(chapter)
 
@@ -122,9 +180,13 @@ class NovelCanvasParsingMixin:
                 "id": str(item.get("id") or base.get("id") or f"scene_{index + 1}"),
                 "chapter_id": chapter_id,
                 "scene_order": self._coerce_int(item.get("scene_order"), index + 1, 1, 99),
-                "current_scene": str(item.get("current_scene") or base.get("current_scene") or "")[:500],
-                "pov": str(item.get("pov") or base.get("pov") or "")[:260],
-                "present_characters": str(item.get("present_characters") or base.get("present_characters") or "")[:260],
+                "current_scene": self._normalize_scene_display_value(item.get("current_scene"), base.get("current_scene"), chapter_for_scene, "current_scene"),
+                "pov": self._normalize_scene_display_value(item.get("pov"), base.get("pov"), chapter_for_scene, "pov")[:260],
+                "present_characters": (
+                    "、".join(str(value).strip() for value in item.get("present_characters", []) if str(value).strip())[:260]
+                    if isinstance(item.get("present_characters"), list)
+                    else str(item.get("present_characters") or base.get("present_characters") or "")[:260]
+                ),
                 "surface_event": str(item.get("surface_event") or base.get("surface_event") or "")[:500],
                 "character_desire": str(item.get("character_desire") or base.get("character_desire") or "")[:500],
                 "tension": tension,
@@ -153,6 +215,11 @@ class NovelCanvasParsingMixin:
         diagnostics = self._json_dict(canvas.get("diagnostics"))
         fallback_diagnostics = self._json_dict(fallback.get("diagnostics"))
         setting_type = str(diagnostics.get("setting_type") or fallback_diagnostics.get("setting_type") or "modern_daily")
+        story_promise = normalize_story_promise(canvas.get("story_promise") if isinstance(canvas.get("story_promise"), dict) else fallback.get("story_promise"))
+        progression_protocol = normalize_progression_protocol(canvas.get("progression_protocol") if isinstance(canvas.get("progression_protocol"), dict) else fallback.get("progression_protocol"))
+        progression_canvas = {"story_promise": story_promise, "progression_protocol": progression_protocol}
+        for chapter in chapters:
+            chapter.update(chapter_progression_defaults(chapter, progression_canvas))
         event_pool_source = canvas.get("event_pool") if isinstance(canvas.get("event_pool"), dict) else fallback.get("event_pool")
         event_pool = normalize_story_event_pool(event_pool_source, setting_type)
         event_pool = apply_story_event_pool_delta(event_pool, canvas.get("event_pool_delta"), setting_type)
@@ -168,6 +235,8 @@ class NovelCanvasParsingMixin:
         return {
             "version": self._coerce_int(canvas.get("version"), 1, 1, 99),
             "mode": str(canvas.get("mode") or "story_canvas"),
+            "story_promise": story_promise,
+            "progression_protocol": progression_protocol,
             "acts": acts or fallback.get("acts", []),
             "chapters": chapters,
             "scenes": scenes,
@@ -176,6 +245,21 @@ class NovelCanvasParsingMixin:
             "event_pool": event_pool,
             "diagnostics": diagnostics,
         }
+
+    def _normalize_remote_canvas_chapter_status(self, raw_status: Any, base_status: Any = "") -> str:
+        raw = str(raw_status or "").strip().lower()
+        base = str(base_status or "").strip().lower()
+        allowed = {"planned", "drafting", "draft", "revised", "locked", "affected", "not_started", "in_progress"}
+        complete_statuses = {"complete", "completed"}
+        if base in complete_statuses and raw in {"", *complete_statuses}:
+            return "complete"
+        if raw in complete_statuses:
+            return "planned"
+        if raw in allowed:
+            return raw
+        if base in allowed:
+            return base
+        return "planned"
 
     def _derive_canvas_scenes_from_chapters(self, chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
         scenes: list[dict[str, Any]] = []

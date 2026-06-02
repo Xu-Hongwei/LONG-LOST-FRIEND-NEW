@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from .config import NOVEL_PLANNING_TIMEOUT_MS
+from .continuity import continuity_ledger_from_handoff, normalize_continuity_ledger
 
 
 class NovelHandoffMixin:
@@ -36,8 +37,10 @@ class NovelHandoffMixin:
             "你是长篇小说连续性编辑。你的任务是从已生成章节中提取交接单，不写正文。"
             "只记录已发生事实、关系变化、结尾钩子和下一章必须承接的内容。"
             "不要添加正文里没有发生的事件，不要把猜测写成事实。"
-            "只输出 JSON 对象。字段：happened, relationship_delta, ending_hook, next_must_continue, avoid_repeating, open_threads。"
+            "只输出 JSON 对象。字段：happened, relationship_delta, ending_hook, next_must_continue, avoid_repeating, open_threads, resolved_threads, continuity_ledger。"
             "每个字段都是字符串数组，最多 5 条。"
+            "continuity_ledger 是对象，字段固定为 locked_facts, changed_states, open_threads, resolved_threads, next_must_continue, promises_made, promises_paid, avoid_repeating, forbidden_contradictions。"
+            "continuity_ledger 只记录正文里已经发生、下一章必须承接、已经回收或必须避免矛盾的事项，所有内容必须用中文。"
         )
 
     def _handoff_source(
@@ -92,7 +95,7 @@ class NovelHandoffMixin:
     def _parse_chapter_handoff(self, text: str, fallback: dict[str, Any]) -> dict[str, Any]:
         raw = self._load_llm_json_object(text, "chapter_handoff")
         result = dict(fallback)
-        for key in ["happened", "relationship_delta", "ending_hook", "next_must_continue", "avoid_repeating", "open_threads"]:
+        for key in ["happened", "relationship_delta", "ending_hook", "next_must_continue", "avoid_repeating", "open_threads", "resolved_threads"]:
             value = raw.get(key)
             if isinstance(value, list):
                 cleaned = [self._clean_material_text(str(item))[:220] for item in value if str(item).strip()]
@@ -101,6 +104,10 @@ class NovelHandoffMixin:
             else:
                 cleaned = []
             result[key] = cleaned[:5] or result.get(key, [])
+        result["continuity_ledger"] = normalize_continuity_ledger(
+            raw.get("continuity_ledger"),
+            continuity_ledger_from_handoff(result),
+        )
         return result
 
     def _sanitize_chapter_handoff(
@@ -146,6 +153,10 @@ class NovelHandoffMixin:
             result[key] = self._unique_short_list(filtered, 5)
         result["chapter_order"] = order
         result["chapter_title"] = str(parsed.get("title") or chapter["title"])[:120]
+        result["continuity_ledger"] = continuity_ledger_from_handoff(
+            result,
+            scene_card.get("forbidden_progress") if isinstance(scene_card.get("forbidden_progress"), list) else [],
+        )
         return result
 
     def _norm_handoff_text(self, value: Any) -> str:
@@ -155,7 +166,7 @@ class NovelHandoffMixin:
     def _mock_chapter_handoff(self, chapter: Any, scene_card: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
         ending = self._clean_material_text(str(scene_card.get("ending_beat") or parsed.get("summary") or ""))[:220]
         happened = self._clean_material_text(str(scene_card.get("surface_event") or parsed.get("summary") or ""))[:220]
-        return {
+        handoff = {
             "chapter_order": int(chapter["chapter_order"]),
             "chapter_title": str(parsed.get("title") or chapter["title"])[:120],
             "happened": [happened] if happened else [],
@@ -164,5 +175,11 @@ class NovelHandoffMixin:
             "next_must_continue": [ending] if ending else [],
             "avoid_repeating": [happened] if happened else [],
             "open_threads": [ending] if ending else [],
+            "resolved_threads": [],
         }
+        handoff["continuity_ledger"] = continuity_ledger_from_handoff(
+            handoff,
+            scene_card.get("forbidden_progress") if isinstance(scene_card.get("forbidden_progress"), list) else [],
+        )
+        return handoff
 

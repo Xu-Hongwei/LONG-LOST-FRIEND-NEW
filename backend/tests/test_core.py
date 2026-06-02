@@ -17,7 +17,8 @@ from campus_lite.characters import CharacterStore
 from campus_lite.composer import ComposeInput, ContextComposer
 from campus_lite.features.chat.service import ChatService
 from campus_lite.features.chat.time_awareness import build_time_awareness
-from campus_lite.features.novel.event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters, normalize_story_event_pool, score_story_event, story_event_for_chapter
+from campus_lite.features.novel.event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters, event_pool_replacement_stats, normalize_story_event_pool, score_story_event, story_event_for_chapter
+from campus_lite.features.novel.progression import normalize_story_progression
 from campus_lite.llm import LlmClient
 from campus_lite.memory import MemoryService
 from campus_lite.novel import NovelService
@@ -1170,6 +1171,149 @@ class CampusLiteCoreTest(unittest.TestCase):
         self.assertIn(bound_id, ids)
         self.assertGreaterEqual(sources.count("remote"), 4)
         self.assertLess(sources.count("setting_profile"), 10)
+        self.assertTrue(all(item["source"] == "remote" for item in updated["active"][1:5]))
+
+    def test_event_pool_replacement_stats_targets_at_most_three_fallbacks(self) -> None:
+        raw = normalize_story_event_pool({}, "modern_daily")
+        stats = event_pool_replacement_stats(raw)
+
+        self.assertEqual(stats["fallback_count"], 10)
+        self.assertEqual(stats["fallback_target_max"], 3)
+        self.assertEqual(stats["replacement_needed"], 7)
+        self.assertEqual(stats["recommended_add_count"], "7-10")
+
+    def test_event_pool_delta_can_reduce_setting_profile_to_target(self) -> None:
+        raw = normalize_story_event_pool({}, "modern_daily")
+        updated = apply_story_event_pool_delta(
+            raw,
+            {
+                "add": [
+                    {
+                        "id": f"evt_remote_target_{index}",
+                        "place": f"remote place {index}",
+                        "time_anchor": f"Saturday 19:{index}0",
+                        "event": f"remote event {index} gives the chapter a project-specific pressure",
+                        "hook": f"remote hook {index} leaves a concrete next choice",
+                        "source_reason": "replace fallback with rolling project event",
+                        "tags": {
+                            "theme_markers": ["project pressure", "choice"],
+                            "tone_markers": ["restrained"],
+                            "progression_role": "visible pressure",
+                            "progression_markers": ["choice", "obstacle"],
+                            "promise_markers": ["project-specific pressure"],
+                            "boundary_risk": "low",
+                        },
+                    }
+                    for index in range(1, 8)
+                ]
+            },
+            "modern_daily",
+        )
+        stats = event_pool_replacement_stats(updated)
+
+        self.assertEqual(len(updated["active"]), 10)
+        self.assertLessEqual(stats["fallback_count"], 3)
+        self.assertGreaterEqual(stats["source_counts"].get("remote", 0), 7)
+
+    def test_initial_event_binding_prefers_remote_candidates_over_fallback_order(self) -> None:
+        pool = normalize_story_event_pool({}, "modern_daily")
+        remote_events = [
+            {
+                "id": f"evt_remote_initial_{index}",
+                "place": f"雨夜新地点 {index}",
+                "time_anchor": f"周六 20:{index}0",
+                "event": f"滚动新增事件 {index} 迫使两人重新确认选择",
+                "hook": f"滚动新增钩子 {index} 留下未说完的问题",
+                "source": "remote",
+                "source_reason": "初版远程新增，替换题材兜底",
+                "tags": {
+                    "theme_markers": ["雨夜", "选择"],
+                    "tone_markers": ["克制"],
+                    "progression_role": "压力下的共同选择",
+                    "progression_markers": ["重新确认", "共同选择"],
+                    "promise_markers": ["可见压力"],
+                    "boundary_risk": "low",
+                },
+            }
+            for index in range(1, 5)
+        ]
+        pool["active"] = [*pool["active"][:6], *remote_events]
+        chapters = [
+            {
+                "id": f"canvas_ch_{order}",
+                "chapter_order": order,
+                "event_pool_id": pool["active"][order - 1]["id"],
+                "goal": pool["active"][order - 1]["event"],
+                "external_event": pool["active"][order - 1]["event"],
+                "ending_hook": pool["active"][order - 1]["hook"],
+                "status": "planned",
+            }
+            for order in range(1, 5)
+        ]
+
+        bound_pool = bind_story_event_pool_to_chapters(
+            pool,
+            chapters,
+            "modern_daily",
+            {"prefer_concrete_events": True},
+        )
+        by_id = {item["id"]: item for item in bound_pool["active"]}
+
+        self.assertTrue(all(by_id[chapter["event_pool_id"]]["source"] == "remote" for chapter in chapters))
+        self.assertEqual(len({chapter["event_pool_id"] for chapter in chapters}), 4)
+
+    def test_event_pool_scoring_prefers_continuity_ledger_carryover(self) -> None:
+        chapter = {
+            "chapter_order": 2,
+            "goal": "承接雨夜未说完的问题",
+            "external_event": "两人必须处理雨夜未说完的问题",
+            "ending_hook": "留下新的选择",
+            "status": "planned",
+        }
+        generic = {
+            "id": "evt_generic",
+            "place": "街角",
+            "time_anchor": "周六 20:00",
+            "event": "两人进行一次普通交流",
+            "hook": "对话还没有结束",
+            "source": "setting_profile",
+            "use_mode": "guide",
+        }
+        carryover = {
+            "id": "evt_carryover",
+            "place": "雨夜街道",
+            "time_anchor": "周六 20:30",
+            "event": "雨夜未说完的问题被旁人的到来打断，两人必须先保留答案",
+            "hook": "雨夜未说完的问题被写进下一次选择",
+            "source": "remote",
+            "source_reason": "承接上一章未完成交接",
+            "use_mode": "guide",
+            "tags": {
+                "theme_markers": ["雨夜", "选择"],
+                "tone_markers": ["克制"],
+                "progression_markers": ["延迟答案"],
+                "promise_markers": ["雨夜未说完的问题"],
+                "boundary_risk": "low",
+            },
+        }
+        context = {
+            "prefer_concrete_events": True,
+            "project": {"title": "雨夜计划", "genre": "悬疑探索", "tone": "克制", "worldview": "雨夜街区", "relationship_setup": "慢慢确认彼此"},
+            "novel_state": {
+                "continuity_ledger": {
+                    "next_must_continue": ["雨夜未说完的问题"],
+                    "promises_made": ["雨夜未说完的问题"],
+                    "avoid_repeating": ["普通交流"],
+                    "forbidden_contradictions": ["两人已经解决雨夜问题"],
+                }
+            },
+        }
+
+        generic_score = score_story_event(generic, chapter, context, "modern_daily")
+        carryover_score = score_story_event(carryover, chapter, context, "modern_daily")
+
+        self.assertGreater(carryover_score["score"], generic_score["score"])
+        self.assertTrue(any("承接账本" in reason for reason in carryover_score["reasons"]))
 
     def test_event_pool_delta_does_not_reintroduce_retired_duplicate(self) -> None:
         raw = normalize_story_event_pool({}, "modern_daily")
@@ -1585,6 +1729,209 @@ class CampusLiteCoreTest(unittest.TestCase):
             score_story_event(setting_event, chapter, context, "modern_daily")["score"],
         )
 
+    def test_story_event_score_prefers_progression_protocol_fit(self) -> None:
+        chapter = {
+            "chapter_order": 2,
+            "status": "planned",
+            "goal": "雨夜路线变化让两个人必须重新确认选择。",
+            "external_event": "雨夜路线变化",
+            "ending_hook": "没说完的理由留下来",
+            "progression_role": "压力下的共同选择",
+        }
+        context = {
+            "project": {
+                "title": "雨夜同行",
+                "genre": "悬疑探险",
+                "tone": "紧张、克制",
+                "worldview": "雨夜街区、路线变化、未确认信息",
+                "relationship_setup": "通过共同选择建立谨慎信任",
+            },
+            "story_promise": {
+                "core_experience": "在不可靠信息里共同选择路线",
+                "genre_contract": "每章有一个可见压力和一个未确认事实",
+                "relationship_engine": "关系通过共同判断推进",
+                "tone_commitment": "紧张、克制、留白",
+            },
+            "progression_protocol": {
+                "driver": "用外部压力逼迫角色做小选择",
+                "progression_tools": ["路线变化", "未确认信息", "共同选择"],
+                "chapter_rules": ["每章兑现一个可见压力"],
+                "relationship_rule": "不直接亲密，通过判断建立信任",
+                "drift_guards": ["不要变成泛泛聊天"],
+                "style_directives": ["克制"],
+            },
+        }
+        matched = {
+            "id": "evt_protocol",
+            "place": "雨后街角",
+            "time_anchor": "周六 20:10",
+            "event": "雨夜路线突然被封，两人必须在未确认信息里共同选择绕行方向",
+            "hook": "没说完的理由留下来",
+            "source": "remote",
+            "source_reason": "滚动新增，承接推进协议",
+            "tags": {
+                "theme_markers": ["雨夜", "路线变化"],
+                "tone_markers": ["紧张", "克制"],
+                "progression_role": "压力下的共同选择",
+                "progression_markers": ["路线变化", "未确认信息", "共同选择"],
+                "promise_markers": ["可见压力", "未确认事实"],
+                "boundary_risk": "low",
+            },
+        }
+        generic = {
+            **matched,
+            "id": "evt_generic_protocol",
+            "event": "两个人在街角继续普通聊天",
+            "source": "setting_profile",
+            "source_reason": "",
+            "tags": {"boundary_risk": "low"},
+        }
+
+        matched_score = score_story_event(matched, chapter, context, "mystery")
+        generic_score = score_story_event(generic, chapter, context, "mystery")
+
+        self.assertGreater(matched_score["score"], generic_score["score"])
+        self.assertTrue(any("命中推进协议" in reason for reason in matched_score["reasons"]))
+
+    def test_story_progression_defaults_backfill_old_canvas(self) -> None:
+        canvas = normalize_story_progression(
+            {
+                "version": 1,
+                "mode": "story_canvas",
+                "chapters": [
+                    {
+                        "id": "canvas_ch_1",
+                        "chapter_order": 1,
+                        "goal": "雨后街区里两人重新确认路线。",
+                    }
+                ],
+            },
+            {
+                "title": "雨夜同行",
+                "genre": "悬疑探险",
+                "tone": "紧张、克制",
+                "worldview": "雨夜街区",
+                "relationship_setup": "共同判断",
+            },
+        )
+
+        self.assertIn("story_promise", canvas)
+        self.assertIn("progression_protocol", canvas)
+        self.assertTrue(canvas["chapters"][0]["chapter_drive"])
+        self.assertTrue(canvas["chapters"][0]["promise_targets"])
+
+    def test_canvas_parsing_translates_english_scene_display_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            fallback = service._default_extension_canvas(
+                {
+                    "id": "p1",
+                    "title": "职场风雨",
+                    "genre": "现代职场",
+                    "tone": "冷静克制",
+                    "protagonist": "许观清",
+                    "worldview": "公司大楼和雨夜通勤",
+                    "relationship_setup": "许观清和林悦在工作事件中建立信任",
+                },
+                {},
+                0,
+                1,
+            )
+            raw = {
+                "version": 1,
+                "mode": "story_canvas",
+                "acts": fallback["acts"],
+                "chapters": [
+                    {
+                        "id": "canvas_ch_1",
+                        "chapter_order": 1,
+                        "title": "第一章 风雨门口",
+                        "goal": "许观清和林悦在公司门口遇到突发事件。",
+                        "external_event": "公司门口的突发雨势打乱两人的下班计划",
+                        "trigger_event": "林悦发现原定路线被临时封闭",
+                        "ending_hook": "林悦留下一个没有解释的提醒",
+                        "scene_ids": ["scene_1"],
+                    }
+                ],
+                "scenes": [
+                    {
+                        "id": "scene_1",
+                        "chapter_id": "canvas_ch_1",
+                        "current_scene": "company_building_front",
+                        "pov": "third_person",
+                        "present_characters": ["许观清", "林悦"],
+                        "surface_event": "雨势变大",
+                        "tension": "路线被封闭",
+                        "ending_beat": "林悦回头提醒",
+                    }
+                ],
+            }
+
+            parsed = service._parse_canvas_response(json.dumps(raw, ensure_ascii=False), fallback)
+            scene = parsed["scenes"][0]
+
+            self.assertEqual(scene["current_scene"], "公司大楼门口")
+            self.assertEqual(scene["pov"], "第三人称限知")
+            self.assertEqual(scene["present_characters"], "许观清、林悦")
+
+    def test_compact_canvas_syncs_bound_event_contract_to_chapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            canvas = {
+            "version": 1,
+            "mode": "story_canvas",
+            "event_pool": {
+                "version": 1,
+                "setting_type": "modern_daily",
+                "active": [
+                    {
+                        "id": "evt_remote",
+                        "place": "湖边小路",
+                        "time_anchor": "周六 19:20",
+                        "event": "湖边灯光突然熄灭，两人需要临时改路",
+                        "hook": "水声盖过了林悦没说完的话",
+                        "source": "remote",
+                        "use_mode": "guide",
+                        "tags": {
+                            "theme_markers": ["湖边", "改路"],
+                            "tone_markers": ["克制"],
+                            "progression_role": "压力下的共同选择",
+                            "progression_markers": ["临时改路", "共同选择"],
+                            "promise_markers": ["可见压力"],
+                            "boundary_risk": "low",
+                        },
+                    }
+                ],
+                "retired": [],
+            },
+            "chapters": [
+                {
+                    "id": "canvas_ch_1",
+                    "act_id": "act_1",
+                    "chapter_order": 1,
+                    "title": "第一章 湖边",
+                    "goal": "两人遇到临时改路。",
+                    "external_event": "",
+                    "trigger_event": "",
+                    "ending_hook": "",
+                    "status": "planned",
+                    "scene_ids": ["scene_1"],
+                }
+            ],
+            "scenes": [{"id": "scene_1", "chapter_id": "canvas_ch_1", "scene_order": 1}],
+            "acts": [{"id": "act_1", "order": 1, "title": "开端", "purpose": "", "chapter_ids": ["canvas_ch_1"]}],
+        }
+
+            compacted = service._compact_story_canvas(canvas)
+            chapter = compacted["chapters"][0]
+            scene = compacted["scenes"][0]
+
+            self.assertEqual(chapter["event_contract"]["event_id"], "evt_remote")
+            self.assertEqual(chapter["external_event"], "湖边灯光突然熄灭，两人需要临时改路")
+            self.assertEqual(scene["current_scene"], "周六 19:20，湖边小路")
+
     def test_character_seed_flavor_cannot_outscore_project_continuity(self) -> None:
         chapter = {
             "chapter_order": 3,
@@ -1712,7 +2059,7 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(bound_event["status"], "planned")
             self.assertEqual(bound_event["bound_chapter_orders"], ["1"])
 
-    def test_extend_canvas_runs_event_pool_update_in_parallel(self) -> None:
+    def test_extend_canvas_runs_event_pool_update_before_canvas(self) -> None:
         class FakeParallelCanvasLlm:
             def __init__(self, retire_id: str) -> None:
                 self.retire_id = retire_id
@@ -1859,7 +2206,9 @@ class CampusLiteCoreTest(unittest.TestCase):
             active_ids = [item["id"] for item in canvas["event_pool"]["active"]]
             retired_ids = [item["id"] for item in canvas["event_pool"]["retired"]]
 
-            self.assertGreaterEqual(llm.max_active_calls, 2)
+            self.assertEqual(llm.max_active_calls, 1)
+            self.assertIn("long-form novel project event pool", llm.system_prompts[0])
+            self.assertNotIn("long-form novel project event pool", llm.system_prompts[1])
             self.assertIn("evt_parallel_new", active_ids)
             self.assertIn(retire_id, retired_ids)
             selected = next(item for item in canvas["event_pool"]["active"] if item["id"] == "evt_parallel_new")
@@ -1869,7 +2218,8 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(selected["tags"]["boundary_risk"], "low")
             self.assertEqual(selected["tags"]["theme_markers"], ["tram delay", "route map", "rain"])
             self.assertEqual(canvas["diagnostics"]["event_pool_update_source"], "remote")
-            self.assertTrue(canvas["diagnostics"]["parallel_event_pool_update"])
+            self.assertTrue(canvas["diagnostics"]["event_pool_first_update"])
+            self.assertFalse(canvas["diagnostics"]["parallel_event_pool_update"])
 
     def test_canvas_extend_api_preserves_time_anchor_and_theme_tags(self) -> None:
         class FakeApiCanvasLlm:
@@ -3592,7 +3942,8 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(len(active), 10)
             self.assertGreaterEqual(len(remote_events), 6)
             self.assertEqual(rebuilt.story_canvas["diagnostics"]["event_pool_update_source"], "remote")
-            self.assertTrue(rebuilt.story_canvas["diagnostics"]["parallel_event_pool_update"])
+            self.assertTrue(rebuilt.story_canvas["diagnostics"]["event_pool_first_update"])
+            self.assertFalse(rebuilt.story_canvas["diagnostics"]["parallel_event_pool_update"])
 
     def test_novel_build_canvas_uses_remote_when_configured(self) -> None:
         class CanvasLlm:
@@ -4099,6 +4450,14 @@ class CampusLiteCoreTest(unittest.TestCase):
                 "next_must_continue": ["新承接"],
                 "avoid_repeating": [],
                 "open_threads": ["新线索"],
+                "continuity_ledger": {
+                    "locked_facts": ["新事件"],
+                    "changed_states": ["新关系"],
+                    "next_must_continue": ["新承接"],
+                    "promises_made": ["新钩子"],
+                    "avoid_repeating": ["旧场面"],
+                    "forbidden_contradictions": ["不能说新事件没发生"],
+                },
             }
             storage.update_novel_chapter(chapter["id"], {
                 "title": "第一章新版",
@@ -4118,6 +4477,9 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertNotIn("旧关系污染", rebuilt["relationship_states"])
             self.assertNotIn("旧线索污染", rebuilt["open_threads"])
             self.assertEqual(rebuilt["chapter_handoffs"][0]["happened"], ["新事件"])
+            self.assertIn("新事件", rebuilt["continuity_ledger"]["locked_facts"])
+            self.assertIn("新承接", rebuilt["continuity_ledger"]["next_must_continue"])
+            self.assertIn("不能说新事件没发生", rebuilt["continuity_ledger"]["forbidden_contradictions"])
 
     def test_restored_chapter_version_restores_bound_state_delta(self) -> None:
         class OfflineLlm:
@@ -4709,6 +5071,83 @@ class CampusLiteCoreTest(unittest.TestCase):
             self.assertEqual(canvas["diagnostics"]["scene_source"], "derived_from_chapters")
             self.assertEqual(canvas["scenes"][0]["id"], "sc_1")
             self.assertEqual(canvas["scenes"][0]["surface_event"], "傍晚起风。")
+
+    def test_initial_remote_canvas_completed_status_still_binds_event_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "test.db")
+            service = NovelService(CharacterStateService(storage), CharacterBondService(storage), storage)
+            fallback = service._default_story_canvas("Test Novel", "modern daily longform", "quiet suspense", "Lin Yue", {}, [])
+            text = json.dumps({
+                "version": 1,
+                "mode": "story_canvas",
+                "acts": [{"id": "act_1", "order": 1, "title": "Opening", "purpose": "start the promise"}],
+                "chapters": [{
+                    "id": "ch_1",
+                    "act_id": "act_1",
+                    "chapter_order": 1,
+                    "title": "Chapter 1 Rain Detour",
+                    "goal": "Use the rain detour to start the first shared choice.",
+                    "external_event": "A rainstorm blocks the lakeside road and forces both characters to choose a safer detour.",
+                    "trigger_event": "A rainstorm blocks the lakeside road and forces both characters to choose a safer detour.",
+                    "immediate_reaction": "Lin Yue slows down and checks whether the other person is following.",
+                    "obstacle_escalation": "The nearest exit is suddenly closed.",
+                    "counterpart_reaction": "The other person points out a narrow side path.",
+                    "character_choice": "Lin Yue chooses the detour instead of rushing through the rain.",
+                    "scene_consequence": "They arrive late but notice the same strange clue.",
+                    "relationship_shift": "cautious cooperation",
+                    "ending_hook": "The last streetlight flickers and reveals a hidden note.",
+                    "target_length": 1500,
+                    "status": "completed",
+                    "emotion_curve": "tense to alert",
+                    "scene_ids": ["scene_1"],
+                }],
+                "scenes": [{
+                    "id": "scene_1",
+                    "chapter_id": "ch_1",
+                    "scene_order": 1,
+                    "current_scene": "lakeside road",
+                    "pov": "third_person",
+                    "present_characters": ["Lin Yue", "Xu Yanqing"],
+                    "surface_event": "The rain blocks the original route.",
+                    "character_desire": "Lin Yue wants to understand why the other person appeared here.",
+                    "tension": "The exit closure makes every choice feel deliberate.",
+                    "required_facts": [],
+                    "forbidden_progress": [],
+                    "ending_beat": "A hidden note appears under the flickering streetlight.",
+                    "linked_material_ids": [],
+                }],
+                "event_pool": {
+                    "version": 1,
+                    "setting_type": "modern_daily",
+                    "active": [{
+                        "id": "evt_remote_rain_detour",
+                        "source": "remote",
+                        "status": "fresh",
+                        "place": "lakeside road",
+                        "time_anchor": "Saturday 20:30, before the last streetlight goes out",
+                        "event": "A rainstorm blocks the lakeside road and forces both characters to choose a safer detour.",
+                        "hook": "The last streetlight flickers and reveals a hidden note.",
+                        "motifs": ["rain", "streetlight", "hidden note"],
+                        "source_reason": "matches the opening chapter and project tone",
+                        "tags": {
+                            "theme_markers": ["rain", "detour", "shared choice"],
+                            "tone_markers": ["quiet suspense"],
+                            "progression_role": "first shared choice",
+                        },
+                    }],
+                    "retired": [],
+                },
+                "threads": [],
+                "quality_rules": [],
+                "diagnostics": {"source": "remote", "setting_type": "modern_daily"},
+            }, ensure_ascii=False)
+
+            canvas = service._parse_canvas_response(text, fallback)
+
+            chapter = canvas["chapters"][0]
+            self.assertEqual(chapter["status"], "planned")
+            self.assertEqual(chapter["event_pool_id"], "evt_remote_rain_detour")
+            self.assertIn("1", canvas["event_pool"]["active"][0]["bound_chapter_orders"])
 
     def test_canvas_parser_normalizes_numeric_scene_tension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

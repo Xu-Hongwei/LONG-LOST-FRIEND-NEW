@@ -11,6 +11,7 @@ from .event_pool import (
     normalize_story_event_pool,
     story_event_for_order,
 )
+from .progression import chapter_progression_defaults, normalize_story_progression
 from .setting_profiles import infer_novel_setting_type, novel_setting_profile
 
 
@@ -29,6 +30,7 @@ class NovelCanvasPlanningMixin:
         anchor = open_threads[0] if open_threads else "上一次被打断的话题还没有真正说完。"
         setting_type = infer_novel_setting_type(project)
         profile = novel_setting_profile(setting_type)
+        progression_canvas = normalize_story_progression(current_canvas, project)
         event_pool = normalize_story_event_pool(current_canvas.get("event_pool"), setting_type)
         chapters: list[dict[str, Any]] = []
         scenes: list[dict[str, Any]] = []
@@ -63,6 +65,7 @@ class NovelCanvasPlanningMixin:
                 "emotion_curve": "克制 -> 小混乱 -> 被接住 -> 留下未完问题",
                 "scene_ids": [scene_id],
             })
+            chapters[-1].update(chapter_progression_defaults(chapters[-1], progression_canvas, project, order))
             scenes.append({
                 "id": scene_id,
                 "chapter_id": chapter_id,
@@ -81,6 +84,8 @@ class NovelCanvasPlanningMixin:
         return {
             "version": 1,
             "mode": "story_canvas",
+            "story_promise": progression_canvas.get("story_promise", {}),
+            "progression_protocol": progression_canvas.get("progression_protocol", {}),
             "event_pool": event_pool,
             "acts": [{"id": act_id, "order": start, "title": f"第{start}-{start + count - 1}章滚动小弧线", "purpose": "承接已写正文，规划下一组局部关系推进。", "chapter_ids": [item["id"] for item in chapters]}],
             "chapters": chapters,
@@ -233,7 +238,15 @@ class NovelCanvasPlanningMixin:
             "extended_from_order": from_order,
             "extended_count": len(normalized_chapters),
         }
+        progression_canvas = normalize_story_progression(current, scoring_context.get("project") if isinstance(scoring_context, dict) else None)
+        if isinstance(extension.get("story_promise"), dict) and not progression_canvas.get("progression_protocol", {}).get("manual_edited"):
+            progression_canvas["story_promise"] = extension.get("story_promise")
+        if isinstance(extension.get("progression_protocol"), dict) and not progression_canvas.get("progression_protocol", {}).get("manual_edited"):
+            progression_canvas["progression_protocol"] = extension.get("progression_protocol")
+        progression_canvas = normalize_story_progression(progression_canvas, scoring_context.get("project") if isinstance(scoring_context, dict) else None)
         merged_chapters = [*kept_chapters, *normalized_chapters]
+        for chapter in merged_chapters:
+            chapter.update(chapter_progression_defaults(chapter, progression_canvas, scoring_context.get("project") if isinstance(scoring_context, dict) else None))
         merged_scenes = [*kept_scenes, *normalized_scenes]
         merged_threads = [*kept_threads, *normalized_threads][-24:]
         event_pool_source = extension.get("event_pool") if isinstance(extension.get("event_pool"), dict) else current.get("event_pool")
@@ -243,6 +256,8 @@ class NovelCanvasPlanningMixin:
             **current,
             "version": self._coerce_int(current.get("version"), 1, 1, 99),
             "mode": "story_canvas",
+            "story_promise": progression_canvas.get("story_promise", {}),
+            "progression_protocol": progression_canvas.get("progression_protocol", {}),
             "event_pool": event_pool,
             "acts": [*(current.get("acts") if isinstance(current.get("acts"), list) else []), *(extension.get("acts") if isinstance(extension.get("acts"), list) else [])],
             "chapters": merged_chapters,
@@ -256,10 +271,12 @@ class NovelCanvasPlanningMixin:
         if not canvas:
             return {}
         next_canvas = json.loads(json.dumps(canvas, ensure_ascii=False))
+        next_canvas = normalize_story_progression(next_canvas)
         chapters = self._canvas_chapters(next_canvas)
         for index, chapter in enumerate(chapters):
             order = self._coerce_int(chapter.get("chapter_order"), index + 1, 1, 999)
             chapter["title"] = self._normalize_chapter_title(str(chapter.get("title") or ""), order)
+            chapter.update(chapter_progression_defaults(chapter, next_canvas, order=order))
         chapter_ids = {str(item.get("id") or "") for item in chapters if str(item.get("id") or "")}
         next_canvas["acts"] = self._dedupe_canvas_acts(
             next_canvas.get("acts") if isinstance(next_canvas.get("acts"), list) else [],
@@ -281,11 +298,34 @@ class NovelCanvasPlanningMixin:
             str(diagnostics.get("setting_type") or "modern_daily"),
             scoring_context,
         )
+        self._sync_bound_event_contracts(next_canvas)
         next_canvas["diagnostics"] = {
             **diagnostics,
             "compact_acts": len(next_canvas["acts"]),
         }
         return next_canvas
+
+    def _sync_bound_event_contracts(self, canvas: dict[str, Any]) -> None:
+        pool = canvas.get("event_pool") if isinstance(canvas.get("event_pool"), dict) else {}
+        events = [
+            *(pool.get("active") if isinstance(pool.get("active"), list) else []),
+            *(pool.get("retired") if isinstance(pool.get("retired"), list) else []),
+        ]
+        by_id = {str(item.get("id") or ""): item for item in events if isinstance(item, dict)}
+        for chapter in self._canvas_chapters(canvas):
+            event_id = str(chapter.get("event_pool_id") or "").strip()
+            if not event_id:
+                continue
+            current_contract = chapter.get("event_contract") if isinstance(chapter.get("event_contract"), dict) else {}
+            if str(current_contract.get("event_id") or "") == event_id:
+                continue
+            event = by_id.get(event_id)
+            if not event:
+                continue
+            source = str(event.get("source") or "").strip().lower()
+            if source not in {"remote", "llm", "project", "manual"}:
+                continue
+            self._sync_event_contract_to_chapter(canvas, chapter, event, None, use_mode=event.get("use_mode") or "guide")
 
     def _dedupe_canvas_acts(self, acts: list[Any], chapter_ids: set[str]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
