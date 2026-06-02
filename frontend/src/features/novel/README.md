@@ -41,6 +41,8 @@
 
 绑定本章时，前端选择的是“本章采用强度”，不会强行修改事件本身默认 `use_mode`。
 
+事件池顶部的来源统计用于观察 active 10 条里各类来源占比。后端滚动补池的目标是把 `setting_profile` 兜底压到最多 3 条；如果后端 diagnostics 出现 `event_pool_update_missing` 或 `event_pool_update_underfilled`，说明本轮远程事件池 delta 没有补够，而不是前端统计错误。已使用事件会进入 retired 历史库，不再占 active 10 条；已绑定规划章节的事件会继续在 active 中显示绑定章节。
+
 ## 绑定模式
 
 - `strict`：必须采用地点、时间、外部事件和钩子。
@@ -60,6 +62,8 @@
 4. 优化生成指令。
 
 优化生成指令会读取当前事件契约、canvas chapter、scene card、上一章 handoff 和 Novel State。若场景卡和事件契约冲突，以事件契约和章节画布决定“发生什么”，场景卡调整“怎么演出来”。
+
+优化生成指令也会读取当前章节正文框里的内容，但只传当前正文的开头和结尾片段以及字数，不会把整本已写正文全文送到后端。前文连续性主要来自上一章 handoff、Novel State、Continuity Ledger 和已完成章节摘要；因此用户若手动修改了关键前文事实，应先保存章节并让 state/handoff 更新，再优化后续章节指令。
 
 ## 与其他域的关系
 

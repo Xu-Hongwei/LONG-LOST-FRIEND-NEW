@@ -39,6 +39,8 @@
 - `planning_snapshot_json` 只保存可回退的规划字段，不保存运行态。
 - `state_delta_json` 只保存可信版本对 Novel State 的影响。
 
+事件池的 active/retired 都保存在 `story_canvas_json` 内。active 维持当前 10 条候选；已用事件进入 retired 并保存 `used_chapter_ids` / `used_summary`，用于历史绑定、版本回退和排重。`event_pool_update_missing`、`event_pool_update_underfilled` 等 diagnostics 也是画布运行诊断，不应写进章节版本 `planning_snapshot_json`。
+
 ## 角色与关系存储
 
 - 内置角色和自建角色最终都存成完整 card JSON。

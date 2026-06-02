@@ -58,6 +58,15 @@
 
 事件字段包括地点、时间锚点、外部事件、钩子、意象、`use_mode`、source reason、主题/基调 tags、selection score 和 reasons。本地评分器负责主题适配、章节相关性、素材熟悉感、关系节奏、连续性和新鲜度；LLM 不直接输出最终分数。
 
+滚动画布时，`setting_profile` 只作为临时兜底。后端会用 `event_pool_replacement_stats()` 计算当前 active 来源占比，目标是让 `setting_profile` 最多保留 3 条；超过时，事件池 delta prompt 会要求远程至少返回 `replacement_needed` 条具体 `add` 候选，最多可补到 10 条。diagnostics 会记录：
+
+- `event_pool_replacement_needed`：本轮需要替换的兜底数量。
+- `event_pool_delta_add_count`：远程实际返回的 add 数量。
+- `event_pool_update_missing`：需要补池但远程没有返回 add。
+- `event_pool_update_underfilled`：远程返回了 add，但数量少于 replacement_needed。
+
+已经使用或绑定过的事件不应被普通滚动替换。章节完成后，绑定事件会从 active 进入 retired，并保留 `used_chapter_ids` / `used_summary`；替换和排重同时查看 active 与 retired，避免用过的事件回流。仍在规划章节上绑定的 active 事件也会因为 `bound_chapter_orders` 被保护。
+
 事件池编辑 API：
 
 - `POST /api/novel/projects/{project_id}/event-pool/events`
@@ -78,6 +87,22 @@
 - `free`：只记录灵感，不自动同步，也不参与自动绑定。
 
 绑定后会尝试远程结构化同步。远程只返回 `canvas_chapter_patch`、`scene_card_patch` 和 `sync_note`；本地代码校验字段、清理事件池元信息、按 use mode 应用。远程失败、未配置或超时时保留本地同步结果，并在 `event_sync.remote_status` 写入原因。
+
+远程初版画布返回的章节状态会被清洗。若远程把尚未写正文的规划章节标成 `complete` / `completed`，解析阶段会恢复为 `planned`，避免事件池自动绑定把它误判为已完成章节而跳过。真实已有版本的完成章节仍保留完成状态。
+
+## 生成指令优化
+
+`optimizer.py` 只生成写作指令，不生成正文。它直接读取当前章节编辑器里的正文片段：正文开头最多 900 字，正文结尾最多 900 字，并统计当前字数，用来判断是“续写同一章”还是“补足长度和动作链”。
+
+前面章节不会整篇全文塞入优化 prompt。前文承接通过压缩上下文进入：
+
+- 上一章 `chapter_handoff`。
+- 截至上一章的可信 `Novel State`。
+- `Continuity Ledger`。
+- 已完成章节的摘要和开放线索。
+- 当前章节的 canvas chapter、`event_contract`、scene card 和质量诊断。
+
+如果某个前文细节没有进入 handoff、Novel State 或 ledger，优化指令未必能知道；后续若要更强连续性，应在 Context Activator 中按关键词和当前事件召回相关正文片段，而不是无条件塞入全本正文。
 
 ## 版本与回退
 

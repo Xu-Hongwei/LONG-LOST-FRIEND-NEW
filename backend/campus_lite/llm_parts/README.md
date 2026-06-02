@@ -33,10 +33,10 @@ Embedding 也走 provider 层。未配置或失败时，记忆召回退回 SQLit
 - relationship bond：返回 `{"events":[...]}`，只抽取事件，不给分。
 - Novel Project Draft：把一句话项目方向扩写为结构化项目草稿。
 - Story Canvas：生成或滚动章节画布。
-- Event Pool Delta：滚动画布时并行补充项目事件池候选。
+- Event Pool Delta：滚动画布前补充项目事件池候选，只输出结构化 add/update/retire，不输出分数。当前策略会把 `setting_profile` 降级为临时兜底；当 active 中兜底超过 3 条时，prompt 会要求补到 `replacement_needed` 条以上。
 - Event Binding Sync：绑定事件后返回 `canvas_chapter_patch`、`scene_card_patch` 和 `sync_note`。
 - Handoff / Novel State：章节完成后抽取交接单和可信状态 delta。
-- Instruction Optimizer：只返回优化后的写作指令。
+- Instruction Optimizer：只返回优化后的写作指令；会读取当前章节正文片段、事件契约、场景卡、handoff、Novel State 和 Continuity Ledger，但不直接生成正文。
 
 本地代码必须校验远程 JSON、裁剪字段、保留 fallback，并避免把远程未验证结论直接写成长久事实。
 
