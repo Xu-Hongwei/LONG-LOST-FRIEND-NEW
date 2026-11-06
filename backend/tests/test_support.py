@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 
 class OfflineTestCase(unittest.TestCase):
@@ -28,7 +30,14 @@ class OfflineTestCase(unittest.TestCase):
 
         def temporary_connect(database, *args, **kwargs):
             if str(database) != ":memory:":
-                if kwargs.get("uri") or not Path(database).resolve().is_relative_to(self.test_root):
+                database_path = Path(database)
+                if kwargs.get("uri"):
+                    uri = urlsplit(str(database))
+                    if uri.scheme != "file" or uri.netloc:
+                        self.blocked_database_attempts.append(str(database))
+                        raise AssertionError("Only local temporary SQLite file URIs are allowed")
+                    database_path = Path(url2pathname(uri.path))
+                if not database_path.resolve().is_relative_to(self.test_root):
                     self.blocked_database_attempts.append(str(database))
                     raise AssertionError("Offline tests must use a database inside their temporary directory")
             return connect(database, *args, **kwargs)

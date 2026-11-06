@@ -10,8 +10,19 @@
 - `stop-dev.ps1`：按端口停止后端和前端开发进程，默认停止 `8766` 和 `5176`。
 - `test-backend.ps1`：运行隔离的后端离线测试，支持 `-Python` 指定解释器，并透传测试退出码。
 - `check.ps1`：依次运行后端测试、前端类型检查和生产构建；任何阶段失败即返回非零退出码。
+- `data_tools.py`：创建一致性备份、校验、恢复到新路径、生成旧会话与小说索引；只依赖 Python 标准库。
 
 ## 常用命令
+
+数据备份：
+
+```powershell
+python scripts/data_tools.py backup
+```
+
+默认备份保存在 `data/backups/`，不会写入正式数据库。`verify` 与 `inventory` 只读；
+`restore` 只创建新路径中的副本，拒绝覆盖文件。完整命令和旧数据找回说明见
+[data/README.md](../data/README.md)。备份、恢复副本和私人索引不纳入 Git。
 
 运行项目统一检查：
 

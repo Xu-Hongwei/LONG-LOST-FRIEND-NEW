@@ -89,3 +89,5 @@ data/*.db-*
 data/*.sqlite
 data/*.sqlite3
 data/novel_state_backups/
+data/backups/
+data/recovery/

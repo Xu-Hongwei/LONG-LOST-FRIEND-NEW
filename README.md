@@ -118,6 +118,17 @@ cd frontend
 npm run build
 ```
 
+## Local Data Backup and Recovery
+
+```powershell
+python scripts/data_tools.py backup
+```
+
+Creates a verified SQLite snapshot in `data/backups/` without changing the live database.
+The tool also supports `verify`, `restore` to a new path, and read-only `inventory`.
+See [data/README.md](data/README.md) for recovery rehearsal and finding old sessions or novels.
+Database backups do not include browser localStorage or model configuration and are not committed to Git.
+
 ## Environment
 
 The provider layer checks chat providers in this order:
