@@ -221,3 +221,13 @@ Long-running chapter generation, background handoff, canvas planning, remote eve
 The frontend invalidates pending responses when the session, project, chapter, or operation changes. It also preserves draft edits made while a request is pending. Background polling updates progress only until completion, stops on draft changes, and never accepts a different server run. Switching views or stopping refresh does not cancel an already submitted model request: the server may still finish it. Unsaved browser edits are protected locally; saving them also invalidates older backend work. Concurrency protection is conservative at project scope, so changing a different chapter can require restarting an older generation.
 
 On first startup, existing databases receive a `novel_projects.revision` column and revision triggers. The migration preserves chapter text and immutable version history. Regression tests cover legacy-schema upgrades in temporary databases; development checks do not initialize or migrate the live database.
+
+## 页面验收记录（2026-11-06，第八批）
+
+使用独立 SQLite 数据库和临时端口，从浏览器完成角色 AI 扩写与创建、聊天、后台记忆与关系整理、聊天重载和 JSON 导出；实际选中的模型供应方为 DashScope。也验证了短篇生成与 Markdown 导出、长篇章节生成、后台交接与后续两章画布规划、人工修订保存、刷新恢复、历史版本恢复和项目 Markdown 导出。恢复后的正文与原生成正文逐字一致，导出内容与数据库中的恢复正文一致。
+
+本批修复：新建项目保留作者填写的大纲，空画布中的故事规则按实际项目设定补齐；窄窗口下小说编辑区与资料区不再重叠；短篇提示只描述短篇请求和返回结果，不再展示长篇交接、滚动画布阶段，收起结果后可返回生成入口。两项新增后端回归用例先复现失败，再验证修复。
+
+离线检查通过：173 项后端测试、32 项前端测试、类型检查及生产构建。真实模型验收与这些离线测试分开运行，不依赖 CI 中的模型密钥。原业务数据库的 SHA-256 在验收前后保持一致。
+
+本机证据保存在被 Git 忽略的 `runtime/stage8-ui/`，包括独立验收库、下载文件副本、检查日志、截图和 `verification.json`。本次只验证了自动选中的供应方，不代表环境中其他供应方均已联网验证。短篇结果目前只在当前页面内保留，需要导出留存；长篇保存内容与历史版本可重新加载。生成内容的文学质量、滚动规划的事件顺序与耗时仍需要单独优化，本次通过的是功能流程验收。

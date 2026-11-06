@@ -1,14 +1,8 @@
 <script setup lang="ts">
 import type { NovelGenerateResponse } from "../../types";
-import type { NovelPipelineStep } from "./constants";
-import { novelPipelineSteps } from "./constants";
 
 defineProps<{
   showProgress: boolean;
-  novelProgressLabel: string;
-  novelProgressPercent: number;
-  novelProjectBusy: boolean;
-  novelStepClass: (step: NovelPipelineStep) => Record<string, boolean>;
   novelResult: NovelGenerateResponse | null;
   novelResultSourceLabel: string;
   novelResultControlLabel: string;
@@ -18,7 +12,6 @@ defineProps<{
 }>();
 
 defineEmits<{
-  unlockProgress: [];
   downloadMarkdown: [];
   clearResult: [];
   generateQuick: [];
@@ -26,22 +19,9 @@ defineEmits<{
 </script>
 
 <template>
-  <section v-if="showProgress" class="novel-progress-card inline-progress">
+  <section v-if="showProgress && (busy || novelResult)" class="novel-progress-card inline-progress" role="status">
     <div class="novel-progress-meter">
-      <span>{{ novelProgressLabel }}</span>
-      <strong>{{ novelProgressPercent }}%</strong>
-      <i><b :style="{ width: `${novelProgressPercent}%` }"></b></i>
-      <button v-if="novelProjectBusy" type="button" class="ghost muted progress-unlock" @click="$emit('unlockProgress')">解除卡住</button>
-    </div>
-    <div class="novel-step-list">
-      <span
-        v-for="(step, index) in novelPipelineSteps"
-        :key="step.id"
-        :class="novelStepClass(step)"
-      >
-        <b>{{ index + 1 }}</b>
-        <em>{{ step.label }}</em>
-      </span>
+      <span>{{ busy ? '正在根据当前会话生成短篇，请稍候。' : `${novelResultSourceLabel}的短篇已返回，可预览或导出。` }}</span>
     </div>
   </section>
 
@@ -64,7 +44,7 @@ defineEmits<{
     <div class="novel-body">{{ novelResult.body }}</div>
   </section>
 
-  <section v-if="!novelResult && !showProgress" class="quick-empty-state">
+  <section v-if="!novelResult && !busy" class="quick-empty-state">
     <p class="eyebrow">短篇工作台</p>
     <h3>左侧选择形式和语气，然后生成成稿</h3>
     <p>短篇模式不会加载长篇章节编辑器，生成结果会直接显示在这里，方便预览和导出 Markdown。</p>

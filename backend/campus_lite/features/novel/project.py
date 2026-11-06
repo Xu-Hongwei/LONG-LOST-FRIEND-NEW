@@ -12,6 +12,7 @@ from ...schemas import (
 )
 from .setting_profiles import novel_setting_guidance
 from .quality import INTERNAL_ID_PATTERN
+from .progression import normalize_story_progression
 
 
 MEMORY_LABELS = {
@@ -139,6 +140,12 @@ class NovelProjectMixin:
             story_items,
             character,
         )
+        # The browser can submit a structurally nonempty canvas with blank rules.
+        # Fill those rules from the new project's settings before compaction.
+        story_canvas = normalize_story_progression(story_canvas, {
+            "title": title, "genre": effective_genre, "tone": request.tone,
+            "worldview": worldview, "relationship_setup": relationship_setup,
+        })
         story_canvas = self._compact_story_canvas(story_canvas)
         if not request.outline.strip():
             outline = self._canvas_outline(story_canvas)
@@ -160,7 +167,10 @@ class NovelProjectMixin:
         )
         self.seed_project_materials(project_id, messages, memories, story_items)
         story_canvas = self._story_canvas_with_materials(story_canvas, storage.list_novel_materials(project_id))
-        storage.update_novel_project(project_id, {"story_canvas": story_canvas, "outline": self._canvas_outline(story_canvas)})
+        storage.update_novel_project(project_id, {
+            "story_canvas": story_canvas,
+            "outline": outline if request.outline.strip() else self._canvas_outline(story_canvas),
+        })
         if not storage.list_novel_chapters(project_id):
             first_chapter = self._canvas_chapters(story_canvas)[0] if self._canvas_chapters(story_canvas) else {}
             first_scene = self._canvas_scene_for_canvas_chapter(story_canvas, str(first_chapter.get("id", ""))) or {}

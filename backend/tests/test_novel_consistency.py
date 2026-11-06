@@ -31,6 +31,42 @@ class NovelConsistencyTest(OfflineTestCase):
     def chapter(self):
         return self.storage.get_novel_chapter(self.chapter_id)
 
+    def test_project_creation_preserves_outline_with_empty_browser_canvas(self):
+        card = CharacterStore().get("lin_wanzhi")
+        request = NovelProjectCreateRequest(
+            title="灯塔档案", genre="轻悬疑", tone="温暖克制",
+            worldview="虚构小城旧书店", relationship_setup="普通朋友合作寻书",
+            outline="第一章：发现灯塔标记。第二章：核对档案。",
+            story_canvas={
+                "version": 1, "mode": "story_canvas", "chapters": [], "scenes": [],
+                "story_promise": {}, "progression_protocol": {},
+            },
+        )
+        project = self.service.create_project(
+            card, self.project.visitor_id, self.project.session_id, [], [], [], request,
+        )
+        reloaded = self.service.project_response(project.id)
+        self.assertEqual(reloaded.outline, request.outline)
+        promise = reloaded.story_canvas["story_promise"]
+        self.assertIn(request.title, promise["core_experience"])
+        self.assertIn(request.genre, promise["genre_contract"])
+        self.assertIn(request.worldview, promise["genre_contract"])
+        self.assertEqual(promise["relationship_engine"], request.relationship_setup)
+        self.assertIn(request.tone, promise["tone_commitment"])
+
+    def test_project_creation_keeps_explicit_canvas_rules_and_outline(self):
+        card = CharacterStore().get("lin_wanzhi")
+        canvas = self.canvas()
+        canvas["story_promise"]["core_experience"] = "作者指定的故事体验"
+        canvas["progression_protocol"]["driver"] = "作者指定的推动方式"
+        request = NovelProjectCreateRequest(outline="作者亲写的大纲", story_canvas=canvas)
+        project = self.service.create_project(
+            card, self.project.visitor_id, self.project.session_id, [], [], [], request,
+        )
+        self.assertEqual(project.outline, request.outline)
+        self.assertEqual(project.story_canvas["story_promise"]["core_experience"], "作者指定的故事体验")
+        self.assertEqual(project.story_canvas["progression_protocol"]["driver"], "作者指定的推动方式")
+
     def canvas(self):
         return json.loads(self.storage.get_novel_project(self.project.id)["story_canvas_json"])
 

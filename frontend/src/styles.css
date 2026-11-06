@@ -4074,6 +4074,7 @@ select {
 
   .novel-layout {
     grid-template-columns: 1fr;
+    height: auto;
     overflow-y: visible;
     gap: 18px;
     padding-top: 18px;
