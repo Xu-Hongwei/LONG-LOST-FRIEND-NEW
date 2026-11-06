@@ -108,6 +108,8 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   created_at?: string;
+  reply_source?: "remote" | "mock";
+  delivery?: "sending" | "saved" | "unknown";
 }
 
 export interface CharacterBehavior {

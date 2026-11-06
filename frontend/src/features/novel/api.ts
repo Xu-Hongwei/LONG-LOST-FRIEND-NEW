@@ -1,4 +1,9 @@
-import { request } from "../../lib/apiClient";
+import { request as apiRequest } from "../../lib/apiClient";
+
+// Novel planning/generation can chain multiple model calls; do not use the short read timeout.
+function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return apiRequest<T>(path, init, { timeoutMs: init.method && init.method !== "GET" ? 900_000 : 30_000 });
+}
 import type {
   NovelCanvasExtendRequest,
   NovelChapterDraftSaveRequest,

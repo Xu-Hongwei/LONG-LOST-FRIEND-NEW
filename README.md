@@ -103,7 +103,7 @@ in their original terminal. Use `start-dev.ps1 -Preview` after a build for local
 
 ## Test
 
-Unified offline check (backend tests, frontend type check and build):
+Unified offline check (backend tests, frontend regression tests, type check and build):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1

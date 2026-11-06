@@ -50,7 +50,7 @@ export async function waitForMemoryPostprocess(sessionId: string, userMessageId:
     user_message_id: userMessageId,
     timeout_seconds: String(timeoutSeconds)
   });
-  return request(`/api/sessions/${sessionId}/memory/wait?${params.toString()}`);
+  return request(`/api/sessions/${sessionId}/memory/wait?${params.toString()}`, {}, { timeoutMs: (timeoutSeconds + 10) * 1000 });
 }
 
 export async function updateMemoryItem(sessionId: string, memoryId: string, patch: MemoryPatch): Promise<MemoryPane> {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import {
   getStoryPane,
   refreshStoryPane
@@ -66,6 +66,8 @@ const {
   draft,
   busy,
   error,
+  canSend,
+  postprocessNotice,
   memoryPane,
   promptSlots,
   characterState,
@@ -349,8 +351,19 @@ function readableError(err: unknown) {
   return err instanceof Error ? err.message : String(err);
 }
 
+let sessionView = 0;
+watch(sessionId, () => {
+  sessionView++;
+  storyPane.value = null;
+  novelProjects.value = [];
+  storyBusy.value = false;
+}, { flush: "sync" });
+
 async function applyLoveProfileToMemory() {
-  if (!sessionId.value || !memoryPane.value || !loveResult.value) return;
+  if (!sessionId.value || !memoryPane.value || !loveResult.value || busy.value) return;
+  const targetSession = sessionId.value;
+  const targetView = sessionView;
+  const isCurrent = () => sessionId.value === targetSession && sessionView === targetView;
   const result = loveResult.value;
   const note = [
     memoryPane.value.manual_note,
@@ -360,12 +373,14 @@ async function applyLoveProfileToMemory() {
   busy.value = true;
   error.value = "";
   try {
-    memoryPane.value = await patchMemory(sessionId.value, { manual_note: note });
+    const pane = await patchMemory(targetSession, { manual_note: note });
+    if (!isCurrent()) return;
+    memoryPane.value = pane;
     currentPage.value = "chat";
   } catch (err) {
-    error.value = readableError(err);
+    if (isCurrent()) error.value = readableError(err);
   } finally {
-    busy.value = false;
+    if (isCurrent()) busy.value = false;
   }
 }
 
@@ -373,10 +388,15 @@ onMounted(() => {
   void initializeChatSession();
 });
 
-async function loadSessionSideEffects(targetSessionId: string) {
+async function loadSessionSideEffects(targetSessionId: string, isCurrent: () => boolean) {
+  storyPane.value = null;
+  novelProjects.value = [];
   try {
-    storyPane.value = await getStoryPane(targetSessionId);
+    const pane = await getStoryPane(targetSessionId);
+    if (!isCurrent()) return;
+    storyPane.value = pane;
   } catch (err) {
+    if (!isCurrent()) return;
     storyPane.value = {
       session_id: targetSessionId,
       items: [],
@@ -414,19 +434,24 @@ async function maybeAutoRefreshStoryTags() {
 
 async function refreshStoryTags(options: StoryRefreshOptions = {}) {
   if (!sessionId.value || storyBusy.value) return;
+  const targetSession = sessionId.value;
+  const targetView = sessionView;
+  const isCurrent = () => sessionId.value === targetSession && sessionView === targetView;
   storyBusy.value = true;
   if (!options.silent) {
     error.value = "";
   }
   try {
-    storyPane.value = await refreshStoryPane(sessionId.value);
+    const pane = await refreshStoryPane(targetSession);
+    if (!isCurrent()) return;
+    storyPane.value = pane;
     rememberStoryRefreshCountForSession(currentUserMessageCount());
   } catch (err) {
-    if (!options.silent) {
+    if (!options.silent && isCurrent()) {
       error.value = readableError(err);
     }
   } finally {
-    storyBusy.value = false;
+    if (isCurrent()) storyBusy.value = false;
   }
 }
 
@@ -529,9 +554,12 @@ function downloadNovelProjectMarkdown() {
       :bond-percent="bondPercent"
       :busy="busy"
       :messages="messages"
+      :can-send="canSend"
+      :postprocess-notice="postprocessNotice"
       :error="error"
       @submit="submit"
       @export="exportDebugBundle"
+      @reload="openSession"
     />
 
     <CharacterWorkshopPanel

@@ -171,10 +171,16 @@ export function useNovelProjectActions(options: {
     }
   }
 
+  let projectListRequest = 0;
   async function loadNovelProjects() {
     if (!options.sessionId.value) return;
+    const targetSession = options.sessionId.value;
+    const token = ++projectListRequest;
+    const isCurrent = () => options.sessionId.value === targetSession && projectListRequest === token;
     try {
-      options.novelProjects.value = await listNovelProjects(options.sessionId.value);
+      const projects = await listNovelProjects(targetSession);
+      if (!isCurrent()) return;
+      options.novelProjects.value = projects;
       if (!options.activeNovelProjectId.value || !options.novelProjects.value.some((project) => project.id === options.activeNovelProjectId.value)) {
         options.activeNovelProjectId.value = options.novelProjects.value[0]?.id || "";
       }
@@ -185,7 +191,7 @@ export function useNovelProjectActions(options: {
       options.syncChapterDraft(options.activeNovelChapter.value);
       await loadChapterVersions();
     } catch (err) {
-      options.error.value = readableError(err);
+      if (isCurrent()) options.error.value = readableError(err);
     }
   }
 
@@ -549,15 +555,19 @@ export function useNovelProjectActions(options: {
     }
   }
 
+  let versionListRequest = 0;
   async function loadChapterVersions() {
+    const token = ++versionListRequest;
     if (!options.activeNovelChapter.value) {
       options.chapterVersions.value = [];
       return;
     }
+    const targetChapter = options.activeNovelChapter.value.id;
     try {
-      options.chapterVersions.value = await listNovelVersions(options.activeNovelChapter.value.id);
+      const versions = await listNovelVersions(targetChapter);
+      if (options.activeNovelChapter.value?.id === targetChapter && token === versionListRequest) options.chapterVersions.value = versions;
     } catch {
-      options.chapterVersions.value = [];
+      if (options.activeNovelChapter.value?.id === targetChapter && token === versionListRequest) options.chapterVersions.value = [];
     }
   }
 

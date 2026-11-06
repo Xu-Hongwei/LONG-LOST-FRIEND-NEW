@@ -1,5 +1,5 @@
 import { computed, ref, watch, type Ref } from "vue";
-import { deleteMemoryItem, patchMemory, updateMemoryItem } from "./api";
+import * as defaultApi from "./api";
 import type { ContextSlot, MemoryItem, MemoryPane, MemoryPatch } from "../../types";
 
 type MemoryFilter = "all" | "global" | "character" | "session" | "recall";
@@ -13,7 +13,8 @@ export function useRelationshipMemory(
   memoryPane: Ref<MemoryPane | null>,
   promptSlots: Ref<ContextSlot[]>,
   busy: Ref<boolean>,
-  error: Ref<string>
+  error: Ref<string>,
+  api = defaultApi
 ) {
   const manualNoteDraft = ref("");
   const memoryFilter = ref<MemoryFilter>("all");
@@ -105,30 +106,42 @@ export function useRelationshipMemory(
     return "no recent analysis";
   });
 
-  async function saveMemoryNote() {
-    if (!sessionId.value || !memoryPane.value) return;
+  let sessionRevision = 0;
+  watch(sessionId, () => {
+    sessionRevision++;
+    cancelEditMemory();
+    expandedMemoryId.value = "";
+  }, { flush: "sync" });
+
+  async function mutateMemory(action: (targetSession: string) => Promise<MemoryPane>, after?: () => void) {
+    if (!sessionId.value || busy.value) return;
+    const target = sessionId.value;
+    const revision = sessionRevision;
+    const isCurrent = () => sessionId.value === target && sessionRevision === revision;
     busy.value = true;
     error.value = "";
     try {
-      memoryPane.value = await patchMemory(sessionId.value, { manual_note: manualNoteDraft.value });
+      const pane = await action(target);
+      if (!isCurrent()) return;
+      memoryPane.value = pane;
+      after?.();
     } catch (err) {
-      error.value = readableError(err);
+      if (isCurrent()) error.value = readableError(err);
     } finally {
-      busy.value = false;
+      if (isCurrent()) busy.value = false;
     }
   }
 
+  async function saveMemoryNote() {
+    if (!memoryPane.value) return;
+    const manual_note = manualNoteDraft.value;
+    await mutateMemory((target) => api.patchMemory(target, { manual_note }));
+  }
+
   async function toggleFreeze() {
-    if (!sessionId.value || !memoryPane.value) return;
-    busy.value = true;
-    error.value = "";
-    try {
-      memoryPane.value = await patchMemory(sessionId.value, { frozen: !memoryPane.value.frozen });
-    } catch (err) {
-      error.value = readableError(err);
-    } finally {
-      busy.value = false;
-    }
+    if (!memoryPane.value) return;
+    const frozen = !memoryPane.value.frozen;
+    await mutateMemory((target) => api.patchMemory(target, { frozen }));
   }
 
   function startEditMemory(memory: MemoryItem) {
@@ -148,32 +161,15 @@ export function useRelationshipMemory(
   }
 
   async function saveMemoryItem(memoryId: string) {
-    if (!sessionId.value) return;
-    busy.value = true;
-    error.value = "";
-    try {
-      memoryPane.value = await updateMemoryItem(sessionId.value, memoryId, memoryDraft.value);
-      cancelEditMemory();
-    } catch (err) {
-      error.value = readableError(err);
-    } finally {
-      busy.value = false;
-    }
+    const payload = { ...memoryDraft.value };
+    await mutateMemory((target) => api.updateMemoryItem(target, memoryId, payload), cancelEditMemory);
   }
 
   async function removeMemoryItem(memoryId: string) {
-    if (!sessionId.value) return;
-    busy.value = true;
-    error.value = "";
-    try {
-      memoryPane.value = await deleteMemoryItem(sessionId.value, memoryId);
+    await mutateMemory((target) => api.deleteMemoryItem(target, memoryId), () => {
       if (editingMemoryId.value === memoryId) cancelEditMemory();
       if (expandedMemoryId.value === memoryId) expandedMemoryId.value = "";
-    } catch (err) {
-      error.value = readableError(err);
-    } finally {
-      busy.value = false;
-    }
+    });
   }
 
   function toggleMemoryDetails(memoryId: string) {
