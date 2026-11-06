@@ -212,6 +212,9 @@ class NovelStateMixin:
             scene_card = self._json_dict(row["scene_card_json"] if "scene_card_json" in row.keys() else "{}")
             active_version_id = str(scene_card.get("active_version_id") or "").strip()
             active_version = storage.get_novel_version(active_version_id) if active_version_id else (latest_versions[0] if latest_versions else None)
+            if (not active_version or active_version["chapter_id"] != row["id"]
+                    or active_version["body"].strip() != row["body"].strip()):
+                break
             latest_source = str(active_version["source"] if active_version else "").strip()
             if latest_source in {"mock", "manual", "restore", "create", "system"}:
                 break

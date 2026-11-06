@@ -21,7 +21,7 @@ class NovelChapterStorageMixin:
         chapter_order: int | None = None,
     ) -> str:
         chapter_id = f"chapter_{uuid.uuid4().hex[:12]}"
-        with self.connect() as conn:
+        with self.transaction() as conn:
             if chapter_order is None:
                 row = conn.execute(
                     "SELECT coalesce(max(chapter_order), 0) + 1 AS next_order FROM novel_chapters WHERE project_id = ?",
@@ -42,28 +42,19 @@ class NovelChapterStorageMixin:
                     chapter_id,
                     project_id,
                     next_order,
-                    title.strip()[:120] or f"第 {next_order} 章",
-                    goal.strip()[:1000],
-                    summary.strip()[:1200],
-                    body.strip()[:20000],
-                    status,
+                    title.strip()[:120].rstrip() or f"第 {next_order} 章",
+                    goal.strip()[:1000].rstrip(),
+                    summary.strip()[:1200].rstrip(),
+                    body.strip()[:20000].rstrip(),
+                    status.strip()[:40].rstrip(),
                     self._dump_json(scene_card or {}, "scene_card_json", JSON_LIMITS["scene_card_json"]),
-                    self._dump_json(source_material_ids or [], "source_material_ids_json"),
+                    self._dump_json((source_material_ids or [])[:24], "source_material_ids_json"),
                 ),
             )
+            if body.strip():
+                row = conn.execute("SELECT * FROM novel_chapters WHERE id = ?", (chapter_id,)).fetchone()
+                self._create_active_chapter_version(conn, row, "create")
             conn.execute("UPDATE novel_projects SET updated_at = datetime('now') WHERE id = ?", (project_id,))
-        if body:
-            row = self.get_novel_chapter(chapter_id)
-            planning_snapshot = self._novel_planning_snapshot(
-                row,
-                title,
-                goal,
-                summary,
-                status,
-                scene_card or {},
-                source_material_ids or [],
-            ) if row else {}
-            self.add_novel_version(project_id, chapter_id, "draft", title, body, summary, "create", planning_snapshot=planning_snapshot)
         return chapter_id
 
     def get_novel_chapter(self, chapter_id: str) -> sqlite3.Row | None:
@@ -116,10 +107,10 @@ class NovelChapterStorageMixin:
         version_source: str = "manual",
         create_version: bool = True,
     ) -> bool:
-        existing = self.get_novel_chapter(chapter_id)
-        if not existing:
-            return False
-        with self.connect() as conn:
+        with self.transaction() as conn:
+            existing = conn.execute("SELECT * FROM novel_chapters WHERE id = ?", (chapter_id,)).fetchone()
+            if not existing:
+                return False
             changed = self._apply_novel_chapter_update(conn, existing, updates, version_source, create_version)
             if changed:
                 conn.execute("UPDATE novel_projects SET updated_at = datetime('now') WHERE id = ?", (existing["project_id"],))
@@ -134,7 +125,7 @@ class NovelChapterStorageMixin:
         version_source: str = "manual",
     ) -> bool:
         project_fields, project_values = self._novel_project_update_fields(project_updates)
-        with self.connect() as conn:
+        with self.transaction() as conn:
             project = conn.execute("SELECT id FROM novel_projects WHERE id = ?", (project_id,)).fetchone()
             if not project:
                 return False
@@ -166,7 +157,7 @@ class NovelChapterStorageMixin:
         for key, limit in allowed.items():
             if key in updates and updates[key] is not None:
                 fields.append(f"{key} = ?")
-                values.append(str(updates[key]).strip()[:limit])
+                values.append(str(updates[key]).strip()[:limit].rstrip())
         if "source_material_ids" in updates and updates["source_material_ids"] is not None:
             fields.append("source_material_ids_json = ?")
             values.append(self._dump_json(updates["source_material_ids"][:24], "source_material_ids_json"))
@@ -189,26 +180,33 @@ class NovelChapterStorageMixin:
         fields.append("updated_at = datetime('now')")
         values.append(existing["id"])
         conn.execute(f"UPDATE novel_chapters SET {', '.join(fields)} WHERE id = ?", values)
-        if create_version and "body" in updates and updates["body"] is not None and str(updates["body"]).strip():
-            self._create_active_chapter_version(conn, existing, updates, version_source)
+        if create_version and "body" in updates and updates["body"] is not None:
+            saved = conn.execute("SELECT * FROM novel_chapters WHERE id = ?", (existing["id"],)).fetchone()
+            if saved["body"]:
+                self._create_active_chapter_version(conn, saved, version_source)
+            else:
+                card = self._strip_runtime_scene_card_fields(self._json_dict(saved["scene_card_json"]))
+                conn.execute("UPDATE novel_chapters SET scene_card_json = ? WHERE id = ?", (
+                    self._dump_json(card, "scene_card_json", JSON_LIMITS["scene_card_json"]), existing["id"],
+                ))
         return True
 
     def _create_active_chapter_version(
         self,
         conn: sqlite3.Connection,
         existing: sqlite3.Row,
-        updates: dict[str, Any],
         version_source: str,
     ) -> str:
-        next_title = str(updates.get("title") if updates.get("title") is not None else existing["title"])
-        next_goal = str(updates.get("goal") if updates.get("goal") is not None else existing["goal"])
-        next_summary = str(updates.get("summary") if updates.get("summary") is not None else existing["summary"])
-        next_status = str(updates.get("status") if updates.get("status") is not None else existing["status"])
-        next_scene_card = updates.get("scene_card") if isinstance(updates.get("scene_card"), dict) else self._json_dict(existing["scene_card_json"] if "scene_card_json" in existing.keys() else "{}")
+        # Build every version field from the row actually saved in this transaction.
+        next_title = existing["title"]
+        next_goal = existing["goal"]
+        next_summary = existing["summary"]
+        next_status = existing["status"]
+        next_scene_card = self._json_dict(existing["scene_card_json"])
         if version_source in UNTRUSTED_VERSION_SOURCES:
             next_scene_card = self._strip_novel_state_fields(next_scene_card)
-        next_source_material_ids = updates.get("source_material_ids") if isinstance(updates.get("source_material_ids"), list) else self._json_list(existing["source_material_ids_json"] if "source_material_ids_json" in existing.keys() else "[]")
-        state_delta = self._novel_version_state_delta(existing, next_title, str(updates["body"]), next_summary, version_source, next_scene_card)
+        next_source_material_ids = self._json_list(existing["source_material_ids_json"])
+        state_delta = self._novel_version_state_delta(existing, next_title, existing["body"], next_summary, version_source, next_scene_card)
         if version_source == "mock" and not state_delta.get("handoff_source"):
             state_delta["handoff_source"] = "skipped_mock"
         project_row = conn.execute("SELECT story_canvas_json FROM novel_projects WHERE id = ?", (existing["project_id"],)).fetchone()
@@ -229,7 +227,7 @@ class NovelChapterStorageMixin:
             existing["id"],
             "draft",
             next_title,
-            str(updates["body"]),
+            existing["body"],
             next_summary,
             version_source,
             state_delta,

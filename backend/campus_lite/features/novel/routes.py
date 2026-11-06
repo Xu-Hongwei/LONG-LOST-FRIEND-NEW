@@ -182,51 +182,54 @@ def register_novel_routes(
 
     @app.patch("/api/novel/chapters/{chapter_id}", response_model=NovelProjectResponse)
     def update_novel_chapter(chapter_id: str, payload: NovelChapterUpdateRequest) -> NovelProjectResponse:
-        chapter = storage.get_novel_chapter(chapter_id)
-        if not chapter:
-            raise HTTPException(status_code=404, detail="Novel chapter not found")
-        try:
-            updated = storage.update_novel_chapter(chapter_id, payload.model_dump(exclude_unset=True), "manual")
-        except StoragePayloadError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not updated:
-            raise HTTPException(status_code=404, detail="Novel chapter not found")
-        if payload.body is not None or payload.summary is not None or payload.scene_card is not None:
-            novel.mark_chapter_revision_boundary(chapter["project_id"], int(chapter["chapter_order"]))
-        return novel.project_response(chapter["project_id"])
+        with storage.transaction():
+            chapter = storage.get_novel_chapter(chapter_id)
+            if not chapter:
+                raise HTTPException(status_code=404, detail="Novel chapter not found")
+            try:
+                updated = storage.update_novel_chapter(chapter_id, payload.model_dump(exclude_unset=True), "manual")
+            except StoragePayloadError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if not updated:
+                raise HTTPException(status_code=404, detail="Novel chapter not found")
+            if payload.body is not None or payload.summary is not None or payload.scene_card is not None:
+                novel.mark_chapter_revision_boundary(chapter["project_id"], int(chapter["chapter_order"]))
+            return novel.project_response(chapter["project_id"])
 
     @app.patch("/api/novel/chapters/{chapter_id}/draft", response_model=NovelProjectResponse)
     def save_novel_chapter_draft(chapter_id: str, payload: NovelChapterDraftSaveRequest) -> NovelProjectResponse:
-        chapter = storage.get_novel_chapter(chapter_id)
-        if not chapter:
-            raise HTTPException(status_code=404, detail="Novel chapter not found")
-        project_updates = payload.project.model_dump(exclude_unset=True) if payload.project else {}
-        chapter_updates = payload.chapter.model_dump(exclude_unset=True)
-        try:
-            updated = storage.update_novel_chapter_draft(chapter["project_id"], chapter_id, project_updates, chapter_updates, "manual")
-        except StoragePayloadError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not updated:
-            raise HTTPException(status_code=404, detail="Novel chapter not found")
-        if (
-            payload.chapter.body is not None
-            or payload.chapter.summary is not None
-            or payload.chapter.scene_card is not None
-            or payload.chapter.goal is not None
-            or payload.chapter.title is not None
-            or payload.chapter.source_material_ids is not None
-        ):
-            novel.mark_chapter_revision_boundary(chapter["project_id"], int(chapter["chapter_order"]))
-        return novel.project_response(chapter["project_id"])
+        with storage.transaction():
+            chapter = storage.get_novel_chapter(chapter_id)
+            if not chapter:
+                raise HTTPException(status_code=404, detail="Novel chapter not found")
+            project_updates = payload.project.model_dump(exclude_unset=True) if payload.project else {}
+            chapter_updates = payload.chapter.model_dump(exclude_unset=True)
+            try:
+                updated = storage.update_novel_chapter_draft(chapter["project_id"], chapter_id, project_updates, chapter_updates, "manual")
+            except StoragePayloadError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if not updated:
+                raise HTTPException(status_code=404, detail="Novel chapter not found")
+            if (
+                payload.chapter.body is not None
+                or payload.chapter.summary is not None
+                or payload.chapter.scene_card is not None
+                or payload.chapter.goal is not None
+                or payload.chapter.title is not None
+                or payload.chapter.source_material_ids is not None
+            ):
+                novel.mark_chapter_revision_boundary(chapter["project_id"], int(chapter["chapter_order"]))
+            return novel.project_response(chapter["project_id"])
 
     @app.delete("/api/novel/chapters/{chapter_id}", response_model=NovelProjectResponse)
     def delete_novel_chapter(chapter_id: str) -> NovelProjectResponse:
-        chapter = storage.delete_novel_chapter(chapter_id)
-        if not chapter:
-            raise HTTPException(status_code=404, detail="Novel chapter not found")
-        novel.remove_chapter_from_story_canvas(chapter["project_id"], int(chapter["chapter_order"]))
-        novel.mark_chapter_revision_boundary(chapter["project_id"], max(0, int(chapter["chapter_order"]) - 1))
-        return novel.project_response(chapter["project_id"])
+        with storage.transaction():
+            chapter = storage.delete_novel_chapter(chapter_id)
+            if not chapter:
+                raise HTTPException(status_code=404, detail="Novel chapter not found")
+            novel.remove_chapter_from_story_canvas(chapter["project_id"], int(chapter["chapter_order"]))
+            novel.mark_chapter_revision_boundary(chapter["project_id"], max(0, int(chapter["chapter_order"]) - 1))
+            return novel.project_response(chapter["project_id"])
 
     @app.post("/api/novel/projects/{project_id}/generate-chapter", response_model=NovelProjectResponse)
     async def generate_novel_chapter(
@@ -329,16 +332,20 @@ def register_novel_routes(
 
     @app.post("/api/novel/versions/{version_id}/restore", response_model=NovelProjectResponse)
     def restore_novel_version(version_id: str) -> NovelProjectResponse:
-        version = storage.get_novel_version(version_id)
-        if not version:
-            raise HTTPException(status_code=404, detail="Novel version not found")
-        restored = storage.restore_novel_version(version_id)
-        if not restored:
-            raise HTTPException(status_code=404, detail="Novel version not found")
-        chapter = storage.get_novel_chapter(version["chapter_id"])
-        if chapter:
-            novel.mark_chapter_revision_boundary(version["project_id"], int(chapter["chapter_order"]))
-        return novel.project_response(version["project_id"])
+        with storage.transaction():
+            version = storage.get_novel_version(version_id)
+            if not version:
+                raise HTTPException(status_code=404, detail="Novel version not found")
+            try:
+                restored = storage.restore_novel_version(version_id)
+            except StoragePayloadError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if not restored:
+                raise HTTPException(status_code=404, detail="Novel version not found")
+            chapter = storage.get_novel_chapter(version["chapter_id"])
+            if chapter:
+                novel.mark_chapter_revision_boundary(version["project_id"], int(chapter["chapter_order"]))
+            return novel.project_response(version["project_id"])
 
     @app.delete("/api/novel/versions/{version_id}", response_model=NovelProjectResponse)
     def delete_novel_version(version_id: str) -> NovelProjectResponse:

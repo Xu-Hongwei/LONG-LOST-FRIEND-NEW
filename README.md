@@ -190,3 +190,9 @@ Long-form projects use layered planning:
 - Generation instruction compiles the current canvas, event contract, scene card, handoff, and Novel State.
 
 Chapter versions are immutable. `planning_snapshot` stores the current chapter planning state, including canvas chapter, scene card, bound event, and event contract, so restoring a version can roll back the chapter plan without replacing the whole project canvas.
+
+Chapter creation and body saves commit their version snapshots in the same transaction. The chapter save, draft save, restore, and delete endpoints also include dependent canvas changes, affected-chapter flags, and synchronous Novel State rebuilding in that transaction. A failure rolls back the entire operation. `Storage.transaction()` joins synchronous calls on the same storage instance; never hold it across an `await` or pass it to another task/thread.
+
+Version metadata uses the normalized body actually stored. Clearing a body removes its active state markers while retaining history. Restoring a snapshot preserves deliberately empty fields, follows the chapter's current order after earlier chapter deletions, and recalculates event bindings from the current canvas. If all ten active event slots are still in use, restoring an additional event fails without changing the project. State rebuilding only trusts a version belonging to the current chapter with matching body text.
+
+Follow-up work: protect asynchronous chapter generation, background handoff/canvas updates, and frontend save/restore responses from concurrent edits and project switching. The synchronous transaction guarantees above do not yet cover those long-running model operations.

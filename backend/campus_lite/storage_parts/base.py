@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -12,11 +13,16 @@ from .common import DB_PATH, StoragePayloadError
 class BaseStorageMixin:
     def __init__(self, db_path: Path = DB_PATH) -> None:
         self.db_path = db_path
+        self._transaction_connection: ContextVar[sqlite3.Connection | None] = ContextVar("storage_transaction", default=None)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.init_schema()
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
+        active = self._transaction_connection.get()
+        if active is not None:
+            yield active
+            return
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -25,6 +31,21 @@ class BaseStorageMixin:
             conn.commit()
         finally:
             conn.close()
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Join synchronous storage calls into one transaction; never span an await."""
+        if self._transaction_connection.get() is not None:
+            with self.connect() as conn:
+                yield conn
+            return
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            token = self._transaction_connection.set(conn)
+            try:
+                yield conn
+            finally:
+                self._transaction_connection.reset(token)
 
     def init_schema(self) -> None:
         with self.connect() as conn:

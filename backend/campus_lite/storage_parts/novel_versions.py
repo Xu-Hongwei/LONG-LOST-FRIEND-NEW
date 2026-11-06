@@ -103,7 +103,7 @@ class NovelVersionStorageMixin:
         project_story_canvas: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         canvas = project_story_canvas if isinstance(project_story_canvas, dict) else {}
-        if not canvas and chapter and "project_id" in chapter.keys():
+        if project_story_canvas is None and chapter and "project_id" in chapter.keys():
             project = self.get_novel_project(chapter["project_id"])
             canvas = self._json_dict(project["story_canvas_json"] if project and "story_canvas_json" in project.keys() else "{}")
         if not canvas:
@@ -247,55 +247,62 @@ class NovelVersionStorageMixin:
             return cur.rowcount > 0
 
     def restore_novel_version(self, version_id: str) -> bool:
-        version = self.get_novel_version(version_id)
-        if not version:
-            return False
-        chapter = self.get_novel_chapter(version["chapter_id"])
-        if not chapter:
-            return False
-        scene_card = self._json_dict(chapter["scene_card_json"] if "scene_card_json" in chapter.keys() else "{}")
-        state_delta = self._json_dict(version["state_delta_json"] if "state_delta_json" in version.keys() else "{}")
-        planning_snapshot = self._json_dict(version["planning_snapshot_json"] if "planning_snapshot_json" in version.keys() else "{}")
-        state_delta = {**state_delta, "chapter_version_id": version_id}
-        snapshot_scene_card = planning_snapshot.get("scene_card") if isinstance(planning_snapshot.get("scene_card"), dict) else {}
-        if snapshot_scene_card:
-            scene_card = self._strip_runtime_scene_card_fields(snapshot_scene_card)
-        else:
-            scene_card = self._strip_runtime_scene_card_fields(scene_card)
-        scene_card = {
-            **scene_card,
-            "active_version_id": version_id,
-            "active_state_delta": state_delta,
-        }
-        handoff = state_delta.get("chapter_handoff") if isinstance(state_delta.get("chapter_handoff"), dict) else {}
-        if handoff:
-            scene_card["chapter_handoff"] = handoff
-            scene_card["handoff_source"] = state_delta.get("handoff_source") or scene_card.get("handoff_source") or ""
-        restored = self.update_novel_chapter(
-            version["chapter_id"],
-            {
-                "title": version["title"],
-                "goal": str(planning_snapshot.get("goal") or chapter["goal"] or ""),
-                "body": version["body"],
-                "summary": version["summary"],
-                "status": str(planning_snapshot.get("status") or "revised"),
-                "scene_card": scene_card,
-                "source_material_ids": planning_snapshot.get("source_material_ids") if isinstance(planning_snapshot.get("source_material_ids"), list) else self._json_list(chapter["source_material_ids_json"] if "source_material_ids_json" in chapter.keys() else "[]"),
-            },
-            "restore",
-            create_version=False,
-        )
-        if restored:
-            self._restore_novel_canvas_planning_snapshot(version["project_id"], planning_snapshot)
-        return restored
+        with self.transaction() as conn:
+            version = conn.execute("SELECT * FROM novel_versions WHERE id = ?", (version_id,)).fetchone()
+            if not version:
+                return False
+            chapter = conn.execute("SELECT * FROM novel_chapters WHERE id = ?", (version["chapter_id"],)).fetchone()
+            if not chapter:
+                return False
+            scene_card = self._json_dict(chapter["scene_card_json"] if "scene_card_json" in chapter.keys() else "{}")
+            state_delta = self._json_dict(version["state_delta_json"] if "state_delta_json" in version.keys() else "{}")
+            planning_snapshot = self._json_dict(version["planning_snapshot_json"] if "planning_snapshot_json" in version.keys() else "{}")
+            # Chapter numbers can change after deletion; a snapshot is tied to identity.
+            current_order = int(chapter["chapter_order"])
+            state_delta = {**state_delta, "chapter_version_id": version_id, "chapter_order": current_order}
+            planning_snapshot = {**planning_snapshot, "chapter_order": current_order}
+            if isinstance(planning_snapshot.get("canvas_chapter"), dict):
+                planning_snapshot["canvas_chapter"] = {**planning_snapshot["canvas_chapter"], "chapter_order": current_order}
+            snapshot_scene_card = planning_snapshot.get("scene_card") if isinstance(planning_snapshot.get("scene_card"), dict) else {}
+            if isinstance(planning_snapshot.get("scene_card"), dict):
+                scene_card = self._strip_runtime_scene_card_fields(snapshot_scene_card)
+            else:
+                scene_card = self._strip_runtime_scene_card_fields(scene_card)
+            scene_card = {
+                **scene_card,
+                "active_version_id": version_id,
+                "active_state_delta": state_delta,
+            }
+            handoff = state_delta.get("chapter_handoff") if isinstance(state_delta.get("chapter_handoff"), dict) else {}
+            if handoff:
+                scene_card["chapter_handoff"] = handoff
+                scene_card["handoff_source"] = state_delta.get("handoff_source") or scene_card.get("handoff_source") or ""
+            restored = self._apply_novel_chapter_update(
+                conn, chapter,
+                {
+                    "title": version["title"],
+                    "goal": str(planning_snapshot["goal"] if "goal" in planning_snapshot else chapter["goal"] or ""),
+                    "body": version["body"],
+                    "summary": version["summary"],
+                    "status": str(planning_snapshot.get("status") or "revised"),
+                    "scene_card": scene_card,
+                    "source_material_ids": planning_snapshot.get("source_material_ids") if isinstance(planning_snapshot.get("source_material_ids"), list) else self._json_list(chapter["source_material_ids_json"] if "source_material_ids_json" in chapter.keys() else "[]"),
+                },
+                "restore",
+                create_version=False,
+            )
+            if restored:
+                self._restore_novel_canvas_planning_snapshot(conn, version["project_id"], planning_snapshot)
+                conn.execute("UPDATE novel_projects SET updated_at = datetime('now') WHERE id = ?", (version["project_id"],))
+            return restored
 
-    def _restore_novel_canvas_planning_snapshot(self, project_id: str, planning_snapshot: dict[str, Any]) -> None:
+    def _restore_novel_canvas_planning_snapshot(self, conn: sqlite3.Connection, project_id: str, planning_snapshot: dict[str, Any]) -> None:
         canvas_chapter = planning_snapshot.get("canvas_chapter") if isinstance(planning_snapshot.get("canvas_chapter"), dict) else {}
         canvas_scene = planning_snapshot.get("canvas_scene") if isinstance(planning_snapshot.get("canvas_scene"), dict) else {}
         event = planning_snapshot.get("event_pool_event") if isinstance(planning_snapshot.get("event_pool_event"), dict) else {}
         if not canvas_chapter and not canvas_scene and not event:
             return
-        project = self.get_novel_project(project_id)
+        project = conn.execute("SELECT * FROM novel_projects WHERE id = ?", (project_id,)).fetchone()
         if not project:
             return
         canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
@@ -339,10 +346,26 @@ class NovelVersionStorageMixin:
             else:
                 active.append(event)
                 if len(active) > 10:
-                    drop_index = next((index for index in range(len(active) - 1, -1, -1) if str(active[index].get("id") or "") != event_id and not active[index].get("bound_chapter_orders")), -1)
+                    bound_ids = {str(item.get("event_pool_id") or "") for item in chapters if isinstance(item, dict)}
+                    drop_index = next((index for index in range(len(active) - 1, -1, -1) if str(active[index].get("id") or "") != event_id and str(active[index].get("id") or "") not in bound_ids), -1)
                     if drop_index >= 0:
                         active.pop(drop_index)
+                    else:
+                        raise StoragePayloadError("事件池已满且所有事件均被章节使用，无法恢复该版本。请先整理事件绑定。")
             event_pool["active"] = active[:10]
             event_pool["retired"] = retired[-40:]
             next_canvas["event_pool"] = event_pool
-        self.update_novel_project(project_id, {"story_canvas": next_canvas})
+        # Bindings are derived from the current canvas, not an old event snapshot.
+        event_pool = next_canvas.get("event_pool")
+        if isinstance(event_pool, dict):
+            for bucket in ("active", "retired"):
+                for item in event_pool.get(bucket, []):
+                    if isinstance(item, dict):
+                        item["bound_chapter_orders"] = sorted({
+                            int(chapter.get("chapter_order") or 0)
+                            for chapter in chapters if isinstance(chapter, dict)
+                            and chapter.get("event_pool_id") == item.get("id")
+                            and int(chapter.get("chapter_order") or 0) > 0
+                        })
+        fields, values = self._novel_project_update_fields({"story_canvas": next_canvas})
+        conn.execute(f"UPDATE novel_projects SET {', '.join(fields)}, updated_at = datetime('now') WHERE id = ?", [*values, project_id])
