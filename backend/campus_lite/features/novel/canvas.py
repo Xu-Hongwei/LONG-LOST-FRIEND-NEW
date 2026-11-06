@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from ...schemas import NovelProjectResponse
+from .concurrency import NovelConflictError, NovelOperationGuard
 from .config import NOVEL_CANVAS_TIMEOUT_MS
 from .event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters, event_pool_replacement_stats
 
@@ -17,6 +18,8 @@ class NovelCanvasMixin:
         initial_chapters = [row for row in storage.list_novel_chapters(project_id) if int(row["chapter_order"]) <= 4]
         if any(storage.list_novel_versions(row["id"]) for row in initial_chapters):
             raise ValueError("Cannot rebuild initial canvas while the first four chapters still have versions")
+        guard = NovelOperationGuard(storage, project_id, project["revision"])
+        guard.claim()
         story_bible = self._json_dict(project["story_bible_json"])
         materials = storage.list_novel_materials(project_id)
         reset_project = self._project_with_reset_canvas(project)
@@ -46,11 +49,16 @@ class NovelCanvasMixin:
             ]
             try:
                 event_pool_result = await llm.chat_complete(event_pool_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
+                guard.check()
                 try:
                     event_pool_delta = self._parse_event_pool_delta_response(str(event_pool_result))
                     event_pool_add_count = len(event_pool_delta.get("add") or []) if isinstance(event_pool_delta.get("add"), list) else 0
+                except NovelConflictError:
+                    raise
                 except Exception as delta_exc:
                     event_pool_delta_error = type(delta_exc).__name__
+            except NovelConflictError:
+                raise
             except Exception as delta_exc:
                 event_pool_delta_error = type(delta_exc).__name__
             if event_pool_delta:
@@ -63,6 +71,7 @@ class NovelCanvasMixin:
                 {"role": "user", "content": self._initial_canvas_source(canvas_project, story_bible, materials)},
             ]
             canvas_result = await llm.chat_complete(canvas_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
+            guard.check()
             text = str(canvas_result)
             canvas = self._parse_canvas_response(text, canvas)
             if event_pool_delta:
@@ -106,6 +115,8 @@ class NovelCanvasMixin:
                 "event_pool_update_missing": bool(event_pool_replacement.get("replacement_needed", 0)) and event_pool_add_count <= 0,
                 "event_pool_update_underfilled": event_pool_add_count > 0 and event_pool_add_count < int(event_pool_replacement.get("replacement_needed", 0) or 0),
             }
+        except NovelConflictError:
+            raise
         except Exception as exc:
             llm.last_chat_error = type(exc).__name__
             if event_pool_delta:
@@ -149,10 +160,11 @@ class NovelCanvasMixin:
             }
         canvas = self._story_canvas_with_materials(canvas, materials)
         self._sync_bound_event_contracts(canvas)
-        storage.update_novel_project(project_id, {"story_canvas": canvas, "outline": self._canvas_outline(canvas)})
-        self._prune_empty_chapters_outside_canvas(project_id, canvas)
-        self._sync_chapters_from_canvas(project_id, canvas)
-        return self.project_response(project_id)
+        with guard.write():
+            storage.update_novel_project(project_id, {"story_canvas": canvas, "outline": self._canvas_outline(canvas)})
+            self._prune_empty_chapters_outside_canvas(project_id, canvas)
+            self._sync_chapters_from_canvas(project_id, canvas)
+            return self.project_response(project_id)
 
     def _clear_initial_canvas_event_bindings(self, canvas: dict[str, Any]) -> None:
         for chapter in self._canvas_chapters(canvas):
@@ -186,11 +198,16 @@ class NovelCanvasMixin:
         from_chapter_order: int | None = None,
         count: int = 4,
         instruction: str = "",
+        guard: NovelOperationGuard | None = None,
     ) -> NovelProjectResponse:
         storage = self._require_storage()
         project = storage.get_novel_project(project_id)
         if not project:
             raise ValueError("Novel project not found")
+        if guard is None:
+            guard = NovelOperationGuard(storage, project_id, project["revision"])
+            guard.claim()
+        guard.check()
         current_canvas = self._json_dict(project["story_canvas_json"] if "story_canvas_json" in project.keys() else "{}")
         current_chapters = self._canvas_chapters(current_canvas)
         db_chapters = storage.list_novel_chapters(project_id)
@@ -225,11 +242,16 @@ class NovelCanvasMixin:
             ]
             try:
                 event_pool_result = await llm.chat_complete(event_pool_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
+                guard.check()
                 try:
                     event_pool_delta = self._parse_event_pool_delta_response(str(event_pool_result))
                     event_pool_add_count = len(event_pool_delta.get("add") or []) if isinstance(event_pool_delta.get("add"), list) else 0
+                except NovelConflictError:
+                    raise
                 except Exception as delta_exc:
                     event_pool_delta_error = type(delta_exc).__name__
+            except NovelConflictError:
+                raise
             except Exception as delta_exc:
                 event_pool_delta_error = type(delta_exc).__name__
             if event_pool_delta:
@@ -244,6 +266,7 @@ class NovelCanvasMixin:
                 {"role": "user", "content": self._canvas_extend_source(canvas_project, event_canvas, db_chapters, from_order, count, instruction)},
             ]
             canvas_result = await llm.chat_complete(canvas_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
+            guard.check()
             text = str(canvas_result)
             extension = self._parse_canvas_response(text, fallback)
             extension["diagnostics"] = {
@@ -259,6 +282,8 @@ class NovelCanvasMixin:
                 "event_pool_update_missing": bool(event_pool_replacement.get("replacement_needed", 0)) and event_pool_add_count <= 0,
                 "event_pool_update_underfilled": event_pool_add_count > 0 and event_pool_add_count < int(event_pool_replacement.get("replacement_needed", 0) or 0),
             }
+        except NovelConflictError:
+            raise
         except Exception as exc:
             llm.last_chat_error = type(exc).__name__
             extension = {
@@ -313,7 +338,8 @@ class NovelCanvasMixin:
         canvas = self._merge_extended_canvas(current_canvas, extension, from_order, scoring_context)
         canvas = self._story_canvas_with_materials(canvas, materials)
         self._sync_bound_event_contracts(canvas)
-        storage.update_novel_project(project_id, {"story_canvas": canvas, "outline": self._canvas_outline(canvas)})
-        self._prune_empty_chapters_outside_canvas(project_id, canvas)
-        self._sync_chapters_from_canvas(project_id, canvas, start_order=from_order + 1)
-        return self.project_response(project_id)
+        with guard.write():
+            storage.update_novel_project(project_id, {"story_canvas": canvas, "outline": self._canvas_outline(canvas)})
+            self._prune_empty_chapters_outside_canvas(project_id, canvas)
+            self._sync_chapters_from_canvas(project_id, canvas, start_order=from_order + 1)
+            return self.project_response(project_id)

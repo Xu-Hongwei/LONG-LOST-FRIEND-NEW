@@ -1,4 +1,4 @@
-import { ref, type ComputedRef, type Ref } from "vue";
+import { ref, watch, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
 import {
   buildStoryCanvas,
   checkNovelContinuity,
@@ -113,8 +113,42 @@ export function useNovelProjectActions(options: {
   const projectDraftDiagnostics = ref<Record<string, unknown>>({});
   let novelGenerationRunId = 0;
 
+  let liveProgressRunId = 0;
+  let viewEpoch = 0;
+  function invalidateView() {
+    viewEpoch += 1;
+    liveProgressRunId = 0;
+    novelGenerationRunId += 1;
+    options.novelProjectBusy.value = false;
+    projectDraftGenerating.value = false;
+    options.clearNovelProgressTimers();
+    options.clearCanvasBuildTimers();
+    options.setNovelProgress("idle", 0);
+  }
+  watch([options.sessionId, options.activeNovelProjectId, options.activeNovelChapterId], invalidateView, { flush: "sync" });
+  if (getCurrentScope()) onScopeDispose(invalidateView);
+
+  function beginOperation() {
+    return { epoch: viewEpoch, runId: ++novelGenerationRunId };
+  }
+  type Operation = ReturnType<typeof beginOperation>;
+  const isCurrent = (ticket: Operation) => ticket.epoch === viewEpoch && ticket.runId === novelGenerationRunId;
+  const draftSnapshot = () => JSON.stringify([options.projectDraft.value, options.chapterDraft.value,
+    options.storyCanvasDraft.value, options.chapterInstruction.value, options.projectChapterTargetLength.value]);
+  async function ownedAwait<T>(ticket: Operation, action: () => Promise<T>): Promise<T> {
+    if (!isCurrent(ticket)) throw new Error("操作已过期");
+    const draft = draftSnapshot();
+    const result = await action();
+    if (!isCurrent(ticket)) throw new Error("操作已过期");
+    if (draftSnapshot() !== draft) {
+      throw new Error("请求期间草稿已修改，已保留当前输入。服务端可能已完成操作，请保存当前草稿或重新加载后核对。");
+    }
+    return result;
+  }
+
   async function activeSceneToChapterDraft() {
     if (!options.activeNovelProject.value || options.novelProjectBusy.value) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
@@ -132,7 +166,7 @@ export function useNovelProjectActions(options: {
       options.chapterDraft.value = nextDraft;
       options.projectChapterTargetLength.value = canvasChapter.target_length || options.projectChapterTargetLength.value;
       if (options.activeNovelChapter.value) {
-        const project = await saveNovelChapterDraft(options.activeNovelChapter.value.id, {
+        const project = await ownedAwait(ticket, () => saveNovelChapterDraft(options.activeNovelChapter.value!.id, {
           project: {
             ...options.projectDraft.value,
             story_canvas: options.storyCanvasDraft.value
@@ -142,23 +176,24 @@ export function useNovelProjectActions(options: {
             goal: nextDraft.goal,
             scene_card: nextDraft.scene_card
           }
-        });
+        }));
         options.replaceNovelProject(project);
         options.syncStoryCanvasDraft(project);
         options.syncChapterDraft(options.activeNovelChapter.value);
         await loadChapterVersions();
       } else {
-        const project = await updateNovelProject(options.activeNovelProject.value.id, {
+        const project = await ownedAwait(ticket, () => updateNovelProject(options.activeNovelProject.value!.id, {
           ...options.projectDraft.value,
           story_canvas: options.storyCanvasDraft.value
-        });
+        }));
         options.replaceNovelProject(project);
         options.syncStoryCanvasDraft(project);
       }
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
@@ -175,8 +210,11 @@ export function useNovelProjectActions(options: {
   async function loadNovelProjects() {
     if (!options.sessionId.value) return;
     const targetSession = options.sessionId.value;
+    const epoch = viewEpoch;
+    const runId = novelGenerationRunId;
+    const draft = draftSnapshot();
     const token = ++projectListRequest;
-    const isCurrent = () => options.sessionId.value === targetSession && projectListRequest === token;
+    const isCurrent = () => options.sessionId.value === targetSession && projectListRequest === token && epoch === viewEpoch && runId === novelGenerationRunId && draft === draftSnapshot();
     try {
       const projects = await listNovelProjects(targetSession);
       if (!isCurrent()) return;
@@ -238,10 +276,11 @@ export function useNovelProjectActions(options: {
   async function createLongNovelProject() {
     if (!options.sessionId.value || options.novelProjectBusy.value) return;
     options.novelStudioMode.value = "project";
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
-      const project = await createNovelProject(options.sessionId.value, {
+      const project = await ownedAwait(ticket, () => createNovelProject(options.sessionId.value, {
         title: options.projectDraft.value.title || undefined,
         genre: options.projectDraft.value.genre,
         tone: options.projectDraft.value.tone,
@@ -250,13 +289,14 @@ export function useNovelProjectActions(options: {
         relationship_setup: options.projectDraft.value.relationship_setup,
         outline: normalizeDraftOutline(options.projectDraft.value.outline),
         story_canvas: options.storyCanvasDraft.value
-      });
+      }));
       options.novelProjects.value = [project, ...options.novelProjects.value.filter((item) => item.id !== project.id)];
       selectNovelProject(project.id);
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
@@ -264,13 +304,14 @@ export function useNovelProjectActions(options: {
     const trimmed = prompt.trim();
     if (!options.sessionId.value || !trimmed || options.novelProjectBusy.value || projectDraftGenerating.value) return;
     projectDraftGenerating.value = true;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     projectDraftDiagnostics.value = {};
     try {
-      const result = await generateNovelProjectDraft(options.sessionId.value, {
+      const result = await ownedAwait(ticket, () => generateNovelProjectDraft(options.sessionId.value, {
         prompt: trimmed
-      });
+      }));
       options.projectDraft.value = {
         ...options.projectDraft.value,
         title: result.project.title || options.projectDraft.value.title,
@@ -285,29 +326,32 @@ export function useNovelProjectActions(options: {
       };
       projectDraftDiagnostics.value = result.diagnostics || {};
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      projectDraftGenerating.value = false;
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) projectDraftGenerating.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
   async function saveNovelProject() {
     if (!options.activeNovelProject.value || options.novelProjectBusy.value) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
-      const project = await updateNovelProject(options.activeNovelProject.value.id, {
+      const project = await ownedAwait(ticket, () => updateNovelProject(options.activeNovelProject.value!.id, {
         ...options.projectDraft.value,
         outline: normalizeDraftOutline(options.projectDraft.value.outline),
         story_canvas: options.storyCanvasDraft.value
-      });
+      }));
       options.replaceNovelProject(project);
       options.syncStoryCanvasDraft(project);
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
@@ -316,10 +360,11 @@ export function useNovelProjectActions(options: {
     const project = options.novelProjects.value.find((item) => item.id === projectId);
     const title = project?.title || "当前长篇项目";
     if (!window.confirm(`删除长篇项目「${title}」？章节、画布和版本会从列表中移除。`)) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
-      await deleteNovelProject(projectId);
+      await ownedAwait(ticket, () => deleteNovelProject(projectId));
       options.novelProjects.value = options.novelProjects.value.filter((item) => item.id !== projectId);
       if (options.activeNovelProjectId.value === projectId) {
         const next = options.novelProjects.value[0];
@@ -330,9 +375,10 @@ export function useNovelProjectActions(options: {
         }
       }
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
@@ -342,64 +388,70 @@ export function useNovelProjectActions(options: {
       options.error.value = "已有正文后不能重建初版画布。请通过生成/续写当前章来滚动更新后续两章画布。";
       return;
     }
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     options.beginCanvasBuildFlow();
     try {
-      const savedProject = await updateNovelProject(options.activeNovelProject.value.id, {
+      const savedProject = await ownedAwait(ticket, () => updateNovelProject(options.activeNovelProject.value!.id, {
         ...options.projectDraft.value
-      });
+      }));
       options.replaceNovelProject(savedProject);
-      const project = await buildStoryCanvas(savedProject.id);
+      const project = await ownedAwait(ticket, () => buildStoryCanvas(savedProject.id));
       options.replaceNovelProject(project);
       options.syncProjectDraft(project);
       options.syncChapterDraft(options.activeNovelChapter.value);
       options.finishCanvasBuildFlow();
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.clearCanvasBuildTimers();
       options.canvasBuildStage.value = "failed";
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
   async function saveStoryCanvas() {
     if (!options.activeNovelProject.value || options.novelProjectBusy.value) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
-      const project = await updateNovelProject(options.activeNovelProject.value.id, {
+      const project = await ownedAwait(ticket, () => updateNovelProject(options.activeNovelProject.value!.id, {
         ...options.projectDraft.value,
         story_canvas: options.storyCanvasDraft.value
-      });
+      }));
       options.replaceNovelProject(project);
       options.syncStoryCanvasDraft(project);
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
   async function addNovelChapter() {
     if (!options.activeNovelProject.value || options.novelProjectBusy.value) return;
     options.novelStudioMode.value = "project";
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
-      const project = await createNovelChapter(options.activeNovelProject.value.id, {
+      const project = await ownedAwait(ticket, () => createNovelChapter(options.activeNovelProject.value!.id, {
         title: "新章节",
         goal: "承接前文，完成一个具体事件中的关系推进。",
         status: "planned"
-      });
+      }));
       options.replaceNovelProject(project);
       options.activeNovelChapterId.value = project.chapters[project.chapters.length - 1]?.id || "";
       options.syncChapterDraft(options.activeNovelChapter.value);
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
@@ -407,25 +459,28 @@ export function useNovelProjectActions(options: {
     if (!options.activeNovelProject.value || !options.activeNovelChapter.value || options.novelProjectBusy.value) return;
     const chapter = options.activeNovelChapter.value;
     if (!window.confirm(`删除「${formatNovelChapterTitle(chapter.chapter_order, chapter.title)}」？章节正文和版本记录都会删除，后续章节会重新编号并标记受影响。`)) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
       const deletedOrder = chapter.chapter_order;
-      const project = await deleteNovelChapter(chapter.id);
+      const project = await ownedAwait(ticket, () => deleteNovelChapter(chapter.id));
       options.replaceNovelProject(project);
       options.syncStoryCanvasDraft(project);
       options.clearReorderedChapterInstructionCache(project, chapter.id, deletedOrder);
       const nextChapter = project.chapters.find((item) => item.chapter_order >= deletedOrder) || project.chapters[project.chapters.length - 1] || null;
       options.activeNovelChapterId.value = nextChapter?.id || "";
       options.syncChapterDraft(options.activeNovelChapter.value);
+      ticket = beginOperation();
+      options.novelProjectBusy.value = true;
       if (window.confirm("是否从删除位置前一章开始滚动重规划后续画布？已有正文会保留，后续章节仍会标记为受影响，方便你逐章确认。")) {
         options.beginCanvasBuildFlow();
         try {
-          const replanned = await extendStoryCanvas(project.id, {
+          const replanned = await ownedAwait(ticket, () => extendStoryCanvas(project.id, {
             from_chapter_order: Math.max(0, deletedOrder - 1),
             count: 4,
             instruction: `第 ${deletedOrder} 章已删除。请从第 ${deletedOrder} 章开始重新接上后续规划，保持已保留正文不被直接覆盖。`
-          });
+          }));
           options.replaceNovelProject(replanned);
           options.syncProjectDraft(replanned);
           const refreshedChapter = replanned.chapters.find((item) => item.chapter_order >= deletedOrder) || replanned.chapters[replanned.chapters.length - 1] || null;
@@ -433,6 +488,7 @@ export function useNovelProjectActions(options: {
           options.syncChapterDraft(options.activeNovelChapter.value);
           options.finishCanvasBuildFlow();
         } catch (err) {
+          if (!isCurrent(ticket)) return;
           options.clearCanvasBuildTimers();
           options.canvasBuildStage.value = "failed";
           options.error.value = readableError(err);
@@ -440,14 +496,16 @@ export function useNovelProjectActions(options: {
       }
       await loadChapterVersions();
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
   async function saveNovelChapter() {
     if (!options.activeNovelProject.value || !options.activeNovelChapter.value || options.novelProjectBusy.value) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
@@ -456,26 +514,28 @@ export function useNovelProjectActions(options: {
         fallbackChapter: options.activeCanvasChapter.value
       });
       options.storyCanvasDraft.value = syncedCanvas;
-      const project = await saveNovelChapterDraft(options.activeNovelChapter.value.id, {
+      const project = await ownedAwait(ticket, () => saveNovelChapterDraft(options.activeNovelChapter.value!.id, {
         project: {
           ...options.projectDraft.value,
           story_canvas: syncedCanvas
         },
         chapter: options.chapterDraftForApi()
-      });
+      }));
       options.replaceNovelProject(project);
       options.syncStoryCanvasDraft(project);
       await loadChapterVersions();
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
   async function generateActiveChapter() {
     if (!options.activeNovelProject.value || options.novelProjectBusy.value) return;
-    const runId = ++novelGenerationRunId;
+    let ticket = beginOperation();
+    let runId = ticket.runId;
     options.novelStudioMode.value = "project";
     options.novelProjectBusy.value = true;
     options.error.value = "";
@@ -483,41 +543,47 @@ export function useNovelProjectActions(options: {
     try {
       const generatingChapterId = options.activeNovelChapter.value?.id || "";
       if (options.activeNovelChapter.value) {
-        const syncedProject = await saveNovelChapterDraft(options.activeNovelChapter.value.id, {
+        const syncedProject = await ownedAwait(ticket, () => saveNovelChapterDraft(options.activeNovelChapter.value!.id, {
           project: {
             ...options.projectDraft.value,
             story_canvas: options.storyCanvasDraft.value
           },
           chapter: options.chapterDraftForApi()
-        });
+        }));
         if (runId !== novelGenerationRunId) return;
         options.replaceNovelProject(syncedProject);
       } else {
-        const savedProject = await updateNovelProject(options.activeNovelProject.value.id, {
+        const savedProject = await ownedAwait(ticket, () => updateNovelProject(options.activeNovelProject.value!.id, {
           ...options.projectDraft.value,
           story_canvas: options.storyCanvasDraft.value
-        });
+        }));
         if (runId !== novelGenerationRunId) return;
         options.replaceNovelProject(savedProject);
       }
       const liveChapterId = options.activeNovelChapter.value?.id || generatingChapterId;
       if (liveChapterId) {
-        void pollLiveNovelProgress(runId, options.activeNovelProject.value.id, liveChapterId);
+        liveProgressRunId = runId;
+        void pollLiveNovelProgress(runId, options.activeNovelProject.value!.id, liveChapterId);
       }
-      const project = await generateProjectChapter(
-        options.activeNovelProject.value.id,
+      const project = await ownedAwait(ticket, () => generateProjectChapter(
+        options.activeNovelProject.value!.id,
         options.activeNovelChapter.value?.id || null,
         options.chapterInstruction.value,
         options.projectChapterTargetLength.value
-      );
+      ));
       if (runId !== novelGenerationRunId) return;
+      liveProgressRunId = 0;
       options.replaceNovelProject(project);
       options.syncProjectDraft(project);
       if (!options.activeNovelChapterId.value) {
         options.activeNovelChapterId.value = project.chapters[project.chapters.length - 1]?.id || "";
+        ticket = beginOperation();
+        runId = ticket.runId;
+        options.novelProjectBusy.value = true;
       }
       options.syncChapterDraft(options.activeNovelChapter.value);
       await loadChapterVersions();
+      if (!isCurrent(ticket)) return;
       const generatedChapter = project.chapters.find((item) => item.id === (generatingChapterId || options.activeNovelChapterId.value)) || options.activeNovelChapter.value;
       options.applyChapterGenerationProgress(generatedChapter);
       if (options.chapterUsedLocalFallback(generatedChapter)) {
@@ -525,33 +591,38 @@ export function useNovelProjectActions(options: {
         options.setNovelProgress("fallback", 100);
       } else if (options.chapterHasBackgroundPostprocess(generatedChapter)) {
         options.setNovelProgress("handoff", 96);
-        pollChapterPostprocess(project.id, generatedChapter?.id || options.activeNovelChapterId.value);
+        void pollChapterPostprocess(project.id, generatedChapter?.id || options.activeNovelChapterId.value, ticket,
+          String((generatedChapter?.scene_card?.generation_progress as Record<string, unknown> | undefined)?.run_id || ""));
       } else {
         options.clearNovelProgressTimers();
         options.setNovelProgress("done", 100);
       }
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       if (runId !== novelGenerationRunId) return;
       options.error.value = readableError(err);
       options.clearNovelProgressTimers();
       options.setNovelProgress("failed", 100);
     } finally {
+      if (liveProgressRunId === runId) liveProgressRunId = 0;
       if (runId === novelGenerationRunId) {
-        options.novelProjectBusy.value = false;
+        if (isCurrent(ticket)) options.novelProjectBusy.value = false;
       }
     }
   }
 
   async function checkActiveContinuity() {
     if (!options.activeNovelProject.value || options.novelProjectBusy.value) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
-      options.continuityReport.value = await checkNovelContinuity(options.activeNovelProject.value.id, options.activeNovelChapter.value?.id || null);
+      options.continuityReport.value = await ownedAwait(ticket, () => checkNovelContinuity(options.activeNovelProject.value!.id, options.activeNovelChapter.value?.id || null));
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
@@ -562,29 +633,33 @@ export function useNovelProjectActions(options: {
       options.chapterVersions.value = [];
       return;
     }
-    const targetChapter = options.activeNovelChapter.value.id;
+    const targetChapter = options.activeNovelChapter.value!.id;
+    const epoch = viewEpoch;
+    const runId = novelGenerationRunId;
     try {
       const versions = await listNovelVersions(targetChapter);
-      if (options.activeNovelChapter.value?.id === targetChapter && token === versionListRequest) options.chapterVersions.value = versions;
+      if (options.activeNovelChapter.value?.id === targetChapter && token === versionListRequest && epoch === viewEpoch && runId === novelGenerationRunId) options.chapterVersions.value = versions;
     } catch {
-      if (options.activeNovelChapter.value?.id === targetChapter && token === versionListRequest) options.chapterVersions.value = [];
+      if (options.activeNovelChapter.value?.id === targetChapter && token === versionListRequest && epoch === viewEpoch && runId === novelGenerationRunId) options.chapterVersions.value = [];
     }
   }
 
   async function applyEventPoolProjectUpdate(action: () => Promise<NovelProject>) {
     if (options.novelProjectBusy.value) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
-      const project = await action();
+      const project = await ownedAwait(ticket, () => action());
       options.replaceNovelProject(project);
       options.syncStoryCanvasDraft(project);
       options.syncChapterDraft(options.activeNovelChapter.value);
       await loadChapterVersions();
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
@@ -643,24 +718,45 @@ export function useNovelProjectActions(options: {
     await applyEventPoolProjectUpdate(() => bindStoryEventPoolEvent(project.id, chapter.id, { event_id: eventId.trim() || null }));
   }
 
-  async function pollChapterPostprocess(projectId: string, chapterId: string) {
+  async function pollChapterPostprocess(projectId: string, chapterId: string, ticket: Operation, backendRunId: string) {
+    const draft = draftSnapshot();
+    const stopRefreshing = (detail: string) => {
+      if (!isCurrent(ticket)) return;
+      options.clearNovelProgressTimers();
+      options.setNovelProgress("superseded", 100, detail);
+      options.error.value = detail;
+    };
+    const canRefresh = () => {
+      if (!isCurrent(ticket)) return false;
+      if (draftSnapshot() !== draft) {
+        stopRefreshing("已保留当前编辑并停止自动刷新；后台可能仍在运行，请保存草稿或重新加载后核对。");
+        return false;
+      }
+      return true;
+    };
     for (let attempt = 0; attempt < 24; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 5000));
-      if (!options.activeNovelProject.value || options.activeNovelProject.value.id !== projectId) return;
+      if (!canRefresh()) return;
       try {
         const project = await getNovelProject(projectId);
-        options.replaceNovelProject(project);
-        options.syncProjectDraft(project);
+        if (!canRefresh()) return;
         const chapter = project.chapters.find((item) => item.id === chapterId);
-        options.applyChapterGenerationProgress(chapter);
+        const runId = String((chapter?.scene_card?.generation_progress as Record<string, unknown> | undefined)?.run_id || "");
         const status = options.chapterPostprocessStatus(chapter);
+        if (!chapter || runId !== backendRunId || !status || status === "superseded") {
+          stopRefreshing("项目已变化，已停止接收旧任务结果，请重新加载后核对。");
+          return;
+        }
+        options.applyChapterGenerationProgress(chapter);
         if (status === "handoff_done") {
           options.setNovelProgress("replan", Math.max(options.novelProgressPercent.value, 96), options.novelProgressDetail.value || "后台滚动重规划后续两章画布和场景卡");
         }
         if (status === "done") {
+          options.replaceNovelProject(project);
+          options.syncProjectDraft(project);
+          options.syncChapterDraft(options.activeNovelChapter.value);
           options.clearNovelProgressTimers();
           options.setNovelProgress("done", 100, "正文、状态和后续画布已更新");
-          options.syncChapterDraft(options.activeNovelChapter.value);
           await loadChapterVersions();
           return;
         }
@@ -671,54 +767,58 @@ export function useNovelProjectActions(options: {
           return;
         }
       } catch (err) {
-        options.error.value = `正文已返回；后台状态刷新失败：${readableError(err)}`;
+        if (canRefresh()) stopRefreshing(`正文已返回；后台状态刷新失败：${readableError(err)}`);
         return;
       }
     }
-    options.error.value = "正文已返回；后台交接仍在运行，可以继续编辑或稍后刷新查看 Novel State。";
+    if (canRefresh()) stopRefreshing("已停止自动刷新；后台可能仍在运行，请稍后重新加载项目核对。");
   }
 
   async function restoreVersion(versionId: string) {
     if (options.novelProjectBusy.value) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
-      const project = await restoreNovelVersion(versionId);
+      const project = await ownedAwait(ticket, () => restoreNovelVersion(versionId));
       options.replaceNovelProject(project);
+      options.syncStoryCanvasDraft(project);
       options.syncChapterDraft(options.activeNovelChapter.value);
       await loadChapterVersions();
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
   async function deleteVersion(versionId: string) {
     if (options.novelProjectBusy.value) return;
     if (!window.confirm("删除这个版本记录？当前章节正文不会被删除。")) return;
+    let ticket = beginOperation();
     options.novelProjectBusy.value = true;
     options.error.value = "";
     try {
-      const project = await deleteNovelVersion(versionId);
+      const project = await ownedAwait(ticket, () => deleteNovelVersion(versionId));
       options.replaceNovelProject(project);
       await loadChapterVersions();
     } catch (err) {
+      if (!isCurrent(ticket)) return;
       options.error.value = readableError(err);
     } finally {
-      options.novelProjectBusy.value = false;
+      if (isCurrent(ticket)) options.novelProjectBusy.value = false;
     }
   }
 
   async function pollLiveNovelProgress(runId: number, projectId: string, chapterId: string) {
     for (let attempt = 0; attempt < 180; attempt += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 1200));
-      if (runId !== novelGenerationRunId) return;
+      if (runId !== novelGenerationRunId || runId !== liveProgressRunId) return;
       if (["done", "fallback", "failed"].includes(options.novelProgressStage.value)) return;
       try {
         const project = await getNovelProject(projectId);
-        if (runId !== novelGenerationRunId) return;
-        options.replaceNovelProject(project);
+        if (runId !== novelGenerationRunId || runId !== liveProgressRunId) return;
         const chapter = project.chapters.find((item) => item.id === chapterId);
         options.applyChapterGenerationProgress(chapter);
       } catch {

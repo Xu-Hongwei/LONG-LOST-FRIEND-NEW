@@ -247,7 +247,8 @@ def register_novel_routes(
                 payload.defer_postprocess,
             )
             if payload.defer_postprocess:
-                background_tasks.add_task(novel.finalize_chapter_postprocess, llm, project_id, chapter.id)
+                background_tasks.add_task(novel.finalize_chapter_postprocess, llm, project_id, chapter.id,
+                                          project.revision, chapter.scene_card.get("generation_progress", {}).get("run_id"))
             return project
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

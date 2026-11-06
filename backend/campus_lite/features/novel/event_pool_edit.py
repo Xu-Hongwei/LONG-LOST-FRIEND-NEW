@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ...schemas import StoryEventPoolBindingRequest, StoryEventPoolEventWriteRequest
+from .concurrency import NovelConflictError, NovelOperationGuard
 from .config import NOVEL_EVENT_BINDING_TIMEOUT_MS
 from .continuity import continuity_hits, continuity_ledger_terms
 from .event_pool import (
@@ -130,7 +131,8 @@ class NovelEventPoolEditMixin:
         chapter_id: str,
         payload: StoryEventPoolBindingRequest,
     ) -> Any:
-        local_response = self.bind_event_pool_event_to_chapter(project_id, chapter_id, payload)
+        with self._require_storage().transaction():
+            local_response = self.bind_event_pool_event_to_chapter(project_id, chapter_id, payload)
         event_id = str(payload.event_id or "").strip()
         if not event_id:
             return local_response
@@ -150,16 +152,20 @@ class NovelEventPoolEditMixin:
             self._mark_event_contract_remote_status(project_id, chapter_id, "skipped", "free_mode")
             return self.project_response(project_id)
 
+        guard = NovelOperationGuard(storage, project_id, local_response.revision)
         try:
-            remote_response = await self._remote_event_contract_sync(llm, project_id, chapter_id)
+            remote_response = await self._remote_event_contract_sync(llm, project_id, chapter_id, guard)
             if remote_response:
                 return remote_response
+        except NovelConflictError:
+            raise
         except Exception as exc:
             try:
                 llm.last_chat_error = type(exc).__name__
             except Exception:
                 pass
-            self._mark_event_contract_remote_status(project_id, chapter_id, "failed", type(exc).__name__)
+            with guard.write():
+                self._mark_event_contract_remote_status(project_id, chapter_id, "failed", type(exc).__name__)
         return self.project_response(project_id)
 
     def _event_contract_from_event(
@@ -352,9 +358,11 @@ class NovelEventPoolEditMixin:
                     scene_card[key] = clean
             self._require_storage().update_novel_chapter(chapter["id"], {"scene_card": scene_card}, "system", create_version=False)
 
-    async def _remote_event_contract_sync(self, llm: Any, project_id: str, chapter_id: str) -> Any:
+    async def _remote_event_contract_sync(self, llm: Any, project_id: str, chapter_id: str, guard: NovelOperationGuard | None = None) -> Any:
         storage = self._require_storage()
         project, canvas, pool, setting_type = self._editable_event_pool(project_id)
+        guard = guard or NovelOperationGuard(storage, project_id, project["revision"])
+        guard.check()
         chapter = storage.get_novel_chapter(chapter_id)
         if not chapter or chapter["project_id"] != project_id:
             raise ValueError("Novel chapter not found")
@@ -378,13 +386,14 @@ class NovelEventPoolEditMixin:
             timeout_ms=NOVEL_EVENT_BINDING_TIMEOUT_MS,
             response_format={"type": "json_object"},
         )
-        raw = self._load_llm_json_object(text, "event_contract_sync")
-        applied = self._apply_remote_event_sync_patch(canvas, canvas_chapter, chapter, scene, scene_card, contract, raw)
-        if not applied:
-            self._mark_event_contract_remote_status(project_id, chapter_id, "empty", "empty_remote_patch")
-            return self.project_response(project_id)
-        storage.update_novel_chapter(chapter_id, {"scene_card": scene_card}, "system", create_version=False)
-        return self._save_event_pool(project_id, canvas, pool, setting_type)
+        with guard.write():
+            raw = self._load_llm_json_object(text, "event_contract_sync")
+            applied = self._apply_remote_event_sync_patch(canvas, canvas_chapter, chapter, scene, scene_card, contract, raw)
+            if not applied:
+                self._mark_event_contract_remote_status(project_id, chapter_id, "empty", "empty_remote_patch")
+                return self.project_response(project_id)
+            storage.update_novel_chapter(chapter_id, {"scene_card": scene_card}, "system", create_version=False)
+            return self._save_event_pool(project_id, canvas, pool, setting_type)
 
     def _event_contract_sync_system_prompt(self) -> str:
         return (

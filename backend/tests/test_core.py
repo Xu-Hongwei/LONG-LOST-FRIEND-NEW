@@ -4774,6 +4774,7 @@ class CampusLiteCoreTest(OfflineTestCase):
             project = service.create_project(card, visitor_id, session_id, [], [], [], NovelProjectCreateRequest())
             chapter = storage.get_novel_chapter(project.chapters[0].id)
             assert chapter is not None
+            # Backend-owned progress survives canvas sync; manual edits now cancel it.
             storage.update_novel_chapter(chapter["id"], {
                 "goal": "old goal",
                 "scene_card": {
@@ -4782,7 +4783,7 @@ class CampusLiteCoreTest(OfflineTestCase):
                     "active_state_delta": {"summary_delta": "kept summary"},
                     "generation_progress": {"stage": "kept"},
                 },
-            }, "manual")
+            }, "system")
             canvas = {
                 "mode": "story_canvas",
                 "acts": [{"id": "act_1", "order": 1, "title": "Act", "chapter_ids": ["c1"]}],

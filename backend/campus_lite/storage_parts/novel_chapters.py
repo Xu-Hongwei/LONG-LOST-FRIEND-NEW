@@ -174,6 +174,15 @@ class NovelChapterStorageMixin:
         version_source: str,
         create_version: bool,
     ) -> bool:
+        if version_source == "manual" and create_version and updates:
+            updates = dict(updates)
+            card = dict(updates.get("scene_card") or self._json_dict(existing["scene_card_json"]))
+            # An explicit empty scene card is meaningful.
+            if updates.get("scene_card") == {}:
+                card = {}
+            card.pop("generation_progress", None)
+            card.pop("postprocess", None)
+            updates["scene_card"] = card
         fields, values = self._novel_chapter_update_fields(updates)
         if not fields:
             return False

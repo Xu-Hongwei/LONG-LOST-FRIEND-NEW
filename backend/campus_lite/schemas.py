@@ -317,6 +317,7 @@ class NovelContinuityReport(BaseModel):
 
 
 class NovelProjectResponse(BaseModel):
+    revision: int = 0
     id: str
     session_id: str
     visitor_id: str

@@ -25,13 +25,14 @@ export function useNovelProgress(currentMode: Readonly<Ref<string>>) {
     return novelPipelineSteps.findIndex((step) => step.id === novelProgressStage.value);
   });
   const isNovelGenerating = computed(() =>
-    !["idle", "done", "failed", "fallback"].includes(novelProgressStage.value)
+    !["idle", "done", "failed", "fallback", "superseded"].includes(novelProgressStage.value)
   );
   const showActiveNovelProgress = computed(() =>
     activeNovelWorkflowMode.value === currentMode.value
     && (novelProgressVisible.value || novelProgressStage.value === "failed")
   );
   const novelProgressLabel = computed(() => {
+    if (novelProgressStage.value === "superseded") return novelProgressDetail.value || "旧任务已停止写入，请重新加载后核对";
     if (novelProgressStage.value === "failed") return "生成失败";
     if (novelProgressStage.value === "fallback") return "远程正文未返回，已保存本地正文草稿";
     if (novelProgressStage.value === "done") return "正文、状态和后续画布已更新";
@@ -71,7 +72,7 @@ export function useNovelProgress(currentMode: Readonly<Ref<string>>) {
 
   function asNovelProgressStage(value: unknown): NovelProgressStage | null {
     const stage = String(value || "");
-    return novelPipelineSteps.some((step) => step.id === stage) || ["idle", "fallback", "done", "failed"].includes(stage)
+    return novelPipelineSteps.some((step) => step.id === stage) || ["idle", "fallback", "done", "failed", "superseded"].includes(stage)
       ? stage as NovelProgressStage
       : null;
   }

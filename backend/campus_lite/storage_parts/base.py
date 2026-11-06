@@ -300,6 +300,28 @@ class BaseStorageMixin:
             self._ensure_column(conn, "novel_projects", "story_canvas_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "novel_projects", "novel_state_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "novel_chapters", "scene_card_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "novel_projects", "revision", "INTEGER NOT NULL DEFAULT 0")
+            # Persist revisions across processes; status-only progress must not invalidate content work.
+            project_fields = [row["name"] for row in conn.execute("PRAGMA table_info(novel_projects)")
+                              if row["name"] not in {"revision", "updated_at", "created_at"}]
+            project_changed = " OR ".join(f"NEW.{key} IS NOT OLD.{key}" for key in project_fields)
+            conn.execute(f"""CREATE TRIGGER IF NOT EXISTS novel_project_revision
+                AFTER UPDATE ON novel_projects WHEN NEW.revision = OLD.revision AND ({project_changed})
+                BEGIN UPDATE novel_projects SET revision = revision + 1 WHERE id = NEW.id; END""")
+            for table in ("novel_chapters", "novel_materials", "novel_versions"):
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    row = "OLD" if operation == "DELETE" else "NEW"
+                    condition = ""
+                    if table == "novel_chapters" and operation == "UPDATE":
+                        fields = [item["name"] for item in conn.execute("PRAGMA table_info(novel_chapters)")
+                                  if item["name"] not in {"updated_at", "created_at", "scene_card_json"}]
+                        changed = [f"NEW.{key} IS NOT OLD.{key}" for key in fields]
+                        changed.append("json_remove(NEW.scene_card_json, '$.generation_progress', '$.postprocess') IS NOT "
+                                       "json_remove(OLD.scene_card_json, '$.generation_progress', '$.postprocess')")
+                        condition = " WHEN " + " OR ".join(changed)
+                    conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {table}_revision_{operation.lower()}
+                        AFTER {operation} ON {table}{condition}
+                        BEGIN UPDATE novel_projects SET revision = revision + 1 WHERE id = {row}.project_id; END""")
             self._ensure_column(conn, "novel_versions", "state_delta_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "novel_versions", "planning_snapshot_json", "TEXT NOT NULL DEFAULT '{}'")
             conn.execute(

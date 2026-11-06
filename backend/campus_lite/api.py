@@ -5,6 +5,8 @@ import uuid
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from .features.novel.concurrency import NovelConflictError
 
 from .characters import CharacterStore
 from .composer import ContextComposer
@@ -32,6 +34,10 @@ def create_app(
     llm: LlmClient | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Campus Pulse Lite", version="0.1.0")
+    @app.exception_handler(NovelConflictError)
+    async def novel_conflict_handler(request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     instance_id = os.getenv("CAMPUS_RUN_ID") or uuid.uuid4().hex
     app.add_middleware(
         CORSMiddleware,

@@ -13,6 +13,7 @@ export type NovelProgressStage =
   | "handoff"
   | "replan"
   | "done"
+  | "superseded"
   | "failed";
 
 export type NovelPipelineStep = { id: NovelProgressStage; label: string; detail: string };

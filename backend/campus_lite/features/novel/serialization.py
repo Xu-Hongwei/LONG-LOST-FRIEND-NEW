@@ -21,6 +21,7 @@ class NovelSerializationMixin:
                 setting_type,
             )
         return NovelProjectResponse(
+            revision=row["revision"],
             id=row["id"],
             session_id=row["session_id"],
             visitor_id=row["visitor_id"],

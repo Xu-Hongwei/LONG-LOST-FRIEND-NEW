@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from .concurrency import NovelOperationGuard
 from .config import NOVEL_PLANNING_TIMEOUT_MS
 from .continuity import (
     continuity_ledger_from_handoff,
@@ -23,6 +24,9 @@ class NovelStateMixin:
         parsed: dict[str, Any],
         handoff: dict[str, Any],
     ) -> None:
+        self._update_novel_state_after_chapter_sync(project_id, project, chapter, parsed, handoff)
+
+    def _update_novel_state_after_chapter_sync(self, project_id, project, chapter, parsed, handoff):
         storage = self._require_storage()
         latest_project = storage.get_novel_project(project_id) or project
         chapter_order = int(chapter["chapter_order"])
@@ -97,6 +101,8 @@ class NovelStateMixin:
         project = storage.get_novel_project(project_id)
         if not project:
             raise ValueError("Novel project not found")
+        guard = NovelOperationGuard(storage, project_id, project["revision"])
+        guard.claim()
         base_state = self._empty_novel_state(project["title"])
         trusted_entries = self._latest_trusted_chapter_state_entries(project_id)
         next_state = self._merge_novel_state_entries(base_state, trusted_entries)
@@ -111,7 +117,8 @@ class NovelStateMixin:
                 next_state["last_completed_chapter_order"] = trusted_entries[-1]["chapter_order"]
         except Exception as exc:
             llm.last_chat_error = type(exc).__name__
-        storage.update_novel_project(project_id, {"novel_state": next_state})
+        with guard.write():
+            storage.update_novel_project(project_id, {"novel_state": next_state})
 
     def rebuild_novel_state_from_latest_chapters_sync(self, project_id: str) -> None:
         storage = self._require_storage()
