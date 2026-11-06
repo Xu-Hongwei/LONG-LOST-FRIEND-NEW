@@ -143,7 +143,19 @@ class SessionStorageMixin:
             )
 
     def set_postprocess_diagnostics(self, session_id: str, diagnostics: dict[str, Any]) -> None:
-        with self.connect() as conn:
+        with self.transaction() as conn:
+            session = self.get_session(session_id)
+            if not session:
+                return
+            try:
+                previous = json.loads(session["postprocess_diagnostics_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                previous = {}
+            if not isinstance(previous, dict):
+                previous = {}
+            # Queued/running updates from an older turn must not hide the newer turn.
+            if self.postprocess_message_order(session_id, previous.get("user_message_id", "")) > self.postprocess_message_order(session_id, str(diagnostics.get("user_message_id") or "")):
+                return
             conn.execute(
                 """
                 UPDATE sessions
@@ -152,6 +164,15 @@ class SessionStorageMixin:
                 """,
                 (json.dumps(diagnostics, ensure_ascii=False), session_id),
             )
+
+    def postprocess_message_order(self, session_id: str, message_id: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute("SELECT rowid FROM messages WHERE id = ? AND session_id = ? AND role = 'user'", (message_id, session_id)).fetchone()
+        return int(row[0]) if row else 0
+
+    def finish_postprocess_turn(self, session_id: str, message_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE sessions SET postprocess_last_message_id = ? WHERE id = ?", (message_id, session_id))
 
     def set_character_state(self, session_id: str, state: dict[str, Any]) -> None:
         with self.connect() as conn:

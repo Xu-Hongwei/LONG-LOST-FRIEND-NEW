@@ -291,6 +291,7 @@ class BaseStorageMixin:
             self._ensure_column(conn, "memories", "normalized_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "sessions", "character_state_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "sessions", "postprocess_diagnostics_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "sessions", "postprocess_last_message_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "character_bonds", "stage_code", "TEXT NOT NULL DEFAULT 'initial'")
             self._ensure_column(conn, "character_bonds", "condition_code", "TEXT NOT NULL DEFAULT 'steady'")
             self._ensure_column(conn, "character_bonds", "condition_settle_turns", "INTEGER NOT NULL DEFAULT 0")

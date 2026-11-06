@@ -25,9 +25,21 @@ export function useRelationshipMemory(
   const stateExpanded = ref(false);
   const bondExpanded = ref(false);
 
+  let savedNote = memoryPane.value?.manual_note || "";
+  const noteDrafts = new Map<string, string>();
+  manualNoteDraft.value = savedNote;
+  watch(sessionId, (session, previous) => {
+    if (previous && manualNoteDraft.value !== savedNote) noteDrafts.set(previous, manualNoteDraft.value);
+    savedNote = "";
+    manualNoteDraft.value = noteDrafts.get(session) || "";
+  }, { flush: "sync" });
   watch(memoryPane, (pane) => {
-    manualNoteDraft.value = pane?.manual_note || "";
-  }, { immediate: true });
+    if (!pane) return;
+    const clean = !noteDrafts.has(sessionId.value) && manualNoteDraft.value === savedNote;
+    savedNote = pane.manual_note || "";
+    if (clean) manualNoteDraft.value = savedNote;
+    if (manualNoteDraft.value === savedNote) noteDrafts.delete(sessionId.value);
+  }, { flush: "sync" });
 
   const includedSlots = computed(() => promptSlots.value.filter((slot) => slot.included));
   const excludedSlots = computed(() => promptSlots.value.filter((slot) => !slot.included));

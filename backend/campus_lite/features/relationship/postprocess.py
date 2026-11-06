@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from weakref import WeakValueDictionary
 
 from ...characters import CharacterStore
 from ...llm import LlmClient
@@ -40,6 +42,7 @@ class RelationshipPostprocessService:
         self.character_state = character_state
         self.character_bond = character_bond
         self.llm = llm
+        self._session_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
     async def run(
         self,
@@ -53,6 +56,25 @@ class RelationshipPostprocessService:
         recent: list[dict[str, str]],
         previous_state: dict[str, object],
         previous_bond: dict[str, object],
+    ) -> None:
+        # The desktop server has one worker. Keep each session's reductions in
+        # order and read their inputs after the preceding turn has committed.
+        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            session = self.storage.get_session(session_id)
+            order = self.storage.postprocess_message_order(session_id, user_message_id)
+            if not session or not order:
+                return
+            if order <= self.storage.postprocess_message_order(session_id, session["postprocess_last_message_id"]):
+                return
+            await self._run_turn(visitor_id, session_id, user_message_id, card_id, user_text, reply,
+                                 recalled, recent, previous_state, previous_bond)
+            self.storage.finish_postprocess_turn(session_id, user_message_id)
+
+    async def _run_turn(
+        self, visitor_id: str, session_id: str, user_message_id: str, card_id: str,
+        user_text: str, reply: str, recalled: list, recent: list[dict[str, str]],
+        previous_state: dict[str, object], previous_bond: dict[str, object],
     ) -> None:
         started = time.perf_counter()
         diagnostics = {
@@ -91,6 +113,8 @@ class RelationshipPostprocessService:
                 return
 
             card = self._get_character(card_id, visitor_id)
+            previous_state = self.character_state.get_state(session_id, card)
+            previous_bond = self.character_bond.get_bond(visitor_id, card_id, card)
             session = self.storage.get_session(session_id)
             frozen = bool(session["frozen"]) if session else False
             extracted = []
@@ -105,7 +129,11 @@ class RelationshipPostprocessService:
                 set_stage("memory", {"status": "running", "started_at": utc_timestamp()})
                 extracted = await self.llm.extract_memories(user_text, reply)
                 memory_error = self.llm.last_chat_error
-                if memory_error:
+                session = self.storage.get_session(session_id)
+                frozen = bool(session["frozen"]) if session else True
+                if frozen:
+                    set_stage("memory", {"status": "skipped", "reason": "session_frozen", "finished_at": utc_timestamp()})
+                elif memory_error:
                     set_stage(
                         "memory",
                         {
@@ -122,9 +150,12 @@ class RelationshipPostprocessService:
                         vectors = await self.llm.embed_texts([content for _, content in memory_records])
                         self.memory.store_embeddings(memory_records, vectors, self.llm.embedding_provider_name() if vectors else None)
                         embedded_count = len(vectors)
-                    if extracted or len(self.storage.recent_messages(session_id, 20)) >= 6:
-                        self.memory.update_recent_summary(session_id)
-                        summary_updated = True
+                    with self.storage.transaction():
+                        session = self.storage.get_session(session_id)
+                        frozen = bool(session["frozen"]) if session else True
+                        if not frozen and (extracted or len(self.storage.recent_messages(session_id, 20)) >= 6):
+                            self.memory.update_recent_summary(session_id)
+                            summary_updated = True
                     set_stage(
                         "memory",
                         {

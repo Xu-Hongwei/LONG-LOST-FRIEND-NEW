@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef, type Ref } from "vue";
+import { computed, ref, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
 import { DEFAULT_CHAPTER_INSTRUCTION, novelChapterStatusLabels } from "./constants";
 import {
   derivedSceneCardFromCanvasChapter,
@@ -88,6 +88,20 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
   const instructionOptimizationNote = ref("");
   const continuityReport = ref<NovelContinuityReport | null>(null);
   const chapterVersions = ref<NovelVersion[]>([]);
+  const chapterDrafts = new Map<string, { draft: ChapterDraft; instruction: string; baseline: string }>();
+  const draftOwner = ref("");
+  const draftBaseline = ref("");
+  const draftSnapshot = () => JSON.stringify([chapterDraft.value, chapterInstruction.value]);
+  const chapterDraftDirty = computed(() => Boolean(draftOwner.value) && draftSnapshot() !== draftBaseline.value);
+  function protectUnsavedDrafts(event: BeforeUnloadEvent) {
+    if (!chapterDraftDirty.value && !chapterDrafts.size) return;
+    event.preventDefault();
+    event.returnValue = "";
+  }
+  if (typeof window !== "undefined" && window.addEventListener) {
+    window.addEventListener("beforeunload", protectUnsavedDrafts);
+    if (getCurrentScope()) onScopeDispose(() => window.removeEventListener("beforeunload", protectUnsavedDrafts));
+  }
 
   let activeCanvasChapterRef: ComputedRef<StoryCanvasChapter | null> | null = null;
   let storyCanvasDraftRef: Ref<StoryCanvas> | null = null;
@@ -198,6 +212,7 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
     };
   });
   const editorUpdatedLabel = computed(() => {
+    if (chapterDraftDirty.value) return "有未保存修改 · 切换章节会暂存，离开页面前请保存";
     const updated = activeNovelChapter.value?.updated_at || activeNovelProject.value?.updated_at || "";
     return updated ? `已保存于 ${updated}` : "等待创建项目";
   });
@@ -249,11 +264,12 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
     activeInstructionChapterId.value = chapter?.id || "";
     instructionOptimizationNote.value = "";
     chapterInstruction.value = chapter?.id
-      ? chapterInstructionsById.value[chapter.id] || DEFAULT_CHAPTER_INSTRUCTION
+      ? String(chapter.scene_card?.generation_instruction || "") || DEFAULT_CHAPTER_INSTRUCTION
       : DEFAULT_CHAPTER_INSTRUCTION;
   }
 
   function clearReorderedChapterInstructionCache(project: NovelProject, deletedChapterId: string, deletedOrder: number) {
+    discardChapterDrafts([deletedChapterId]);
     const nextCache = { ...chapterInstructionsById.value };
     delete nextCache[deletedChapterId];
     for (const chapter of project.chapters) {
@@ -280,7 +296,15 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
     };
   }
 
-  function syncChapterDraft(chapter: NovelChapter | null) {
+  function syncChapterDraft(chapter: NovelChapter | null, preserveUnsaved = false) {
+    const nextOwner = chapter?.id || "";
+    if (preserveUnsaved && nextOwner === draftOwner.value && chapterDraftDirty.value) return;
+    if (draftOwner.value && draftOwner.value !== nextOwner && chapterDraftDirty.value) {
+      chapterDrafts.set(draftOwner.value, {
+        draft: JSON.parse(JSON.stringify(chapterDraft.value)), instruction: chapterInstruction.value, baseline: draftBaseline.value
+      });
+    }
+    const cached = nextOwner !== draftOwner.value ? chapterDrafts.get(nextOwner) : undefined;
     rememberChapterInstruction();
     chapterDraft.value = {
       title: stripNovelChapterPrefix(chapter?.title || ""),
@@ -291,6 +315,24 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
       scene_card: sceneCardDraftFromCanvas(chapter?.scene_card, activeCanvasChapterRef?.value || null)
     };
     syncChapterInstruction(chapter);
+    draftOwner.value = nextOwner;
+    draftBaseline.value = draftSnapshot();
+    if (cached) {
+      chapterDraft.value = cached.draft;
+      chapterInstruction.value = cached.instruction;
+      draftBaseline.value = cached.baseline;
+    }
+    chapterDrafts.delete(nextOwner);
+  }
+
+  function markChapterDraftSaved() {
+    draftBaseline.value = draftSnapshot();
+    chapterDrafts.delete(draftOwner.value);
+  }
+
+  function discardChapterDrafts(chapterIds: string[]) {
+    for (const id of chapterIds) chapterDrafts.delete(id);
+    if (chapterIds.includes(draftOwner.value)) draftOwner.value = "";
   }
 
   function replaceNovelProject(project: NovelProject) {
@@ -338,6 +380,8 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
     clearReorderedChapterInstructionCache,
     chapterDraftForApi,
     syncChapterDraft,
+    markChapterDraftSaved,
+    discardChapterDrafts,
     replaceNovelProject,
     novelChapterStatusLabel
   };

@@ -96,6 +96,16 @@ class MemoryService:
         source_message_id: str,
         extracted: list[dict[str, Any]],
     ) -> list[tuple[str, str]]:
+        with self.storage.transaction():
+            session = self.storage.get_session(session_id)
+            if not session or session["frozen"]:
+                return []
+            return self._add_extracted(visitor_id, session_id, character_id, source_message_id, extracted)
+
+    def _add_extracted(
+        self, visitor_id: str, session_id: str, character_id: str,
+        source_message_id: str, extracted: list[dict[str, Any]],
+    ) -> list[tuple[str, str]]:
         stored: list[tuple[str, str]] = []
         for item in extracted:
             content = str(item.get("content") or "").strip()

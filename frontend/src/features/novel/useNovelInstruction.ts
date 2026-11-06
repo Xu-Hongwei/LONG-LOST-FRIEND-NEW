@@ -1,4 +1,4 @@
-import type { ComputedRef, Ref } from "vue";
+import { watch, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
 import { optimizeNovelInstruction } from "./api";
 import type { CanvasActionKey } from "./constants";
 import type { ChapterDraft } from "./useNovelProject";
@@ -37,6 +37,12 @@ export function useNovelInstruction(options: {
   chapterQualityDiagnosis: ComputedRef<Record<string, unknown>>;
   rememberChapterInstruction: () => void;
 }) {
+  let requestId = 0;
+  if (getCurrentScope()) onScopeDispose(() => { requestId++; });
+  watch(() => [options.activeNovelProject.value?.id, options.activeNovelChapter.value?.id], () => {
+    requestId++;
+    options.isOptimizingInstruction.value = false;
+  }, { flush: "sync" });
   function sceneCardInstructionValue(key: string) {
     return compactInstructionText(options.chapterDraft.value.scene_card[key] || "");
   }
@@ -238,6 +244,8 @@ export function useNovelInstruction(options: {
   }
 
   async function applyOptimizedChapterInstruction() {
+    if (options.isOptimizingInstruction.value) return;
+    const ticket = ++requestId;
     const baseInstruction = optimizedChapterInstruction();
     options.chapterInstruction.value = baseInstruction;
     options.rememberChapterInstruction();
@@ -247,6 +255,16 @@ export function useNovelInstruction(options: {
       return;
     }
     options.isOptimizingInstruction.value = true;
+    const snapshot = () => JSON.stringify([options.chapterDraft.value, options.chapterInstruction.value, options.activeCanvasChapter.value, options.projectChapterTargetLength.value]);
+    const original = snapshot();
+    const canApply = () => {
+      if (ticket !== requestId) return false;
+      if (snapshot() !== original) {
+        options.instructionOptimizationNote.value = "优化期间内容已修改，已保留当前输入。";
+        return false;
+      }
+      return true;
+    };
     try {
       const result = await optimizeNovelInstruction(options.activeNovelProject.value.id, {
         chapter_id: options.activeNovelChapter.value?.id || null,
@@ -272,17 +290,19 @@ export function useNovelInstruction(options: {
         quality_diagnosis: options.chapterQualityDiagnosis.value,
         target_length: options.projectChapterTargetLength.value
       });
+      if (!canApply()) return;
       options.chapterInstruction.value = result.instruction || baseInstruction;
       options.rememberChapterInstruction();
       options.instructionOptimizationNote.value = result.source === "remote"
         ? "远程导演优化已应用。"
         : `远程优化不可用，已保留本地骨架${result.diagnostics?.reason ? `：${result.diagnostics.reason}` : "。"}`;
     } catch (err) {
+      if (!canApply()) return;
       options.chapterInstruction.value = baseInstruction;
       options.rememberChapterInstruction();
       options.instructionOptimizationNote.value = `远程优化失败，已保留本地骨架：${readableError(err)}`;
     } finally {
-      options.isOptimizingInstruction.value = false;
+      if (ticket === requestId) options.isOptimizingInstruction.value = false;
     }
   }
 

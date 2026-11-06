@@ -1,4 +1,4 @@
-import { computed, ref, type Ref } from "vue";
+import { computed, ref, watch, getCurrentScope, onScopeDispose, type Ref } from "vue";
 import { generateNovel } from "./api";
 import {
   novelFidelityLabels,
@@ -36,6 +36,20 @@ export function useShortNovel(options: {
   const novelFidelity = ref<NovelFidelity>("polished");
   const novelAtmosphere = ref("温柔、克制、日常");
   const novelResult = ref<NovelGenerateResponse | null>(null);
+  let requestId = 0;
+  let ownsBusy = false;
+  function invalidateRequest() {
+    requestId++;
+    novelResult.value = null;
+    if (ownsBusy) {
+      options.busy.value = false;
+      options.clearNovelProgressTimers();
+      options.setNovelProgress("idle", 0);
+    }
+    ownsBusy = false;
+  }
+  watch(options.sessionId, invalidateRequest, { flush: "sync" });
+  if (getCurrentScope()) onScopeDispose(invalidateRequest);
 
   const novelResultSourceLabel = computed(() => {
     const source = String(novelResult.value?.diagnostics?.source || "");
@@ -57,14 +71,17 @@ export function useShortNovel(options: {
   });
 
   async function generateNovelDraft() {
-    if (!options.sessionId.value) return;
+    if (!options.sessionId.value || options.busy.value) return;
+    const ticket = ++requestId;
+    const session = options.sessionId.value;
+    ownsBusy = true;
     options.novelStudioMode.value = "quick";
     options.busy.value = true;
     options.error.value = "";
     novelResult.value = null;
     options.beginNovelProgress("quick");
     try {
-      novelResult.value = await generateNovel(options.sessionId.value, {
+      const result = await generateNovel(session, {
         message_limit: novelMessageLimit.value,
         perspective: novelPerspective.value,
         form: novelForm.value,
@@ -72,19 +89,25 @@ export function useShortNovel(options: {
         atmosphere: novelAtmosphere.value,
         target_length: novelTargetLength.value
       });
+      if (ticket !== requestId) return;
+      novelResult.value = result;
       options.clearNovelProgressTimers();
       options.setNovelProgress("done", 100);
     } catch (err) {
+      if (ticket !== requestId) return;
       options.error.value = readableError(err);
       options.clearNovelProgressTimers();
       options.setNovelProgress("failed", 100);
     } finally {
-      options.busy.value = false;
+      if (ticket === requestId) {
+        ownsBusy = false;
+        options.busy.value = false;
+      }
     }
   }
 
   function clearNovelResult() {
-    novelResult.value = null;
+    invalidateRequest();
   }
 
   function downloadNovelMarkdown() {

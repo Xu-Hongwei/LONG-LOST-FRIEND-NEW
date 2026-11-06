@@ -92,7 +92,9 @@ export function useNovelProjectActions(options: {
   novelProgressPercent: Ref<number>;
   novelProgressDetail: Ref<string>;
   syncProjectDraft: (project: NovelProject | null) => void;
-  syncChapterDraft: (chapter: NovelChapter | null) => void;
+  syncChapterDraft: (chapter: NovelChapter | null, preserveUnsaved?: boolean) => void;
+  markChapterDraftSaved?: () => void;
+  discardChapterDrafts?: (chapterIds: string[]) => void;
   replaceNovelProject: (project: NovelProject) => void;
   rememberChapterInstruction: () => void;
   clearReorderedChapterInstructionCache: (project: NovelProject, deletedChapterId: string, deletedOrder: number) => void;
@@ -202,7 +204,7 @@ export function useNovelProjectActions(options: {
     const matched = options.activeNovelProject.value?.chapters.find((item) => item.chapter_order === chapter.chapter_order);
     if (matched) {
       options.activeNovelChapterId.value = matched.id;
-      options.syncChapterDraft(matched);
+      options.syncChapterDraft(matched, true);
     }
   }
 
@@ -226,7 +228,7 @@ export function useNovelProjectActions(options: {
         options.activeNovelChapterId.value = options.activeNovelProject.value?.chapters[0]?.id || "";
       }
       options.syncProjectDraft(options.activeNovelProject.value);
-      options.syncChapterDraft(options.activeNovelChapter.value);
+      options.syncChapterDraft(options.activeNovelChapter.value, true);
       await loadChapterVersions();
     } catch (err) {
       if (isCurrent()) options.error.value = readableError(err);
@@ -239,7 +241,7 @@ export function useNovelProjectActions(options: {
     options.activeNovelChapterId.value = options.activeNovelProject.value?.chapters[0]?.id || "";
     options.continuityReport.value = null;
     options.syncProjectDraft(options.activeNovelProject.value);
-    options.syncChapterDraft(options.activeNovelChapter.value);
+    options.syncChapterDraft(options.activeNovelChapter.value, true);
     void loadChapterVersions();
   }
 
@@ -269,7 +271,7 @@ export function useNovelProjectActions(options: {
   function selectNovelChapter(chapterId: string) {
     options.activeNovelChapterId.value = chapterId;
     options.continuityReport.value = null;
-    options.syncChapterDraft(options.activeNovelChapter.value);
+    options.syncChapterDraft(options.activeNovelChapter.value, true);
     void loadChapterVersions();
   }
 
@@ -365,6 +367,7 @@ export function useNovelProjectActions(options: {
     options.error.value = "";
     try {
       await ownedAwait(ticket, () => deleteNovelProject(projectId));
+      options.discardChapterDrafts?.(project?.chapters.map((chapter) => chapter.id) || []);
       options.novelProjects.value = options.novelProjects.value.filter((item) => item.id !== projectId);
       if (options.activeNovelProjectId.value === projectId) {
         const next = options.novelProjects.value[0];
@@ -523,6 +526,7 @@ export function useNovelProjectActions(options: {
       }));
       options.replaceNovelProject(project);
       options.syncStoryCanvasDraft(project);
+      options.markChapterDraftSaved?.();
       await loadChapterVersions();
     } catch (err) {
       if (!isCurrent(ticket)) return;

@@ -178,6 +178,8 @@ const {
   clearReorderedChapterInstructionCache,
   chapterDraftForApi,
   syncChapterDraft,
+  markChapterDraftSaved,
+  discardChapterDrafts,
   replaceNovelProject,
   novelChapterStatusLabel
 } = useNovelProject(activeCharacter);
@@ -313,6 +315,8 @@ const {
   novelProgressDetail,
   syncProjectDraft,
   syncChapterDraft,
+  markChapterDraftSaved,
+  discardChapterDrafts,
   replaceNovelProject,
   rememberChapterInstruction,
   clearReorderedChapterInstructionCache,

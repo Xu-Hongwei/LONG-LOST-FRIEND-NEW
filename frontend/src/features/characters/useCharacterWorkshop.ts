@@ -1,4 +1,4 @@
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch, getCurrentScope, onScopeDispose } from "vue";
 import type { CharacterCard, CharacterSettingType } from "../../types";
 import { createCharacter, deleteCharacter, generateCharacterDraft, updateCharacter, type CharacterWritePayload } from "./api";
 
@@ -303,6 +303,15 @@ export function useCharacterWorkshop(visitorId: { value: string }, characters: {
   const busy = ref(false);
   const error = ref("");
   const savedCharacterId = ref("");
+  let requestId = 0;
+  function invalidateRequest() {
+    requestId++;
+    busy.value = false;
+    generating.value = false;
+    generationDiagnostics.value = {};
+  }
+  watch(() => visitorId.value, () => startBlank(), { flush: "sync" });
+  if (getCurrentScope()) onScopeDispose(invalidateRequest);
 
   const customCharacters = computed(() => characters.value.filter((character) => character.origin === "custom"));
   const builtinCharacters = computed(() => characters.value.filter((character) => character.origin !== "custom"));
@@ -310,6 +319,7 @@ export function useCharacterWorkshop(visitorId: { value: string }, characters: {
   const canSave = computed(() => Boolean(visitorId.value && draft.name.trim()));
 
   function startBlank() {
+    invalidateRequest();
     editingCharacterId.value = "";
     savedCharacterId.value = "";
     error.value = "";
@@ -317,6 +327,7 @@ export function useCharacterWorkshop(visitorId: { value: string }, characters: {
   }
 
   function useTemplate(card: CharacterCard) {
+    invalidateRequest();
     editingCharacterId.value = "";
     savedCharacterId.value = "";
     error.value = "";
@@ -324,6 +335,7 @@ export function useCharacterWorkshop(visitorId: { value: string }, characters: {
   }
 
   function editCharacter(card: CharacterCard) {
+    invalidateRequest();
     editingCharacterId.value = card.id;
     savedCharacterId.value = "";
     error.value = "";
@@ -381,27 +393,32 @@ export function useCharacterWorkshop(visitorId: { value: string }, characters: {
   }
 
   async function save() {
-    if (!canSave.value) return null;
+    if (!canSave.value || busy.value) return null;
+    const ticket = ++requestId;
     busy.value = true;
     error.value = "";
     try {
       const result = editingCharacterId.value
         ? await updateCharacter(editingCharacterId.value, payload())
         : await createCharacter(payload());
+      if (ticket !== requestId) return null;
       editingCharacterId.value = result.id;
       savedCharacterId.value = result.id;
       return result;
     } catch (err) {
+      if (ticket !== requestId) return null;
       error.value = err instanceof Error ? err.message : String(err);
       return null;
     } finally {
-      busy.value = false;
+      if (ticket === requestId) busy.value = false;
     }
   }
 
   async function generateDraft() {
     const prompt = generationPrompt.value.trim();
     if (!visitorId.value || !prompt || busy.value || generating.value) return null;
+    const ticket = ++requestId;
+    const snapshot = JSON.stringify(draft);
     const currentEditingCharacterId = editingCharacterId.value;
     const currentSavedCharacterId = savedCharacterId.value;
     generating.value = true;
@@ -418,6 +435,11 @@ export function useCharacterWorkshop(visitorId: { value: string }, characters: {
         draftMode.value,
         template
       );
+      if (ticket !== requestId) return null;
+      if (JSON.stringify(draft) !== snapshot) {
+        error.value = "扩写期间草稿已修改，已保留当前输入。";
+        return null;
+      }
       generationDiagnostics.value = result.diagnostics || {};
       result.character.setting_type = (result.character.setting_type || draft.setting_type) as CharacterSettingType;
       result.character.setting_notes = fallbackSettingNotes(
@@ -430,27 +452,33 @@ export function useCharacterWorkshop(visitorId: { value: string }, characters: {
       savedCharacterId.value = currentEditingCharacterId ? currentSavedCharacterId : "";
       return result.character;
     } catch (err) {
+      if (ticket !== requestId) return null;
       error.value = err instanceof Error ? err.message : String(err);
       return null;
     } finally {
-      generating.value = false;
-      busy.value = false;
+      if (ticket === requestId) {
+        generating.value = false;
+        busy.value = false;
+      }
     }
   }
 
   async function remove(character: CharacterCard) {
-    if (!visitorId.value || character.origin !== "custom") return false;
+    if (!visitorId.value || character.origin !== "custom" || busy.value) return false;
+    const ticket = ++requestId;
     busy.value = true;
     error.value = "";
     try {
       await deleteCharacter(character.id, visitorId.value);
+      if (ticket !== requestId) return false;
       if (editingCharacterId.value === character.id) startBlank();
       return true;
     } catch (err) {
+      if (ticket !== requestId) return false;
       error.value = err instanceof Error ? err.message : String(err);
       return false;
     } finally {
-      busy.value = false;
+      if (ticket === requestId) busy.value = false;
     }
   }
 
