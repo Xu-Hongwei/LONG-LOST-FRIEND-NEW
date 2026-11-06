@@ -27,6 +27,7 @@ from campus_lite.schemas import MemoryItem
 from campus_lite.state import CharacterStateService
 from campus_lite.storage import Storage, StoragePayloadError
 from campus_lite.story import StoryService
+from test_support import OfflineTestCase
 
 
 class LocalOnlyLlm:
@@ -36,7 +37,7 @@ class LocalOnlyLlm:
         return False
 
 
-class CampusLiteCoreTest(unittest.TestCase):
+class CampusLiteCoreTest(OfflineTestCase):
     def test_llm_router_provider_takes_priority_for_chat_and_optional_embeddings(self) -> None:
         with patch.dict(
             "os.environ",
@@ -268,9 +269,10 @@ class CampusLiteCoreTest(unittest.TestCase):
 
     def test_character_draft_endpoint_returns_clean_json_card(self) -> None:
         class FakeDraftLlm(LlmClient):
-            provider = {"model": "fake", "api_key": "fake", "base_url": "http://fake", "timeout_ms": 1000}
-            embedding_provider = None
-            last_analysis_error = None
+            def __init__(self) -> None:
+                super().__init__()
+                self.provider = {"name": "fake", "model": "fake", "api_key": "fake", "base_url": "http://fake", "timeout_ms": 1000}
+                self.embedding_provider = None
 
             async def generate_character_draft(
                 self,

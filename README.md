@@ -95,6 +95,16 @@ The backend defaults to `http://127.0.0.1:8766`; the frontend dev server uses `h
 
 ## Test
 
+Unified offline check (backend tests, frontend type check and build):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1
+```
+
+This check uses temporary test databases, blocks real HTTP requests from tests,
+and rebuilds `frontend/dist`. It does not start services or call live model providers.
+Use `-Python "path\to\python.exe"` to select an interpreter explicitly.
+
 Backend tests:
 
 ```powershell

@@ -8,9 +8,25 @@
 - `start-backend.ps1`：启动后端。
 - `start-frontend.ps1`：启动前端。
 - `stop-dev.ps1`：按端口停止后端和前端开发进程，默认停止 `8766` 和 `5176`。
-- `test-backend.ps1`：运行后端测试。
+- `test-backend.ps1`：运行隔离的后端离线测试，支持 `-Python` 指定解释器，并透传测试退出码。
+- `check.ps1`：依次运行后端测试、前端类型检查和生产构建；任何阶段失败即返回非零退出码。
 
 ## 常用命令
+
+运行项目统一检查：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1
+```
+
+指定 Python：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1 -Python "D:\APP\miniconda3\python.exe"
+```
+
+统一检查不启动或停止服务，不调用真实模型接口。后端测试只在临时目录创建数据库，
+结束后清理；前端构建会更新被 Git 忽略的 `frontend/dist/`。请先安装项目依赖。
 
 启动本地开发环境：
 

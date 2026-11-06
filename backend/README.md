@@ -2,6 +2,30 @@
 
 后端使用 FastAPI 和 SQLite。入口是 `backend/run.py`，应用在 `campus_lite/api.py` 创建。
 
+导入 `campus_lite.api` 或 `campus_lite.app` 不创建数据库。实际启动时调用
+`create_app()`，测试则显式注入临时 `Storage` 和假模型。原有 `python backend/run.py`
+启动方式保持可用。若直接使用 Uvicorn，请在 `backend` 目录运行：
+
+```powershell
+python -m uvicorn campus_lite.api:create_app --factory --host 127.0.0.1 --port 8766
+```
+
+不再提供导入时立即初始化的 `campus_lite.api:app` 全局对象。
+
+## 离线测试
+
+常规测试继承 `tests/test_support.py` 的 `OfflineTestCase`：每项测试清除模型服务
+环境配置，只允许访问该测试临时目录内的 SQLite 库（或内存库），并拦截 HTTPX
+真实网络传输。FastAPI TestClient 和显式 MockTransport 仍可使用。
+即使业务兜底捕获了拦截异常，清理阶段仍会让测试失败。
+
+模型选择测试可以在测试内临时设置假环境变量；不要使用机器上的真实密钥。
+新增测试应遵循相同隔离方式。导入副作用回归测试使用独立 Python 进程验证。
+
+```powershell
+python -B -m unittest discover -s tests
+```
+
 ## 组合入口
 
 - `campus_lite/api.py`：创建 Storage、角色库、chat/relationship/novel 服务和 LLM，然后注册路由。
