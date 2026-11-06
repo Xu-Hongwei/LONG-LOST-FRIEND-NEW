@@ -245,6 +245,7 @@ class NovelEventPoolEditMixin:
         chapter: Any | None,
         use_mode: str | None = None,
         project: Any | None = None,
+        preserve_plan: bool = False,
     ) -> None:
         contract = self._event_contract_from_event(event, canvas_chapter, use_mode=use_mode, project=project)
         mode = normalize_event_use_mode(contract.get("use_mode"))
@@ -277,8 +278,8 @@ class NovelEventPoolEditMixin:
         previous_sync = self._json_dict(canvas_chapter.get("event_sync"))
         previous_fields = previous_sync.get("fields") if isinstance(previous_sync.get("fields"), dict) else {}
         previous_scene_fields = previous_sync.get("scene_fields") if isinstance(previous_sync.get("scene_fields"), dict) else {}
-        force = mode == "strict"
-        first_guide_sync = mode == "guide" and not previous_sync
+        force = mode == "strict" and not preserve_plan
+        first_guide_sync = mode == "guide" and not previous_sync and not preserve_plan
         flavor = mode == "flavor"
         event_text = str(contract.get("external_event") or "")
         hook = str(contract.get("hook") or "")
@@ -304,7 +305,7 @@ class NovelEventPoolEditMixin:
                 continue
             current = str(canvas_chapter.get(key) or "").strip()
             previous = str(previous_fields.get(key) or "").strip()
-            should_write = force or first_guide_sync or not current or (previous and current == previous)
+            should_write = not current or (not preserve_plan and (force or first_guide_sync or (previous and current == previous)))
             if flavor and key != "ending_hook":
                 should_write = False
             if should_write:
@@ -325,9 +326,9 @@ class NovelEventPoolEditMixin:
                 continue
             current = str(scene.get(key) or "").strip()
             previous = str(previous_scene_fields.get(key) or "").strip()
-            should_write = force or first_guide_sync or not current or (previous and current == previous)
+            should_write = not current or (not preserve_plan and (force or first_guide_sync or (previous and current == previous)))
             if flavor and key == "surface_event":
-                should_write = not current or (previous and current == previous)
+                should_write = not current or (not preserve_plan and previous and current == previous)
             if should_write:
                 scene[key] = clean
                 written_scene_fields[key] = clean
@@ -351,9 +352,9 @@ class NovelEventPoolEditMixin:
                     continue
                 current = str(scene_card.get(key) or "").strip()
                 previous = str(previous_scene_fields.get(key) or "").strip()
-                should_write = force or first_guide_sync or not current or (previous and current == previous)
+                should_write = not current or (not preserve_plan and (force or first_guide_sync or (previous and current == previous)))
                 if flavor and key == "surface_event":
-                    should_write = not current or (previous and current == previous)
+                    should_write = not current or (not preserve_plan and previous and current == previous)
                 if should_write:
                     scene_card[key] = clean
             self._require_storage().update_novel_chapter(chapter["id"], {"scene_card": scene_card}, "system", create_version=False)

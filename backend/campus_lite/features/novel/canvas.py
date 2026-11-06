@@ -1,15 +1,45 @@
 from __future__ import annotations
 
 import json
+from time import perf_counter
 from typing import Any
 
 from ...schemas import NovelProjectResponse
 from .concurrency import NovelConflictError, NovelOperationGuard
 from .config import NOVEL_CANVAS_TIMEOUT_MS
-from .event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters, event_pool_replacement_stats
+from .event_pool import apply_story_event_pool_delta, bind_story_event_pool_to_chapters, event_pool_replacement_stats, score_story_event
 
 
 class NovelCanvasMixin:
+    def _rolling_event_pool_refresh(self, project: Any, canvas: dict[str, Any], from_order: int, count: int) -> dict[str, Any]:
+        pool = canvas.get("event_pool") if isinstance(canvas.get("event_pool"), dict) else {}
+        used_ids = {
+            str(chapter.get("event_pool_id") or "")
+            for chapter in self._canvas_chapters(canvas)
+            if int(chapter.get("chapter_order") or 0) <= from_order
+        }
+        context = {
+            "project": {key: project[key] for key in ("title", "genre", "tone", "worldview", "relationship_setup")},
+            "novel_state": self._novel_state_until(project, from_order),
+            "story_bible": self._json_dict(project["story_bible_json"]),
+            "retired_events": pool.get("retired") or [],
+        }
+        setting_type = str(pool.get("setting_type") or "modern_daily")
+        available = [
+            event for event in pool.get("active", []) if isinstance(event, dict)
+            and event.get("source") in {"remote", "llm", "project", "manual"}
+            and event.get("status") in {"fresh", "planned", "mutated"}
+            and event.get("use_mode") != "free"
+            and str(event.get("id") or "") not in used_ids
+            and not score_story_event(event, {"chapter_order": from_order + 1}, context, setting_type)["blocked"]
+        ]
+        replacement = event_pool_replacement_stats(pool)
+        reason = (
+            "replace_generic_events" if replacement["requires_remote_add"] else
+            "insufficient_candidates" if len(available) < count else "reuse_candidates"
+        )
+        return {"required": reason != "reuse_candidates", "reason": reason, "available_count": len(available)}
+
     async def build_canvas(self, llm: Any, project_id: str) -> NovelProjectResponse:
         storage = self._require_storage()
         project = storage.get_novel_project(project_id)
@@ -201,6 +231,18 @@ class NovelCanvasMixin:
         guard: NovelOperationGuard | None = None,
     ) -> NovelProjectResponse:
         storage = self._require_storage()
+        started = perf_counter()
+        timings: dict[str, int] = {}
+        input_characters: dict[str, int] = {}
+
+        async def call_stage(stage: str, messages: list[dict[str, str]]) -> str:
+            stage_started = perf_counter()
+            input_characters[stage] = sum(len(message["content"]) for message in messages)
+            try:
+                return await llm.chat_complete(messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
+            finally:
+                timings[stage] = round((perf_counter() - stage_started) * 1000)
+
         project = storage.get_novel_project(project_id)
         if not project:
             raise ValueError("Novel project not found")
@@ -232,6 +274,7 @@ class NovelCanvasMixin:
         event_pool_delta_error = ""
         event_pool_first_update = False
         event_pool_replacement = event_pool_replacement_stats(event_canvas.get("event_pool"))
+        refresh = self._rolling_event_pool_refresh(project, event_canvas, from_order, count)
         event_pool_add_count = 0
         try:
             if not llm.configured():
@@ -241,7 +284,7 @@ class NovelCanvasMixin:
                 {"role": "user", "content": self._event_pool_delta_source(project, event_canvas, db_chapters, from_order, count, instruction)},
             ]
             try:
-                event_pool_result = await llm.chat_complete(event_pool_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
+                event_pool_result = await call_stage("event_pool", event_pool_messages) if refresh["required"] else "{}"
                 guard.check()
                 try:
                     event_pool_delta = self._parse_event_pool_delta_response(str(event_pool_result))
@@ -265,7 +308,7 @@ class NovelCanvasMixin:
                 {"role": "system", "content": self._canvas_extend_system_prompt()},
                 {"role": "user", "content": self._canvas_extend_source(canvas_project, event_canvas, db_chapters, from_order, count, instruction)},
             ]
-            canvas_result = await llm.chat_complete(canvas_messages, timeout_ms=NOVEL_CANVAS_TIMEOUT_MS, response_format={"type": "json_object"})
+            canvas_result = await call_stage("canvas", canvas_messages)
             guard.check()
             text = str(canvas_result)
             extension = self._parse_canvas_response(text, fallback)
@@ -306,6 +349,13 @@ class NovelCanvasMixin:
             }
             if event_pool_delta:
                 extension["diagnostics"]["event_pool_update_source"] = "remote"
+        extension["diagnostics"].update({
+            "event_pool_refresh": refresh,
+            "event_pool_update_source": "reused" if not refresh["required"] else extension["diagnostics"].get("event_pool_update_source", "none"),
+            "timings_ms": {**timings, "planning_total": round((perf_counter() - started) * 1000)},
+            "remote_call_count": len(timings),
+            "input_characters": input_characters,
+        })
         materials = storage.list_novel_materials(project_id)
         character_card = None
         try:

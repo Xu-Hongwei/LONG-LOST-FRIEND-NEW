@@ -1092,6 +1092,17 @@ def bind_story_event_pool_to_chapters(
         if str(chapter.get("status") or "").lower() in {"complete", "completed"}:
             continue
         bind_context = {**context, "excluded_event_ids": selected_event_ids}
+        def matches_plan(candidate: dict[str, Any]) -> bool:
+            if not context.get("require_plan_match"):
+                return _event_matches_chapter(candidate, chapter)
+            if candidate.get("id") == chapter.get("event_pool_id"):
+                return True
+            # A shared place or the next chapter's hook is not proof that this
+            # event belongs here. If paraphrases cannot be verified locally,
+            # keep the chapter's own plan instead of guessing a new contract.
+            event_text = _clean_text(candidate.get("event"), 500)
+            plan_text = " ".join(str(chapter.get(key) or "") for key in ("external_event", "trigger_event", "goal"))
+            return len(event_text) >= 8 and event_text in plan_text
         event_id = _clean_text(chapter.get("event_pool_id"), 80)
         event = by_id.get(event_id)
         if event and event.get("use_mode") == "free":
@@ -1112,16 +1123,28 @@ def bind_story_event_pool_to_chapters(
             continue
         prefer_concrete = bool(bind_context.get("prefer_concrete_events"))
         concrete_available = prefer_concrete and _has_available_concrete_event(active, selected_event_ids)
-        current_is_usable = bool(event) and _event_matches_chapter(event, chapter) and not (concrete_available and not _is_concrete_event_source(event))
+        current_is_usable = (
+            bool(event) and str(event.get("id") or "") not in selected_event_ids
+            and matches_plan(event)
+            and not score_story_event(event, chapter, bind_context, setting_type)["blocked"]
+            and not (concrete_available and not _is_concrete_event_source(event))
+        )
         if not current_is_usable:
             event = next((
                 item for item in active
                 if item.get("use_mode") != "free"
                 and str(item.get("id") or "") not in selected_event_ids
                 and (not concrete_available or _is_concrete_event_source(item))
-                and _event_matches_chapter(item, chapter)
+                and matches_plan(item)
+                and not score_story_event(item, chapter, bind_context, setting_type)["blocked"]
             ), None)
             if not event:
+                if context.get("require_plan_match"):
+                    chapter["event_pool_id"] = ""
+                    chapter.pop("event_contract", None)
+                    chapter.pop("event_sync", None)
+                    chapter["event_pool_reasons"] = ["保留章节计划；未找到可确认匹配的候选事件"]
+                    continue
                 event, scored = select_story_event_for_chapter(active, chapter, bind_context, setting_type)
                 if not event:
                     candidates = [
@@ -1139,17 +1162,9 @@ def bind_story_event_pool_to_chapters(
                 scored = score_story_event(event, chapter, bind_context, setting_type)
             chapter["event_pool_id"] = str(event.get("id") or "")
         else:
-            selected, scored = select_story_event_for_chapter(active, chapter, bind_context, setting_type)
-            current_score = score_story_event(event, chapter, bind_context, setting_type)
-            if selected and (
-                str(event.get("id") or "") in selected_event_ids
-                or (prefer_concrete and not _is_concrete_event_source(event) and _is_concrete_event_source(selected))
-                or scored.get("score", 0) >= current_score.get("score", 0) + 12
-            ):
-                event = selected
-                chapter["event_pool_id"] = str(event.get("id") or "")
-            else:
-                scored = current_score
+            # Scores rank unbound candidates; they must not reorder an already
+            # coherent chapter plan merely because another event scores higher.
+            scored = score_story_event(event, chapter, bind_context, setting_type)
         bound = by_id.get(str(chapter.get("event_pool_id") or ""))
         if not bound:
             continue

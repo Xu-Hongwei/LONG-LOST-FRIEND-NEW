@@ -296,7 +296,7 @@ class NovelCanvasPlanningMixin:
             next_canvas.get("event_pool"),
             chapters,
             str(diagnostics.get("setting_type") or "modern_daily"),
-            scoring_context,
+            {**(scoring_context or {}), "require_plan_match": diagnostics.get("source") == "remote"},
         )
         self._sync_bound_event_contracts(next_canvas)
         next_canvas["diagnostics"] = {
@@ -325,7 +325,10 @@ class NovelCanvasPlanningMixin:
             source = str(event.get("source") or "").strip().lower()
             if source not in {"remote", "llm", "project", "manual"}:
                 continue
-            self._sync_event_contract_to_chapter(canvas, chapter, event, None, use_mode=event.get("use_mode") or "guide")
+            self._sync_event_contract_to_chapter(
+                canvas, chapter, event, None,
+                use_mode=event.get("use_mode") or "guide", preserve_plan=True,
+            )
 
     def _dedupe_canvas_acts(self, acts: list[Any], chapter_ids: set[str]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []

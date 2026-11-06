@@ -102,6 +102,14 @@ class NovelCanvasParsingMixin:
         scenes_raw = canvas.get("scenes")
         if not isinstance(chapters_raw, list) or not chapters_raw:
             raise ValueError("Canvas missing chapters")
+        # Models may return the correct numbered chapters in a shuffled array.
+        # Honor an unambiguous declared order before normalizing local numbering.
+        try:
+            orders = [int(item["chapter_order"]) for item in chapters_raw]
+            if min(orders) > 0 and len(set(orders)) == len(orders):
+                chapters_raw = sorted(chapters_raw, key=lambda item: int(item["chapter_order"]))
+        except (KeyError, TypeError, ValueError):
+            pass
         if not isinstance(scenes_raw, list):
             scenes_raw = []
 
@@ -130,7 +138,7 @@ class NovelCanvasParsingMixin:
                 "id": chapter_id,
                 "act_id": str(item.get("act_id") or base.get("act_id") or "act_1"),
                 "chapter_order": index + 1,
-                "event_pool_id": str(item.get("event_pool_id") or base.get("event_pool_id") or ""),
+                "event_pool_id": str(item.get("event_pool_id") or ""),
                 "title": self._normalize_chapter_title(str(item.get("title") or base.get("title") or ""), index + 1),
                 "goal": str(item.get("goal") or base.get("goal") or "")[:500],
                 "external_event": str(item.get("external_event") or base.get("external_event") or "")[:500],
@@ -223,7 +231,7 @@ class NovelCanvasParsingMixin:
         event_pool_source = canvas.get("event_pool") if isinstance(canvas.get("event_pool"), dict) else fallback.get("event_pool")
         event_pool = normalize_story_event_pool(event_pool_source, setting_type)
         event_pool = apply_story_event_pool_delta(event_pool, canvas.get("event_pool_delta"), setting_type)
-        event_pool = bind_story_event_pool_to_chapters(event_pool, chapters, setting_type)
+        event_pool = bind_story_event_pool_to_chapters(event_pool, chapters, setting_type, {"require_plan_match": True})
         if derived_scenes:
             diagnostics = {**diagnostics, "scene_source": "derived_from_chapters"}
         if invalid_scene_tension_count:

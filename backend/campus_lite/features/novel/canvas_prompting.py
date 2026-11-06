@@ -367,6 +367,9 @@ class NovelCanvasPromptMixin:
             "Rolling rule: keep the existing story_promise/progression_protocol unless user edited it; every new chapter must include chapter_drive, progression_role, and promise_targets that serve the protocol.",
             "[滚动规划目标]",
             f"从第 {from_order + 1} 章开始，连续规划后续 {count} 章。chapter_order 必须依次为 {from_order + 1} 到 {from_order + count}。",
+            "事件池是候选素材，不是已经发生的事实，也不是按池中位置排列的时间线。先满足前置事件，再推进其后果。"
+            "每章的 event_pool_id、标题、goal、动作链和场景必须围绕同一个核心事件；不能把下一章的前提移到下一章之后。"
+            "沿用合适的事件候选，不需要每次换一批；只有不适用或缺少必要事件时才返回 event_pool_delta。",
             instruction or "承接已写正文，规划下一组有事件、有协作、有轻微阻碍和具体钩子的题材内章节。",
             "[硬约束]",
             "不要重写第 1 章到当前章节，不要让后续章节重复已经发生的偶遇、找话题或相同打断。"
