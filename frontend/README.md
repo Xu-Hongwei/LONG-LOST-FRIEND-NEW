@@ -2,6 +2,12 @@
 
 前端使用 Vue 3、TypeScript 和 Vite。组合页仍是 `src/App.vue`，但主要业务状态已经拆到 `src/features/`。
 
+`npm run dev` 默认监听 127.0.0.1:5176；构建后的 `npm run preview` 默认监听
+127.0.0.1:4176。二者均将 `/api` 代理至 `CAMPUS_BACKEND_PORT`（默认 8766）。
+前端端口可通过 `CAMPUS_FRONTEND_PORT` / `CAMPUS_PREVIEW_PORT` 设置，端口占用时直接失败。
+PowerShell 启动脚本会加载根目录 `config.local.ps1`；直接 npm 命令只读取继承环境。
+Vite 缓存写入根目录 `runtime/vite-cache/`，模型密钥不得使用 `VITE_*` 命名。
+
 ## 入口
 
 - `src/main.ts`：挂载 Vue 应用。

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import uuid
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -29,6 +32,7 @@ def create_app(
     llm: LlmClient | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Campus Pulse Lite", version="0.1.0")
+    instance_id = os.getenv("CAMPUS_RUN_ID") or uuid.uuid4().hex
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -54,6 +58,7 @@ def create_app(
     def health() -> dict[str, object]:
         return {
             "ok": True,
+            "instance_id": instance_id,
             "llm_configured": llm.configured(),
             "llm_provider": llm.provider_name(),
             "embedding_configured": llm.embedding_configured(),

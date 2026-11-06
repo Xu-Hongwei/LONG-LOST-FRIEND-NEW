@@ -1,20 +1,15 @@
-param([string]$Python = "")
+param([string]$Python = "", [switch]$NoLocalConfig)
 
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $backend = Join-Path $root "backend"
-if (-not $Python) {
-    if (Test-Path "D:\APP\miniconda3\python.exe") {
-        $Python = "D:\APP\miniconda3\python.exe"
-    } else {
-        $Python = "python"
-    }
-}
+. (Join-Path $PSScriptRoot 'dev-common.ps1')
+Initialize-DevConfig -Python $Python -NoLocalConfig:$NoLocalConfig
 
 Push-Location $backend
 try {
-    & $Python -B -m unittest discover -s tests
+    & $script:PythonExe -B -m unittest discover -s tests
     $testExitCode = $LASTEXITCODE
 } finally {
     Pop-Location

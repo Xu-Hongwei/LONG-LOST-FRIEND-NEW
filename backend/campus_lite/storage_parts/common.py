@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data"
-DB_PATH = DATA_DIR / "campus_lite.db"
+_configured_path = Path(os.getenv("CAMPUS_DB_PATH") or "data/campus_lite.db")
+DB_PATH = (_configured_path if _configured_path.is_absolute() else PROJECT_ROOT / _configured_path).resolve()
 
 JSON_LIMITS = {
     "story_canvas_json": 36000,

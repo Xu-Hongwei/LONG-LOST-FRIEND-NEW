@@ -12,6 +12,11 @@ python -m uvicorn campus_lite.api:create_app --factory --host 127.0.0.1 --port 8
 
 不再提供导入时立即初始化的 `campus_lite.api:app` 全局对象。
 
+`backend/run.py` 读取 `CAMPUS_BACKEND_PORT`（默认 8766）；`CAMPUS_DB_PATH` 可指定数据库，
+相对路径基于项目根目录，默认仍为 `data/campus_lite.db`。PowerShell 启动脚本加载
+`config.local.ps1`；直接运行 Python 时需预先设置环境变量。`/api/health` 增加每次启动的
+`instance_id`，供启动脚本确认响应来自本次实例。健康检查不验证远程模型连通性。
+
 ## 离线测试
 
 常规测试继承 `tests/test_support.py` 的 `OfflineTestCase`：每项测试清除模型服务

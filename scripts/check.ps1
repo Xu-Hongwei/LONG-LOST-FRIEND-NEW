@@ -1,4 +1,4 @@
-param([string]$Python = "")
+param([string]$Python = "", [switch]$NoLocalConfig)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -6,6 +6,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Write-Host "[1/2] Backend offline tests"
 $testArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $PSScriptRoot "test-backend.ps1"))
 if ($Python) { $testArguments += @("-Python", $Python) }
+if ($NoLocalConfig) { $testArguments += '-NoLocalConfig' }
 & powershell @testArguments
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

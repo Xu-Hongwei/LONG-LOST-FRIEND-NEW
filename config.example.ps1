@@ -1,0 +1,25 @@
+# Copy to config.local.ps1 (ignored by Git). Scripts load it before starting services.
+# Interpreter: -Python > CAMPUS_PYTHON > .venv\Scripts\python.exe > python on PATH.
+# $env:CAMPUS_PYTHON = 'D:\path\to\python.exe'
+$env:CAMPUS_BACKEND_PORT = '8766'
+$env:CAMPUS_FRONTEND_PORT = '5176'
+$env:CAMPUS_PREVIEW_PORT = '4176'
+# Relative database paths resolve from the project root.
+# $env:CAMPUS_DB_PATH = 'data/campus_lite.db'
+# Router takes priority over DashScope, DeepSeek, then ARK. Never put secrets in VITE_*.
+# $env:LLM_ROUTER_API_KEY = 'your-key'
+# $env:LLM_ROUTER_BASE_URL = 'https://your-provider.example/v1'
+# $env:LLM_ROUTER_MODEL = 'your-model'
+# $env:LLM_ROUTER_TIMEOUT_MS = '12000'
+# $env:LLM_ROUTER_EMBEDDING_MODEL = 'your-embedding-model'
+# $env:DASHSCOPE_API_KEY = 'your-key'
+# $env:DASHSCOPE_MODEL = 'your-model'
+# $env:DEEPSEEK_API_KEY = 'your-key'
+# $env:DEEPSEEK_MODEL = 'your-model'
+# $env:ARK_API_KEY = 'your-key'
+# $env:ARK_MODEL = 'your-model'
+# $env:CHARACTER_DRAFT_TIMEOUT_MS = '60000'
+# $env:NOVEL_GENERATION_TIMEOUT_MS = '120000'
+# $env:NOVEL_CANVAS_TIMEOUT_MS = '180000'
+# $env:NOVEL_PLANNING_TIMEOUT_MS = '90000'
+# $env:NOVEL_EVENT_BINDING_TIMEOUT_MS = '24000'

@@ -6,6 +6,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -15,7 +16,8 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB = ROOT / "data" / "campus_lite.db"
+_configured_path = Path(os.getenv("CAMPUS_DB_PATH") or "data/campus_lite.db")
+DEFAULT_DB = (_configured_path if _configured_path.is_absolute() else ROOT / _configured_path).resolve()
 TABLES = (
     "visitors", "characters", "sessions", "messages", "memories",
     "character_bonds", "relationship_events", "story_items", "novel_projects",

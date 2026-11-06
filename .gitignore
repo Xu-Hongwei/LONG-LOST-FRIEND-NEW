@@ -50,6 +50,7 @@ MANIFEST
 
 # Python Virtual Environments
 .env
+config.local.ps1
 .venv
 env/
 venv/

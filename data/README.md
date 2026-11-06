@@ -19,6 +19,10 @@
 python scripts/data_tools.py backup
 ```
 
+默认源库读取环境变量 `CAMPUS_DB_PATH`，未设置时为 `data/campus_lite.db`。
+Python 命令不自动执行 `config.local.ps1`：使用自定义库时先加载该配置，或显式传入
+`--database`，避免备份到另一份库。
+
 工具只读打开原库，通过 SQLite backup 接口获取一致性快照，包含 WAL 中已提交的数据，
 不包含尚未提交的事务。每份备份使用新的独立目录，`manifest.json` 最后写入，记录 UTC 时间、
 代码提交、工作区是否有改动、文件 SHA256、大小、主要表记录数和外键检查结果。

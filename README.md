@@ -64,6 +64,11 @@ Detailed notes live beside each module. Start with `backend/README.md`, `fronten
 
 ## Run
 
+Optional local configuration: copy `config.example.ps1` to `config.local.ps1` and edit it.
+Do not overwrite an existing local config. It is ignored by Git. The PowerShell startup/test
+scripts load this file; direct Python/npm commands only read their inherited environment.
+See [scripts/README.md](scripts/README.md) for ports, interpreter selection and logs.
+
 One-shot local dev startup:
 
 ```powershell
@@ -92,6 +97,9 @@ npm run dev
 ```
 
 The backend defaults to `http://127.0.0.1:8766`; the frontend dev server uses `http://127.0.0.1:5176`.
+Managed startup waits for readiness and records process identities under `runtime/`.
+Managed stop only stops those recorded processes; manually launched services should be stopped
+in their original terminal. Use `start-dev.ps1 -Preview` after a build for local preview on 4176.
 
 ## Test
 
