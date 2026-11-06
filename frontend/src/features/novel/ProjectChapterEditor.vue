@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref, watch } from "vue";
 import type { CanvasActionKey } from "./constants";
 import type { ChapterSceneCardDraft } from "./canvas";
 import type { NovelChapter, NovelChapterStatus, StoryCanvasChapter, StoryCanvasEvent } from "../../types";
@@ -19,7 +20,7 @@ type ChapterLengthGuide = {
   detail: string;
 };
 
-defineProps<{
+const props = defineProps<{
   activeNovelChapter: NovelChapter;
   activeCanvasChapter: StoryCanvasChapter | null;
   activeCanvasEvent: StoryCanvasEvent | null;
@@ -35,13 +36,16 @@ defineProps<{
   novelEditorFont: "serif" | "sans";
   activeChapterStatusLabel: string;
   editorUpdatedLabel: string;
+  chapterDraftNotice: string;
+  chapterDraftDirty: boolean;
 }>();
 
 const chapterDraft = defineModel<ChapterDraft>("chapterDraft", { required: true });
 const chapterInstruction = defineModel<string>("chapterInstruction", { required: true });
 const projectChapterTargetLength = defineModel<number>("projectChapterTargetLength", { required: true });
 
-defineEmits<{
+const emit = defineEmits<{
+  discardDraft: [];
   checkContinuity: [];
   saveChapter: [];
   deleteChapter: [];
@@ -50,6 +54,10 @@ defineEmits<{
   clearEventBinding: [];
   rebindEvent: [];
 }>();
+
+const confirmingDiscard = ref(false);
+watch(() => [props.activeNovelChapter.id, props.chapterDraftDirty], () => { confirmingDiscard.value = false; });
+function discardDraft() { confirmingDiscard.value = false; emit("discardDraft"); }
 
 function eventSyncLabel(chapter: StoryCanvasChapter | null) {
   const sync = chapter?.event_sync;
@@ -146,6 +154,15 @@ function contractList(chapter: StoryCanvasChapter | null, key: "continuity_hits"
 
 <template>
   <section class="chapter-editor">
+    <div v-if="chapterDraftNotice || chapterDraftDirty" class="chapter-draft-recovery" role="status">
+      <span>{{ chapterDraftNotice || '未保存修改已暂存到当前浏览器；请保存到项目以长期保留。' }}</span>
+      <button v-if="chapterDraftDirty && !confirmingDiscard" type="button" :disabled="novelProjectBusy" @click="confirmingDiscard = true">放弃草稿，载入已保存内容</button>
+      <div v-if="chapterDraftDirty && confirmingDiscard" class="draft-discard-confirmation">
+        <span>放弃本章未保存的修改？</span>
+        <button type="button" :disabled="novelProjectBusy" @click="discardDraft">确认放弃草稿</button>
+        <button type="button" @click="confirmingDiscard = false">继续编辑</button>
+      </div>
+    </div>
     <div class="chapter-editor-head">
       <div>
         <p class="eyebrow">Chapter {{ activeNovelChapter.chapter_order }}</p>
@@ -317,3 +334,31 @@ function contractList(chapter: StoryCanvasChapter | null, key: "continuity_hits"
     </div>
   </section>
 </template>
+
+<style scoped>
+.chapter-draft-recovery {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border: 1px solid #d8cbb7;
+  border-radius: 12px;
+  background: #faf5e9;
+  color: #5b4a32;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.chapter-draft-recovery button {
+  padding: 6px 10px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.draft-discard-confirmation { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+</style>

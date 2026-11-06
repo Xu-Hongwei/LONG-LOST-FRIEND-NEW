@@ -172,6 +172,9 @@ const {
   chapterLengthGuide,
   chapterQualityDiagnosis,
   editorUpdatedLabel,
+  chapterDraftNotice,
+  chapterDraftDirty,
+  discardActiveChapterDraft,
   bindStoryCanvasContext,
   syncProjectDraft,
   rememberChapterInstruction,
@@ -786,6 +789,9 @@ function downloadNovelProjectMarkdown() {
             :novel-editor-font="novelEditorFont"
             :active-chapter-status-label="novelChapterStatusLabel(activeNovelChapter?.status)"
             :editor-updated-label="editorUpdatedLabel"
+            :chapter-draft-notice="chapterDraftNotice"
+            :chapter-draft-dirty="chapterDraftDirty"
+            @discard-draft="discardActiveChapterDraft"
             @check-continuity="checkActiveContinuity"
             @save-chapter="saveNovelChapter"
             @delete-chapter="deleteActiveNovelChapter"

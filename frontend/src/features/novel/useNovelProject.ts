@@ -1,4 +1,5 @@
-import { computed, ref, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
+import { computed, ref, watch, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
+import { chapterDraftKey, createChapterDraftStorage, type StoredChapterDraft } from "./chapterDraftStorage";
 import { DEFAULT_CHAPTER_INSTRUCTION, novelChapterStatusLabels } from "./constants";
 import {
   derivedSceneCardFromCanvasChapter,
@@ -42,6 +43,10 @@ type NovelVersionDisplay = NovelVersion & {
   restoreCount: number;
   sourceKeys: string[];
 };
+
+function chapterServerSnapshot(chapter: NovelChapter | null) {
+  return JSON.stringify(chapter ? [chapter.title, chapter.goal, chapter.summary, chapter.body, chapter.status, chapter.scene_card] : null);
+}
 
 function isInstructionLikeGoal(text: string) {
   const value = text.trim();
@@ -88,13 +93,49 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
   const instructionOptimizationNote = ref("");
   const continuityReport = ref<NovelContinuityReport | null>(null);
   const chapterVersions = ref<NovelVersion[]>([]);
-  const chapterDrafts = new Map<string, { draft: ChapterDraft; instruction: string; baseline: string }>();
+  const chapterDrafts = new Map<string, StoredChapterDraft>();
+  const unprotectedDrafts = new Set<string>();
+  const draftStorage = createChapterDraftStorage();
+  const draftStorageIssue = ref("");
+  const draftRecovered = ref(false);
+  const draftServerChanged = ref(false);
+  let persistentKey = "";
+  let serverSnapshot = "";
+  let syncingDraft = false;
   const draftOwner = ref("");
   const draftBaseline = ref("");
   const draftSnapshot = () => JSON.stringify([chapterDraft.value, chapterInstruction.value]);
   const chapterDraftDirty = computed(() => Boolean(draftOwner.value) && draftSnapshot() !== draftBaseline.value);
+  const chapterDraftNotice = computed(() => draftStorageIssue.value || (draftServerChanged.value
+    ? "已恢复本机草稿，但项目中保存的章节已有变化，请核对后再保存。"
+    : draftRecovered.value && chapterDraftDirty.value ? "已恢复上次未保存的本机草稿。确认后请保存到项目。" : ""));
+  function storedDraft(): StoredChapterDraft {
+    return { version: 1, draft: JSON.parse(JSON.stringify(chapterDraft.value)),
+      instruction: chapterInstruction.value, serverSnapshot };
+  }
+  function storageAction(action: () => void) {
+    try { action(); draftStorageIssue.value = ""; return true; }
+    catch (error) { draftStorageIssue.value = error instanceof Error ? error.message : "浏览器暂存失败，请保存到项目。"; return false; }
+  }
+  function persistDraft() {
+    if (syncingDraft || !draftOwner.value) return;
+    if (!persistentKey) {
+      if (chapterDraftDirty.value) unprotectedDrafts.add(draftOwner.value);
+      else unprotectedDrafts.delete(draftOwner.value);
+      return;
+    }
+    // Writes are synchronous: even an immediate close after typing is covered.
+    const persisted = storageAction(() => {
+      if (chapterDraftDirty.value) draftStorage.save(persistentKey, storedDraft());
+      else draftStorage.remove(persistentKey);
+    });
+    if (persisted || !chapterDraftDirty.value) unprotectedDrafts.delete(draftOwner.value);
+    else unprotectedDrafts.add(draftOwner.value);
+  }
+  watch([chapterDraft, chapterInstruction], persistDraft, { deep: true, flush: "sync" });
   function protectUnsavedDrafts(event: BeforeUnloadEvent) {
-    if (!chapterDraftDirty.value && !chapterDrafts.size) return;
+    if (chapterDraftDirty.value) persistDraft();
+    if (!unprotectedDrafts.size) return;
     event.preventDefault();
     event.returnValue = "";
   }
@@ -212,7 +253,9 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
     };
   });
   const editorUpdatedLabel = computed(() => {
-    if (chapterDraftDirty.value) return "有未保存修改 · 切换章节会暂存，离开页面前请保存";
+    if (chapterDraftDirty.value) return draftStorageIssue.value || !persistentKey
+      ? "有未保存修改 · 请保存到项目后再关闭页面"
+      : "有未保存修改 · 已暂存到本机浏览器，重新打开本章可恢复";
     const updated = activeNovelChapter.value?.updated_at || activeNovelProject.value?.updated_at || "";
     return updated ? `已保存于 ${updated}` : "等待创建项目";
   });
@@ -297,14 +340,22 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
   }
 
   function syncChapterDraft(chapter: NovelChapter | null, preserveUnsaved = false) {
-    const nextOwner = chapter?.id || "";
+    const nextKey = chapterDraftKey(activeNovelProject.value, chapter?.id || "");
+    const nextOwner = chapter ? nextKey || `${activeNovelProject.value?.id || ""}:${chapter.id}` : "";
     if (preserveUnsaved && nextOwner === draftOwner.value && chapterDraftDirty.value) return;
     if (draftOwner.value && draftOwner.value !== nextOwner && chapterDraftDirty.value) {
-      chapterDrafts.set(draftOwner.value, {
-        draft: JSON.parse(JSON.stringify(chapterDraft.value)), instruction: chapterInstruction.value, baseline: draftBaseline.value
-      });
+      chapterDrafts.set(draftOwner.value, storedDraft());
     }
-    const cached = nextOwner !== draftOwner.value ? chapterDrafts.get(nextOwner) : undefined;
+    let cached = preserveUnsaved ? chapterDrafts.get(nextOwner) : undefined;
+    draftStorageIssue.value = "";
+    if (nextKey && nextOwner !== draftOwner.value) {
+      const loaded = storageAction(() => {
+        const saved = draftStorage.load(nextKey);
+        if (preserveUnsaved && !cached && saved) cached = saved;
+      });
+      if (!loaded && cached) unprotectedDrafts.add(nextOwner);
+    }
+    syncingDraft = true;
     rememberChapterInstruction();
     chapterDraft.value = {
       title: stripNovelChapterPrefix(chapter?.title || ""),
@@ -316,23 +367,49 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
     };
     syncChapterInstruction(chapter);
     draftOwner.value = nextOwner;
+    persistentKey = nextKey;
+    serverSnapshot = chapterServerSnapshot(chapter);
     draftBaseline.value = draftSnapshot();
+    draftRecovered.value = Boolean(cached);
+    draftServerChanged.value = Boolean(cached && cached.serverSnapshot !== serverSnapshot);
     if (cached) {
       chapterDraft.value = cached.draft;
       chapterInstruction.value = cached.instruction;
-      draftBaseline.value = cached.baseline;
+      // Retain the original server fingerprint until the author saves or
+      // explicitly discards the draft, including across subsequent reloads.
+      serverSnapshot = cached.serverSnapshot;
     }
     chapterDrafts.delete(nextOwner);
+    if (!cached) unprotectedDrafts.delete(nextOwner);
+    syncingDraft = false;
+    if (cached && unprotectedDrafts.has(nextOwner)) persistDraft();
+    if (!cached && !preserveUnsaved && persistentKey) storageAction(() => draftStorage.remove(persistentKey));
   }
 
   function markChapterDraftSaved() {
     draftBaseline.value = draftSnapshot();
     chapterDrafts.delete(draftOwner.value);
+    unprotectedDrafts.delete(draftOwner.value);
+    draftRecovered.value = false;
+    draftServerChanged.value = false;
+    serverSnapshot = chapterServerSnapshot(activeNovelChapter.value);
+    if (persistentKey) storageAction(() => draftStorage.remove(persistentKey));
   }
 
   function discardChapterDrafts(chapterIds: string[]) {
-    for (const id of chapterIds) chapterDrafts.delete(id);
-    if (chapterIds.includes(draftOwner.value)) draftOwner.value = "";
+    for (const id of chapterIds) {
+      const project = novelProjects.value.find(item => item.chapters.some(chapter => chapter.id === id)) || activeNovelProject.value;
+      const key = chapterDraftKey(project, id);
+      const owner = key || `${project?.id || ""}:${id}`;
+      chapterDrafts.delete(owner);
+      unprotectedDrafts.delete(owner);
+      if (key) storageAction(() => { draftStorage.load(key); draftStorage.remove(key); });
+      if (owner === draftOwner.value) { draftOwner.value = ""; persistentKey = ""; }
+    }
+  }
+
+  function discardActiveChapterDraft() {
+    syncChapterDraft(activeNovelChapter.value);
   }
 
   function replaceNovelProject(project: NovelProject) {
@@ -373,6 +450,9 @@ export function useNovelProject(activeCharacter: ComputedRef<CharacterCard | nul
     chapterLengthGuide,
     chapterQualityDiagnosis,
     editorUpdatedLabel,
+    chapterDraftNotice,
+    chapterDraftDirty,
+    discardActiveChapterDraft,
     bindStoryCanvasContext,
     syncProjectDraft,
     currentSceneCardForSave,

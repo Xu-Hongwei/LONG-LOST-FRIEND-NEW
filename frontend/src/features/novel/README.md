@@ -7,6 +7,7 @@
 - `api.ts`：短篇、项目、画布、事件池、章节、版本、连续性检查和指令优化请求。
 - `useShortNovel.ts`：短篇参数、生成结果标签和 Markdown 导出。
 - `useNovelProject.ts`：项目、章节、版本和编辑器派生状态。
+- `chapterDraftStorage.ts`：章节本机草稿的版本校验、身份隔离、读写失败处理和旧页面覆盖检查；与服务端版本保存分开。
 - `useNovelProjectActions.ts`：创建/保存项目、章节增删、章节生成、版本恢复、连续性检查、画布保存和事件池操作。
 - `useNovelInstruction.ts`：章节指令骨架、本地 helper 和远程指令优化。
 - `useStoryCanvas.ts`、`canvas.ts`：Story Canvas、scene card、事件绑定和画布状态。
