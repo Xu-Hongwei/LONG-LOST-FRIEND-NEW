@@ -2,6 +2,27 @@
 
 后端使用 FastAPI 和 SQLite。入口是 `backend/run.py`，应用在 `campus_lite/api.py` 创建。
 
+## 安装与依赖
+
+验证平台是 Windows x64 / Python 3.12。在项目根目录创建独立 `.venv` 后运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements-lock.txt
+.\.venv\Scripts\python.exe -m pip check
+```
+
+`requirements.txt` 固定四项直接依赖及 Uvicorn 的 `standard` 扩展；
+`requirements-lock.txt` 引用它，并固定干净环境解析出的间接依赖。
+普通安装和 CI 均使用锁文件，避免每次安装解析到不同版本。
+锁文件限定上述验证平台，其他平台或 Python 版本需单独验证。
+
+更新依赖时，修改直接依赖，在另一个空虚拟环境中安装 `requirements.txt`，
+再用该环境的 `python -m pip freeze` 核对完整依赖树；保留锁文件的
+`-r requirements.txt`，将其余依赖更新为精确版本。通过完整检查和临时服务启停验证后一起提交。
+不要从系统 Python、Conda 或混用其他项目的环境导出依赖清单。
+
+## 启动
+
 导入 `campus_lite.api` 或 `campus_lite.app` 不创建数据库。实际启动时调用
 `create_app()`，测试则显式注入临时 `Storage` 和假模型。原有 `python backend/run.py`
 启动方式保持可用。若直接使用 Uvicorn，请在 `backend` 目录运行：

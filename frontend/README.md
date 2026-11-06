@@ -2,6 +2,14 @@
 
 前端使用 Vue 3、TypeScript 和 Vite。组合页仍是 `src/App.vue`，但主要业务状态已经拆到 `src/features/`。
 
+验证环境为 Node.js 24 / npm 11。在本目录用 `npm ci` 按 `package-lock.json` 安装。
+`vue` 和 `html2canvas` 是运行依赖；Vite、Vue 插件、TypeScript、类型检查器和测试打包用的
+`esbuild` 是直接声明的开发依赖。开发、测试和构建时需安装开发依赖。
+`node_modules`、`dist` 和缓存不入库；图片原文件来自 `public/`。
+
+普通安装不修改锁文件。主动更新依赖时使用 `npm install`，审查 `package.json` 与
+`package-lock.json` 的差异，并在干净目录用 `npm ci`、`npm test` 和 `npm run build` 验证。
+
 `npm run dev` 默认监听 127.0.0.1:5176；构建后的 `npm run preview` 默认监听
 127.0.0.1:4176。二者均将 `/api` 代理至 `CAMPUS_BACKEND_PORT`（默认 8766）。
 前端端口可通过 `CAMPUS_FRONTEND_PORT` / `CAMPUS_PREVIEW_PORT` 设置，端口占用时直接失败。

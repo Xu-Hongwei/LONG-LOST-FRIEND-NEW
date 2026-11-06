@@ -64,6 +64,22 @@ Detailed notes live beside each module. Start with `backend/README.md`, `fronten
 
 ## Run
 
+首次安装以 **Windows x64、Python 3.12、Node.js 24、npm 11** 为验证基线。
+版本系列记录在 `.python-version`、`.node-version` 和 `frontend/package.json`。
+在项目根目录运行以下命令，任一步失败时先处理错误，再继续：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements-lock.txt
+.\.venv\Scripts\python.exe -m pip check
+npm.cmd ci --prefix frontend
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1 -NoLocalConfig
+```
+
+如果没有 Windows Python Launcher，可用已确认是 3.12 的 `python` 替代 `py -3.12`。
+首次安装不需要模型密钥；离线检查不验证真实模型的输出质量。
+依赖目录、构建结果、缓存和数据库不入库。前端图片原文件保留在 `frontend/public/`，构建时自动复制。
+
 Optional local configuration: copy `config.example.ps1` to `config.local.ps1` and edit it.
 Do not overwrite an existing local config. It is ignored by Git. The PowerShell startup/test
 scripts load this file; direct Python/npm commands only read their inherited environment.
@@ -84,15 +100,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\stop-dev.ps1
 Backend:
 
 ```powershell
-python -m pip install -r backend\requirements.txt
-python backend\run.py
+.\.venv\Scripts\python.exe backend\run.py
 ```
 
 Frontend:
 
 ```powershell
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -112,6 +127,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1
 This check uses temporary test databases, blocks real HTTP requests from tests,
 and rebuilds `frontend/dist`. It does not start services or call live model providers.
 Use `-Python "path\to\python.exe"` to select an interpreter explicitly.
+
+`.github/workflows/check.yml` 在推送、PR 或手动触发时，从锁文件安装到独立环境，
+运行上述检查及临时服务启停、API 代理和预览验证。流水线使用 Windows，与当前启动脚本一致；
+不加载本地配置、不需要模型密钥、不部署应用。
+`python scripts/check-repository.py` 检查是否误将忽略的依赖、缓存或运行数据重新加入 Git。
+工作流文件提交到本地并不代表远程检查已执行；需要推送到 GitHub 后查看实际结果。
 
 Backend tests:
 
